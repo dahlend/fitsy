@@ -90,6 +90,7 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    environment: cargo
     needs: wheels
     steps:
       - uses: actions/checkout@v4
