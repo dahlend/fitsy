@@ -290,6 +290,7 @@ impl FitsFile {
 
     /// Borrow the data section padded out to the next 2880-byte
     /// boundary. Same caching strategy as [`data_bytes`].
+    #[cfg(feature = "python")]
     fn data_padded_bytes(&self, i: usize) -> Result<&[u8]> {
         let span = &self.hdu_spans[i];
         let padded = pad_to_block(span.data_logical_len) as usize;
@@ -317,7 +318,7 @@ impl FitsFile {
     /// return type uniform); callers that hold a [`FitsFile`]
     /// opened with [`FitsFile::from_bytes`] can use
     /// [`FitsFile::hdu`] instead to avoid the copy.
-    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    #[cfg(feature = "python")]
     pub(crate) fn read_data_owned(&self, i: usize) -> Result<Vec<u8>> {
         let span = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
@@ -352,7 +353,7 @@ impl FitsFile {
     /// Used by the lazy `section[a:b]` Python read path so that
     /// reading a small tile out of a huge image only pays for the
     /// tile bytes, not the whole HDU.
-    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    #[cfg(feature = "python")]
     pub(crate) fn read_image_subarray_be(
         &self,
         i: usize,
@@ -532,7 +533,7 @@ impl FitsFile {
     /// directly into a writer when persisting modifications without
     /// re-encoding. Returns `None` if `i` is out of range. Loads the
     /// data section from disk if it has not been read yet.
-    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    #[cfg(feature = "python")]
     pub(crate) fn hdu_raw_padded(&self, i: usize) -> Result<Option<Vec<u8>>> {
         if i >= self.hdu_spans.len() {
             return Ok(None);
