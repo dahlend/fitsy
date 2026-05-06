@@ -1,0 +1,63 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fitsy"
+version = "0.1.0"
+description = "Strictly-conformant FITS 4.0 reader and writer."
+readme = "readme.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = ["numpy>=1.23"]
+
+[project.urls]
+Homepage = "https://github.com/ddahlen/fitsy"
+Repository = "https://github.com/ddahlen/fitsy"
+Documentation = "https://github.com/ddahlen/fitsy#readme"
+Changelog = "https://github.com/ddahlen/fitsy/blob/main/CHANGELOG.md"
+Issues = "https://github.com/ddahlen/fitsy/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+docs = [
+    "sphinx>=7",
+    "furo",
+    "sphinx-autodoc-typehints",
+    "sphinx-copybutton",
+    "myst-parser",
+    "numpy>=1.23",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.maturin]
+features = ["python"]
+module-name = "fitsy"
+strip = true
+include = [
+    { path = "stubs/fitsy.pyi", format = "wheel" },
+    { path = "stubs/py.typed", format = "wheel" },
+]

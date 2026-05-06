@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Build wheels for every supported platform in parallel.
+  wheels:
+    name: Wheel (${{ matrix.platform_id }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform_id: manylinux_x86_64
+
+          - os: ubuntu-24.04-arm
+            platform_id: manylinux_aarch64
+
+          - os: windows-latest
+            platform_id: win_amd64
+
+          - os: macos-latest
+            platform_id: macosx_arm64
+
+          # MacOS - last remaining intel mac
+          - os: macos-15-intel
+            platform_id: macosx_intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform_id }}
+      - name: Build wheel (Linux -- manylinux container)
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --features python --out target/wheels
+          manylinux: auto
+      - name: Build wheel (macOS / Windows)
+        if: "!startsWith(matrix.os, 'ubuntu')"
+        run: |
+          pip install maturin
+          maturin build --release --features python
+      - name: Run Python tests
+        shell: bash
+        run: |
+          pip install pytest numpy
+          pip install --no-index --find-links target/wheels fitsy
+          pytest tests/python -v
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform_id }}
+          path: target/wheels/*.whl
+          retention-days: 1
+
+  # Publish all wheels to PyPI once every platform build succeeds.
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: wheels
+    environment: pypi
+    permissions:
+      id-token: write  # required for trusted publishing (OIDC)
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Publish the crate to crates.io.
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: wheels
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo publish
+        run: cargo publish --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_KEY }}

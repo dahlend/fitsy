@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 48">
+
+  <!-- FIT -->
+  <text x="0" y="36"
+        font-family="Helvetica, Arial, sans-serif"
+        font-size="40"
+        font-weight="normal"
+        fill="#f59e0b">FIT</text>
+
+  <!-- Galaxy as S: centered at (74, 21), scaled to cap height -->
+  <g transform="translate(74,23) scale(0.95) translate(-43,-28)">
+    <g transform="rotate(30 43 28)">
+      <ellipse cx="43" cy="28" rx="14" ry="5.5" fill="#2040a0" opacity="0.4"/>
+      <ellipse cx="43" cy="28" rx="10" ry="4"   fill="#2a50c8" opacity="0.65"/>
+      <ellipse cx="43" cy="28" rx="5"  ry="3"   fill="#4070e0" opacity="0.8"/>
+      <path d="M 40,28 C 32,25 33,18 43,15"
+            fill="none" stroke="#90b8ff" stroke-width="3.5"
+            stroke-linecap="round" opacity="0.9"/>
+      <path d="M 46,28 C 54,31 53,38 43,41"
+            fill="none" stroke="#90b8ff" stroke-width="3.5"
+            stroke-linecap="round" opacity="0.9"/>
+      <circle cx="43" cy="28" r="3.5" fill="#f0a020" opacity="0.8"/>
+      <circle cx="43" cy="28" r="1.8" fill="#fff9e0"/>
+    </g>
+  </g>
+
+  <!-- y -->
+  <text x="88" y="36"
+        font-family="Helvetica, Arial, sans-serif"
+        font-size="40"
+        font-weight="normal"
+        fill="#7a8fb8">y</text>
+
+</svg>

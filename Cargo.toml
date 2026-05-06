@@ -1,0 +1,125 @@
+[package]
+name = "fitsy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Dar Dahlen <dardahlen@gmail.com>"]
+description = "Fast FITS file I/O, WCS transforms, and a CLI (info / header / funpack)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ddahlen/fitsy"
+readme = "readme.md"
+keywords = ["fits", "astronomy", "wcs", "astrophysics"]
+categories = ["science", "command-line-utilities", "parser-implementations"]
+# Exclude large test fixtures and generated docs from the published crate,
+# but keep the logo so crates.io renders the readme correctly.
+exclude = ["tests/data/", "examples/data/", "docs/_build/", "docs/guide/", "docs/api/", "docs/conf.py", "docs/index.rst", "docs/Makefile"]
+
+[lib]
+# `cdylib` is needed for the optional Python extension built by
+# maturin (only consumed when the `python` feature is enabled).
+# `rlib` keeps fitsy usable as a normal Rust library.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["compression"]
+# Read .gz files (whole-file gzip) and .fz files.
+compression = ["dep:flate2"]
+# Conversions between fitsy types and `nalgebra`'s `DMatrix`.
+nalgebra = ["dep:nalgebra"]
+# Conversions between fitsy types and `faer`'s `Mat`.
+faer = ["dep:faer"]
+# Optional Python bindings (PyO3 + numpy) built via maturin.
+python = ["dep:pyo3", "dep:numpy", "compression"]
+
+[dependencies]
+flate2 = { version = "1.1.9", optional = true }
+nalgebra = { version = "0.34.2", optional = true, default-features = false, features = ["std"] }
+faer = { version = "0.24", optional = true, default-features = false, features = ["std"] }
+pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py310"] }
+numpy = { version = "0.28", optional = true }
+
+[dev-dependencies]
+flate2 = "1.1.9"
+
+
+
+[lints]
+rust.keyword_idents_2024 = "deny"
+rust.non_ascii_idents = "deny"
+rust.non_local_definitions = "deny"
+rust.unsafe_op_in_unsafe_fn = "deny"
+rust.missing_debug_implementations = "deny"
+rust.dead_code = "deny"
+rust.bad_style = "deny"
+rust.improper_ctypes = "deny"
+rust.while_true = "deny"
+rust.patterns_in_fns_without_body = "deny"
+rust.path_statements = "deny"
+rust.overflowing_literals = "deny"
+rust.no_mangle_generic_items = "deny"
+rust.non_shorthand_field_patterns = "deny"
+rust.unused_extern_crates = "deny"
+rust.unused_import_braces = "deny"
+rust.unused_qualifications = "deny"
+rust.unnameable_types = "deny"
+rust.unreachable_pub = "deny"
+rust.unused_lifetimes = "deny"
+rust.unused_macro_rules = "deny"
+rust.unused = "deny"
+rust.unconditional_recursion = "deny"
+rust.trivial_numeric_casts = "deny"
+rust.trivial_casts = "deny"
+rust.elided_lifetimes_in_paths = "deny"
+rust.unexpected_cfgs = "deny"
+
+
+clippy.perf = { level = "deny", priority = 1 }
+clippy.pedantic = { level = "deny", priority = 1 }
+
+# Pedantic overrides
+clippy.float_cmp = {level = "allow", priority = 2 }
+clippy.inline_always = {level = "allow", priority = 2 }
+clippy.unreadable-literal = {level = "allow", priority = 2}
+clippy.similar_names = {level = "allow", priority = 2}
+clippy.too_many_lines = {level = "allow", priority = 2}
+clippy.cast_precision_loss = {level = "allow", priority = 2}
+clippy.cast_possible_truncation = {level = "allow", priority = 2}
+# FITS I/O inherently involves casting between signed/unsigned integer types;
+# these casts are reviewed and correct throughout the codebase.
+clippy.cast_sign_loss = {level = "allow", priority = 2}
+clippy.cast_possible_wrap = {level = "allow", priority = 2}
+# Mathematical / scientific code routinely uses short variable names (x, y, z, r, n, etc.)
+clippy.many_single_char_names = {level = "allow", priority = 2}
+# Adding # Errors sections to every Result-returning function is too broad for this codebase.
+clippy.missing_errors_doc = {level = "allow", priority = 2}
+
+# General list
+clippy.too_many_arguments = "allow"
+clippy.type_complexity = "allow"
+clippy.allow_attributes_without_reason = "warn"
+clippy.collection_is_never_read = "warn"
+clippy.dbg_macro = "warn"
+clippy.debug_assert_with_mut_call = "warn"
+clippy.doc_markdown = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.infinite_loop = "warn"
+clippy.large_stack_arrays = "warn"
+clippy.mismatching_type_param_order = "warn"
+clippy.missing_assert_message = "warn"
+clippy.missing_fields_in_debug = "warn"
+clippy.same_functions_in_if_condition = "warn"
+clippy.semicolon_if_nothing_returned = "warn"
+clippy.should_panic_without_expect = "warn"
+clippy.todo = "warn"
+clippy.unseparated_literal_suffix = "warn"
+clippy.use_self = "warn"
+clippy.cargo_common_metadata = "warn"
+clippy.negative_feature_names = "warn"
+clippy.redundant_feature_names = "warn"
+clippy.wildcard_enum_match_arm = "allow"
+clippy.wildcard_dependencies = "warn"
+clippy.fallible_impl_from = "warn"
+clippy.unneeded_field_pattern = "warn"
+clippy.fn_params_excessive_bools = "warn"
+
+clippy.must_use_candidate = "deny"
