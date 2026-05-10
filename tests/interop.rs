@@ -83,6 +83,34 @@ mod na {
     }
 
     #[test]
+    fn image_from_dmatrix_round_trips() {
+        let img = ImageData::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let m = img.to_dmatrix().unwrap();
+        let back = ImageData::from_dmatrix(&m).unwrap();
+        assert_eq!(back.axes(), img.axes());
+        assert_eq!(back.as_slice(), img.as_slice());
+    }
+
+    #[test]
+    fn image_builder_from_dmatrix_writes_pixels_in_fits_order() {
+        use fitsy::ImageBuilder;
+        // 3 fast (NAXIS1) x 2 slow (NAXIS2): nrows=2, ncols=3.
+        let m = DMatrix::<f32>::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let (header, data) = ImageBuilder::from_dmatrix(&m).unwrap().build().unwrap();
+        assert_eq!(header.naxis().unwrap(), 2);
+        assert_eq!(header.naxisn(1).unwrap(), 3);
+        assert_eq!(header.naxisn(2).unwrap(), 2);
+        // 6 pixels x 4 bytes; ImageBuilder::build returns the raw
+        // pixel section without the 2880-byte block padding.
+        assert_eq!(data.len(), 24);
+        let pix: Vec<f32> = data
+            .chunks_exact(4)
+            .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(pix, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
     fn batched_round_trip_matches_scalar() {
         let w = tan_wcs();
         let pts = [
@@ -147,6 +175,33 @@ mod fa {
         assert_eq!(m[(0, 2)], 3.0);
         assert_eq!(m[(1, 0)], 4.0);
         assert_eq!(m[(1, 2)], 6.0);
+    }
+
+    #[test]
+    fn image_from_faer_round_trips() {
+        let img = ImageData::new(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let m = img.to_faer().unwrap();
+        let back = ImageData::from_faer(&m).unwrap();
+        assert_eq!(back.axes(), img.axes());
+        assert_eq!(back.as_slice(), img.as_slice());
+    }
+
+    #[test]
+    fn image_builder_from_faer_writes_pixels_in_fits_order() {
+        use fitsy::ImageBuilder;
+        // 3 fast (NAXIS1) x 2 slow (NAXIS2): nrows=2, ncols=3.
+        let m = Mat::<f64>::from_fn(2, 3, |r, c| (r * 3 + c + 1) as f64);
+        let (header, data) = ImageBuilder::from_faer(&m).unwrap().build().unwrap();
+        assert_eq!(header.naxis().unwrap(), 2);
+        assert_eq!(header.naxisn(1).unwrap(), 3);
+        assert_eq!(header.naxisn(2).unwrap(), 2);
+        // 6 pixels x 8 bytes; build() returns unpadded pixel bytes.
+        assert_eq!(data.len(), 48);
+        let pix: Vec<f64> = data
+            .chunks_exact(8)
+            .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect();
+        assert_eq!(pix, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]

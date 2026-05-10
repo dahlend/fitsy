@@ -289,43 +289,32 @@ fn freeze_array(py: Python<'_>, arr: &Py<PyAny>) -> PyResult<()> {
     Ok(())
 }
 
+fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
+    match b {
+        Bitpix::U8 => "uint8",
+        Bitpix::I16 => "int16",
+        Bitpix::I32 => "int32",
+        Bitpix::I64 => "int64",
+        Bitpix::F32 => "float32",
+        Bitpix::F64 => "float64",
+    }
+}
+
 /// Decode big-endian raw pixel bytes into a numpy array.
 fn decode_be_to_array(py: Python<'_>, bitpix: Bitpix, bytes: &[u8], shape: &[usize]) -> Py<PyAny> {
-    fn dec<T: Copy>(bytes: &[u8], parse: impl Fn(&[u8]) -> T) -> Vec<T> {
-        let n = size_of::<T>();
-        bytes.chunks_exact(n).map(parse).collect()
+    fn dec<T: crate::data::Pixel>(bytes: &[u8]) -> Vec<T> {
+        bytes
+            .chunks_exact(size_of::<T>())
+            .map(T::from_be_bytes)
+            .collect()
     }
     match bitpix {
-        Bitpix::U8 => to_array(py, bytes.to_vec(), shape),
-        Bitpix::I16 => to_array(
-            py,
-            dec::<i16>(bytes, |b| i16::from_be_bytes([b[0], b[1]])),
-            shape,
-        ),
-        Bitpix::I32 => to_array(
-            py,
-            dec::<i32>(bytes, |b| i32::from_be_bytes([b[0], b[1], b[2], b[3]])),
-            shape,
-        ),
-        Bitpix::I64 => to_array(
-            py,
-            dec::<i64>(bytes, |b| {
-                i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-            }),
-            shape,
-        ),
-        Bitpix::F32 => to_array(
-            py,
-            dec::<f32>(bytes, |b| f32::from_be_bytes([b[0], b[1], b[2], b[3]])),
-            shape,
-        ),
-        Bitpix::F64 => to_array(
-            py,
-            dec::<f64>(bytes, |b| {
-                f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-            }),
-            shape,
-        ),
+        Bitpix::U8 => to_array(py, dec::<u8>(bytes), shape),
+        Bitpix::I16 => to_array(py, dec::<i16>(bytes), shape),
+        Bitpix::I32 => to_array(py, dec::<i32>(bytes), shape),
+        Bitpix::I64 => to_array(py, dec::<i64>(bytes), shape),
+        Bitpix::F32 => to_array(py, dec::<f32>(bytes), shape),
+        Bitpix::F64 => to_array(py, dec::<f64>(bytes), shape),
     }
 }
 
@@ -661,14 +650,7 @@ impl PyImageHdu {
 
     fn __repr__(&self, py: Python<'_>) -> String {
         let axes = self.axes(py).unwrap_or_default();
-        let dtype = match self.bitpix {
-            Bitpix::U8 => "uint8",
-            Bitpix::I16 => "int16",
-            Bitpix::I32 => "int32",
-            Bitpix::I64 => "int64",
-            Bitpix::F32 => "float32",
-            Bitpix::F64 => "float64",
-        };
+        let dtype = bitpix_numpy_dtype(self.bitpix);
         // Render axes as ``(N1, N2, ...)`` matching numpy's
         // ``.shape`` so users immediately recognize the layout.
         let shape = if axes.is_empty() {
@@ -1317,20 +1299,6 @@ fn parse_region_key(
     Ok(Some((start, shape, squeeze)))
 }
 
-/// numpy dtype string for a `Bitpix` (used to construct a target
-/// array of the right shape and dtype before bulk-encoding to BE
-/// for the patch write).
-fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
-    match b {
-        Bitpix::U8 => "uint8",
-        Bitpix::I16 => "int16",
-        Bitpix::I32 => "int32",
-        Bitpix::I64 => "int64",
-        Bitpix::F32 => "float32",
-        Bitpix::F64 => "float64",
-    }
-}
-
 /// Decode `raw` (native-endian numpy bytes for `bitpix`) into the
 /// matching primitive slice and call
 /// [`crate::FitsUpdater::write_image_subarray`].
@@ -1342,41 +1310,41 @@ fn write_patch_be(
     bitpix: Bitpix,
     raw: &[u8],
 ) -> crate::error::Result<()> {
-    macro_rules! decode_native {
-        ($ty:ty) => {{
-            const N: usize = std::mem::size_of::<$ty>();
-            let mut out: Vec<$ty> = Vec::with_capacity(raw.len() / N);
-            for chunk in raw.chunks_exact(N) {
-                let mut buf = [0_u8; N];
-                buf.copy_from_slice(chunk);
-                out.push(<$ty>::from_ne_bytes(buf));
-            }
-            out
-        }};
-    }
     match bitpix {
-        Bitpix::U8 => {
-            let pix: Vec<u8> = raw.to_vec();
-            updater.write_image_subarray::<u8>(hdu_idx, fits_start, fits_shape, &pix)
-        }
+        Bitpix::U8 => updater.write_image_subarray::<u8>(hdu_idx, fits_start, fits_shape, raw),
         Bitpix::I16 => {
-            let pix = decode_native!(i16);
+            let pix: Vec<i16> = raw
+                .chunks_exact(2)
+                .map(|c| i16::from_ne_bytes([c[0], c[1]]))
+                .collect();
             updater.write_image_subarray::<i16>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::I32 => {
-            let pix = decode_native!(i32);
+            let pix: Vec<i32> = raw
+                .chunks_exact(4)
+                .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             updater.write_image_subarray::<i32>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::I64 => {
-            let pix = decode_native!(i64);
+            let pix: Vec<i64> = raw
+                .chunks_exact(8)
+                .map(|c| i64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect();
             updater.write_image_subarray::<i64>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::F32 => {
-            let pix = decode_native!(f32);
+            let pix: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             updater.write_image_subarray::<f32>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::F64 => {
-            let pix = decode_native!(f64);
+            let pix: Vec<f64> = raw
+                .chunks_exact(8)
+                .map(|c| f64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect();
             updater.write_image_subarray::<f64>(hdu_idx, fits_start, fits_shape, &pix)
         }
     }

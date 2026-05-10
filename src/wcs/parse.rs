@@ -596,24 +596,22 @@ fn read_optional_uint(header: &Header, key: &str) -> Option<u32> {
 fn identify_celestial_pair(ctype: &[String]) -> Option<CelestialPair> {
     // Find a longitude axis and a matching latitude axis. Per Sec.8.3
     // both CTYPE values share the same projection code in chars 5-8.
-    let prefixes_lon = ["RA--", "GLON", "ELON", "SLON", "HLON"];
-    let prefixes_lat = ["DEC-", "GLAT", "ELAT", "SLAT", "HLAT"];
     for (i, ct) in ctype.iter().enumerate() {
         let p = first4(ct);
         // Skip non-longitude axes (e.g. FREQ, WAVE, linear): they are
         // not the celestial pair. A bare `?` here would have the
         // disastrous effect of aborting the whole search the moment
         // any axis fails the longitude prefix test.
-        let Some(li) = prefixes_lon.iter().position(|&x| x == p) else {
+        let Some((frame, _, lat_pref)) =
+            CelestialFrame::named_with_prefixes().find(|(_, lon, _)| *lon == p)
+        else {
             continue;
         };
-        let lat_pref = prefixes_lat[li];
         for (j, ct2) in ctype.iter().enumerate() {
             if i == j {
                 continue;
             }
             if first4(ct2) == lat_pref {
-                let frame = CelestialFrame::from_ctype_prefix(p);
                 return Some(CelestialPair {
                     lon: i,
                     lat: j,

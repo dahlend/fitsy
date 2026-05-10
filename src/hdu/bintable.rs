@@ -539,7 +539,7 @@ impl<'a> BinTableHdu<'a> {
     ) -> Result<impl Iterator<Item = &[u8]> + '_> {
         let end = start
             .checked_add(count)
-            .ok_or_else(|| FitsError::Data("row_range: start + count overflowed usize".into()))?;
+            .ok_or_else(|| FitsError::Data("row start + count overflowed usize".into()))?;
         if end > self.n_rows {
             return Err(FitsError::Data(format!(
                 "row_range: rows {start}..{end} out of range (n_rows = {})",

@@ -116,7 +116,7 @@ impl<W: Write> FitsWriter<W> {
 
         if self.stamp_checksums {
             crate::checksum::stamp_checksum(&mut header_bytes, &padded_data)
-                .map_err(|e| FitsError::Header(format!("stamp_checksum: {e}")))?;
+                .map_err(|e| FitsError::Header(format!("checksum stamp failed: {e}")))?;
         }
 
         self.inner.write_all(&header_bytes)?;

@@ -34,12 +34,10 @@ impl<'a> RandomGroupsHdu<'a> {
         let bitpix = Bitpix::from_i64(header.bitpix()?)?;
         let naxis = header.naxis()?;
         if naxis < 2 {
-            return Err(FitsError::Data(format!(
-                "RandomGroupsHdu: NAXIS must be >= 2, got {naxis}"
-            )));
+            return Err(FitsError::Data(format!("NAXIS must be >= 2, got {naxis}")));
         }
         if header.naxisn(1)? != 0 {
-            return Err(FitsError::Data("RandomGroupsHdu: NAXIS1 must be 0".into()));
+            return Err(FitsError::Data("NAXIS1 must be 0".into()));
         }
         let mut data_per_group: u64 = 1;
         for i in 2..=naxis {
@@ -48,9 +46,9 @@ impl<'a> RandomGroupsHdu<'a> {
                 data_per_group = 0;
                 break;
             }
-            data_per_group = data_per_group.checked_mul(n).ok_or_else(|| {
-                FitsError::Data("RandomGroupsHdu: NAXISn product overflowed u64".into())
-            })?;
+            data_per_group = data_per_group
+                .checked_mul(n)
+                .ok_or_else(|| FitsError::Data("NAXISn product overflowed u64".into()))?;
         }
         let pcount = match header.first("PCOUNT") {
             Some(crate::header::Value::Integer(p)) if *p >= 0 => *p as u64,
@@ -64,10 +62,10 @@ impl<'a> RandomGroupsHdu<'a> {
         let needed = bytes_per_elem
             .checked_mul(gcount)
             .and_then(|v| v.checked_mul(pcount.checked_add(data_per_group)?))
-            .ok_or_else(|| FitsError::Data("RandomGroupsHdu: data size overflowed u64".into()))?;
+            .ok_or_else(|| FitsError::Data("data size overflowed u64".into()))?;
         if data.len() as u64 != needed {
             return Err(FitsError::Data(format!(
-                "RandomGroupsHdu: data slice {} bytes does not match expected {needed}",
+                "data slice {} bytes does not match expected {needed}",
                 data.len()
             )));
         }

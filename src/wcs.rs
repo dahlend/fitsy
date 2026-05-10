@@ -374,9 +374,9 @@ impl Wcs {
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn pixel_to_celestial(&self, px: f64, py: f64) -> Result<(f64, f64)> {
-        let (lon, lat) = self.celestial_axes().ok_or_else(|| {
-            FitsError::Wcs("pixel_to_celestial: WCS has no celestial axis pair".into())
-        })?;
+        let (lon, lat) = self
+            .celestial_axes()
+            .ok_or_else(|| FitsError::Wcs("WCS has no celestial axis pair".into()))?;
         let crpix = self.linear.crpix();
         // CRPIX is 1-based per FITS; this API is 0-based, so the
         // "sit at reference pixel" filler for the non-celestial axes
@@ -405,9 +405,9 @@ impl Wcs {
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn celestial_to_pixel(&self, ra: f64, dec: f64) -> Result<(f64, f64)> {
-        let (lon, lat) = self.celestial_axes().ok_or_else(|| {
-            FitsError::Wcs("celestial_to_pixel: WCS has no celestial axis pair".into())
-        })?;
+        let (lon, lat) = self
+            .celestial_axes()
+            .ok_or_else(|| FitsError::Wcs("WCS has no celestial axis pair".into()))?;
         // Build a world vector with the celestial pair set and the
         // other axes at CRVAL (zero, since CRVAL is absorbed into the
         // celestial rotation and the spectral algorithms).

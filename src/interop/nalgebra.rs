@@ -3,7 +3,9 @@
 use ::nalgebra::{DMatrix, Scalar};
 
 use crate::data::ImageData;
+use crate::data::encoding::Pixel;
 use crate::error::{FitsError, Result};
+use crate::hdu::ImageBuilder;
 use crate::wcs::Wcs;
 use crate::wcs::linear::LinearTransform;
 
@@ -43,6 +45,42 @@ impl<T: Scalar + Copy> ImageData<T> {
         let ny = self.axes()[1] as usize;
         // Memory is row-major over (y, x): data[y * nx + x].
         Ok(DMatrix::from_row_slice(ny, nx, self.as_slice()))
+    }
+
+    /// Build a 2-D image from a [`DMatrix`]. The matrix is interpreted
+    /// as `nrows = NAXIS2` (slow axis), `ncols = NAXIS1` (fast axis) --
+    /// the inverse of [`to_dmatrix`](Self::to_dmatrix), so the round-
+    /// trip is the identity.
+    ///
+    /// nalgebra is column-major; FITS / `ImageData` is row-major over
+    /// `(y, x)`. The conversion copies element-by-element.
+    pub fn from_dmatrix(mat: &DMatrix<T>) -> Result<Self> {
+        let ny = mat.nrows();
+        let nx = mat.ncols();
+        let mut data: Vec<T> = Vec::with_capacity(ny * nx);
+        for r in 0..ny {
+            for c in 0..nx {
+                data.push(mat[(r, c)]);
+            }
+        }
+        Self::new(data, vec![nx as u64, ny as u64])
+    }
+}
+
+impl<T: Pixel + Scalar> ImageBuilder<T> {
+    /// Build an [`ImageBuilder`] from a 2-D [`DMatrix`]. Same layout
+    /// convention as [`ImageData::from_dmatrix`]: `nrows = NAXIS2`,
+    /// `ncols = NAXIS1`.
+    pub fn from_dmatrix(mat: &DMatrix<T>) -> Result<Self> {
+        let ny = mat.nrows();
+        let nx = mat.ncols();
+        let mut data: Vec<T> = Vec::with_capacity(ny * nx);
+        for r in 0..ny {
+            for c in 0..nx {
+                data.push(mat[(r, c)]);
+            }
+        }
+        Self::new(vec![nx as u64, ny as u64], data)
     }
 }
 
