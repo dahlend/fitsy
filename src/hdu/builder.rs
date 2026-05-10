@@ -462,9 +462,9 @@ impl BinTableBuilder {
         heap_bytes: &[u8],
     ) -> Result<(Header, Vec<u8>)> {
         let row = self.row_bytes();
-        let expected = row.checked_mul(n_rows).ok_or_else(|| {
-            FitsError::Data("row x column count overflowed usize".into())
-        })?;
+        let expected = row
+            .checked_mul(n_rows)
+            .ok_or_else(|| FitsError::Data("row x column count overflowed usize".into()))?;
         if row_bytes.len() != expected {
             return Err(FitsError::Data(format!(
                 "BinTableBuilder: row data is {} bytes; expected {n_rows} rows x {row} bytes = {expected}",
@@ -635,9 +635,9 @@ impl AsciiTableBuilder {
     }
 
     fn last_mut(&mut self, what: &str) -> Result<&mut AsciiColSpec> {
-        self.columns.last_mut().ok_or_else(|| {
-            FitsError::Data(format!("{what}: no column added yet"))
-        })
+        self.columns
+            .last_mut()
+            .ok_or_else(|| FitsError::Data(format!("{what}: no column added yet")))
     }
 
     /// Append an arbitrary value card (e.g. `OBJECT`).

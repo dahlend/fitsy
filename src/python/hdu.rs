@@ -303,7 +303,10 @@ fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
 /// Decode big-endian raw pixel bytes into a numpy array.
 fn decode_be_to_array(py: Python<'_>, bitpix: Bitpix, bytes: &[u8], shape: &[usize]) -> Py<PyAny> {
     fn dec<T: crate::data::Pixel>(bytes: &[u8]) -> Vec<T> {
-        bytes.chunks_exact(size_of::<T>()).map(T::from_be_bytes).collect()
+        bytes
+            .chunks_exact(size_of::<T>())
+            .map(T::from_be_bytes)
+            .collect()
     }
     match bitpix {
         Bitpix::U8 => to_array(py, dec::<u8>(bytes), shape),
@@ -424,11 +427,31 @@ fn read_raw_to_array(
 ) -> PyResult<Py<PyAny>> {
     Ok(match bitpix {
         Bitpix::U8 => to_array(py, img.read_raw::<u8>().into_py_result()?.into_vec(), shape),
-        Bitpix::I16 => to_array(py, img.read_raw::<i16>().into_py_result()?.into_vec(), shape),
-        Bitpix::I32 => to_array(py, img.read_raw::<i32>().into_py_result()?.into_vec(), shape),
-        Bitpix::I64 => to_array(py, img.read_raw::<i64>().into_py_result()?.into_vec(), shape),
-        Bitpix::F32 => to_array(py, img.read_raw::<f32>().into_py_result()?.into_vec(), shape),
-        Bitpix::F64 => to_array(py, img.read_raw::<f64>().into_py_result()?.into_vec(), shape),
+        Bitpix::I16 => to_array(
+            py,
+            img.read_raw::<i16>().into_py_result()?.into_vec(),
+            shape,
+        ),
+        Bitpix::I32 => to_array(
+            py,
+            img.read_raw::<i32>().into_py_result()?.into_vec(),
+            shape,
+        ),
+        Bitpix::I64 => to_array(
+            py,
+            img.read_raw::<i64>().into_py_result()?.into_vec(),
+            shape,
+        ),
+        Bitpix::F32 => to_array(
+            py,
+            img.read_raw::<f32>().into_py_result()?.into_vec(),
+            shape,
+        ),
+        Bitpix::F64 => to_array(
+            py,
+            img.read_raw::<f64>().into_py_result()?.into_vec(),
+            shape,
+        ),
     })
 }
 
@@ -1288,9 +1311,7 @@ fn write_patch_be(
     raw: &[u8],
 ) -> crate::error::Result<()> {
     match bitpix {
-        Bitpix::U8 => {
-            updater.write_image_subarray::<u8>(hdu_idx, fits_start, fits_shape, raw)
-        }
+        Bitpix::U8 => updater.write_image_subarray::<u8>(hdu_idx, fits_start, fits_shape, raw),
         Bitpix::I16 => {
             let pix: Vec<i16> = raw
                 .chunks_exact(2)

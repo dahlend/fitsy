@@ -17,11 +17,7 @@ use crate::error::{FitsError, Result};
 
 /// Validate that `start` and `shape` describe a sub-cuboid that fits
 /// inside an image with the given `axes`.
-pub(crate) fn validate_subarray_shape(
-    axes: &[u64],
-    start: &[u64],
-    shape: &[u64],
-) -> Result<()> {
+pub(crate) fn validate_subarray_shape(axes: &[u64], start: &[u64], shape: &[u64]) -> Result<()> {
     if start.len() != axes.len() || shape.len() != axes.len() {
         return Err(FitsError::Data(format!(
             "start/shape have length {}/{}, expected NAXIS = {}",

@@ -79,8 +79,8 @@ impl CelestialFrame {
 
     /// Iterate the five named frames (excludes `Other`). Useful for
     /// scanning a header's CTYPE values to pick a celestial axis pair.
-    pub(crate) fn named_with_prefixes()
-    -> impl Iterator<Item = (Self, &'static str, &'static str)> {
+    pub(crate) fn named_with_prefixes() -> impl Iterator<Item = (Self, &'static str, &'static str)>
+    {
         NAMED_FRAME_PREFIXES.iter().copied()
     }
 }

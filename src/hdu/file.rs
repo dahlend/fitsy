@@ -364,7 +364,6 @@ impl FitsFile {
     ) -> Result<Vec<u8>> {
         use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
 
-        
         let span = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
         })?;
@@ -397,9 +396,7 @@ impl FitsFile {
                     .checked_add(io)
                     .and_then(|v| v.checked_mul(strides[ax]))
                     .and_then(|v| elem_off.checked_add(v))
-                    .ok_or_else(|| {
-                        FitsError::Data(format!("element offset overflows u64"))
-                    })?;
+                    .ok_or_else(|| FitsError::Data(format!("element offset overflows u64")))?;
                 elem_off = s;
             }
             let byte_off = elem_off

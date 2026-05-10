@@ -121,15 +121,11 @@ impl FitsUpdater {
                     .axes
                     .iter()
                     .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
-                    .ok_or_else(|| {
-                        FitsError::Data(format!("HDU {i} pixel count overflows u64"))
-                    })?;
+                    .ok_or_else(|| FitsError::Data(format!("HDU {i} pixel count overflows u64")))?;
                 let bytes = elems
                     .checked_mul(meta.bitpix.byte_size() as u64)
                     .and_then(|b| meta.data_offset.checked_add(b))
-                    .ok_or_else(|| {
-                        FitsError::Data(format!("HDU {i} data extent overflows u64"))
-                    })?;
+                    .ok_or_else(|| FitsError::Data(format!("HDU {i} data extent overflows u64")))?;
                 if bytes > len {
                     return Err(FitsError::Data(format!(
                         "FitsUpdater: HDU {i} extends to byte {bytes} but the file is only {len} bytes long"
@@ -241,7 +237,6 @@ impl FitsUpdater {
     ) -> Result<()> {
         use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
 
-        
         let meta = self
             .images
             .get(i)
@@ -297,9 +292,7 @@ impl FitsUpdater {
                         .checked_add(io)
                         .and_then(|v| v.checked_mul(strides[ax]))
                         .and_then(|v| elem_off.checked_add(v))
-                        .ok_or_else(|| {
-                            FitsError::Data("element offset overflows u64".into())
-                        })?;
+                        .ok_or_else(|| FitsError::Data("element offset overflows u64".into()))?;
                     elem_off = s;
                 }
                 let byte_off = elem_off
@@ -326,9 +319,10 @@ impl FitsUpdater {
         // ---- Pass 2: pre-encode every row of the patch into one
         // contiguous big-endian buffer, then issue the data pwrites
         // row by row.
-        let total_bytes = row_offsets.len().checked_mul(row_bytes).ok_or_else(|| {
-            FitsError::Data("total byte count overflows usize".to_string())
-        })?;
+        let total_bytes = row_offsets
+            .len()
+            .checked_mul(row_bytes)
+            .ok_or_else(|| FitsError::Data("total byte count overflows usize".to_string()))?;
         let mut new_bytes = Vec::with_capacity(total_bytes);
         for px in pixels {
             px.write_be(&mut new_bytes);

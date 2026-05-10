@@ -199,9 +199,7 @@ mod fa {
         assert_eq!(data.len(), 48);
         let pix: Vec<f64> = data
             .chunks_exact(8)
-            .map(|c| {
-                f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
-            })
+            .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
             .collect();
         assert_eq!(pix, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }

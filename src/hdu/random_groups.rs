@@ -34,9 +34,7 @@ impl<'a> RandomGroupsHdu<'a> {
         let bitpix = Bitpix::from_i64(header.bitpix()?)?;
         let naxis = header.naxis()?;
         if naxis < 2 {
-            return Err(FitsError::Data(format!(
-                "NAXIS must be >= 2, got {naxis}"
-            )));
+            return Err(FitsError::Data(format!("NAXIS must be >= 2, got {naxis}")));
         }
         if header.naxisn(1)? != 0 {
             return Err(FitsError::Data("NAXIS1 must be 0".into()));
@@ -48,9 +46,9 @@ impl<'a> RandomGroupsHdu<'a> {
                 data_per_group = 0;
                 break;
             }
-            data_per_group = data_per_group.checked_mul(n).ok_or_else(|| {
-                FitsError::Data("NAXISn product overflowed u64".into())
-            })?;
+            data_per_group = data_per_group
+                .checked_mul(n)
+                .ok_or_else(|| FitsError::Data("NAXISn product overflowed u64".into()))?;
         }
         let pcount = match header.first("PCOUNT") {
             Some(crate::header::Value::Integer(p)) if *p >= 0 => *p as u64,
