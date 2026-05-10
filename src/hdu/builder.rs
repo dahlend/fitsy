@@ -412,7 +412,7 @@ impl BinTableBuilder {
         let last = self
             .columns
             .last_mut()
-            .ok_or_else(|| FitsError::Data("BinTableBuilder::unit: no column added yet".into()))?;
+            .ok_or_else(|| FitsError::Data("no column added yet".into()))?;
         last.unit = Some(unit.into());
         Ok(self)
     }
@@ -423,7 +423,7 @@ impl BinTableBuilder {
         let last = self
             .columns
             .last_mut()
-            .ok_or_else(|| FitsError::Data("BinTableBuilder::tdim: no column added yet".into()))?;
+            .ok_or_else(|| FitsError::Data("no column added yet".into()))?;
         last.tdim = Some(tdim.into());
         Ok(self)
     }
@@ -463,7 +463,7 @@ impl BinTableBuilder {
     ) -> Result<(Header, Vec<u8>)> {
         let row = self.row_bytes();
         let expected = row.checked_mul(n_rows).ok_or_else(|| {
-            FitsError::Data("BinTableBuilder: row x count overflowed usize".into())
+            FitsError::Data("row x column count overflowed usize".into())
         })?;
         if row_bytes.len() != expected {
             return Err(FitsError::Data(format!(
@@ -636,7 +636,7 @@ impl AsciiTableBuilder {
 
     fn last_mut(&mut self, what: &str) -> Result<&mut AsciiColSpec> {
         self.columns.last_mut().ok_or_else(|| {
-            FitsError::Data(format!("AsciiTableBuilder::{what}: no column added yet"))
+            FitsError::Data(format!("{what}: no column added yet"))
         })
     }
 
@@ -700,7 +700,7 @@ impl AsciiTableBuilder {
         let mut data = vec![
             b' ';
             row_size.checked_mul(n_rows).ok_or_else(|| {
-                FitsError::Data("AsciiTableBuilder: row x count overflowed usize".into())
+                FitsError::Data("row x column count overflowed usize".into())
             })?
         ];
         for r in 0..n_rows {

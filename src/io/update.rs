@@ -98,7 +98,7 @@ impl FitsUpdater {
             let entry = match probe.hdu(i)? {
                 Hdu::Image(img) => {
                     let data_offset = probe.data_offset(i).ok_or_else(|| {
-                        FitsError::Header(format!("FitsUpdater: missing span for HDU {i}"))
+                        FitsError::Header(format!("missing data span for HDU {i}"))
                     })?;
                     Some(ImageMeta {
                         data_offset,
@@ -122,13 +122,13 @@ impl FitsUpdater {
                     .iter()
                     .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
                     .ok_or_else(|| {
-                        FitsError::Data(format!("FitsUpdater: HDU {i} pixel count overflows u64"))
+                        FitsError::Data(format!("HDU {i} pixel count overflows u64"))
                     })?;
                 let bytes = elems
                     .checked_mul(meta.bitpix.byte_size() as u64)
                     .and_then(|b| meta.data_offset.checked_add(b))
                     .ok_or_else(|| {
-                        FitsError::Data(format!("FitsUpdater: HDU {i} data extent overflows u64"))
+                        FitsError::Data(format!("HDU {i} data extent overflows u64"))
                     })?;
                 if bytes > len {
                     return Err(FitsError::Data(format!(
@@ -241,7 +241,7 @@ impl FitsUpdater {
     ) -> Result<()> {
         use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
 
-        const OP: &str = "write_image_subarray";
+        
         let meta = self
             .images
             .get(i)
@@ -258,23 +258,23 @@ impl FitsUpdater {
                 found: bitpix_name(meta.bitpix).into(),
             });
         }
-        validate_subarray_shape(&meta.axes, start, shape, OP)?;
+        validate_subarray_shape(&meta.axes, start, shape)?;
         if shape.contains(&0) {
             return Ok(());
         }
         let expected: u64 = shape
             .iter()
             .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| FitsError::Data(format!("{OP}: shape product overflows u64")))?;
+            .ok_or_else(|| FitsError::Data("shape product overflows u64".into()))?;
         if pixels.len() as u64 != expected {
             return Err(FitsError::Data(format!(
-                "{OP}: pixels.len() = {} but shape implies {expected} elements",
+                "pixels.len() = {} but shape implies {expected} elements",
                 pixels.len(),
             )));
         }
         let bsize = meta.bitpix.byte_size();
 
-        let strides = checked_strides(&meta.axes, OP)?;
+        let strides = checked_strides(&meta.axes)?;
 
         let n1 = shape[0];
         let row_elems = n1 as usize;
@@ -286,7 +286,7 @@ impl FitsUpdater {
         // indeterminate state on bad input.
         let n_rows: u64 = shape[1..].iter().product::<u64>().max(1);
         let n_rows_usize = usize::try_from(n_rows)
-            .map_err(|_| FitsError::Data(format!("{OP}: row count overflows usize")))?;
+            .map_err(|_| FitsError::Data("row count overflows usize".into()))?;
         let mut row_offsets: Vec<u64> = Vec::with_capacity(n_rows_usize);
         {
             let mut idx = vec![0_u64; meta.axes.len()];
@@ -298,20 +298,20 @@ impl FitsUpdater {
                         .and_then(|v| v.checked_mul(strides[ax]))
                         .and_then(|v| elem_off.checked_add(v))
                         .ok_or_else(|| {
-                            FitsError::Data(format!("{OP}: element offset overflows u64"))
+                            FitsError::Data("element offset overflows u64".into())
                         })?;
                     elem_off = s;
                 }
                 let byte_off = elem_off
                     .checked_mul(bsize as u64)
                     .and_then(|v| meta.data_offset.checked_add(v))
-                    .ok_or_else(|| FitsError::Data(format!("{OP}: byte offset overflows u64")))?;
+                    .ok_or_else(|| FitsError::Data("byte offset overflows u64".into()))?;
                 let end = byte_off
                     .checked_add(row_bytes as u64)
-                    .ok_or_else(|| FitsError::Data(format!("{OP}: byte range overflows u64")))?;
+                    .ok_or_else(|| FitsError::Data("byte range overflows u64".into()))?;
                 if end > self.len {
                     return Err(FitsError::Data(format!(
-                        "{OP}: byte range {byte_off}..{end} exceeds file length {}",
+                        "byte range {byte_off}..{end} exceeds file length {}",
                         self.len
                     )));
                 }
@@ -327,7 +327,7 @@ impl FitsUpdater {
         // contiguous big-endian buffer, then issue the data pwrites
         // row by row.
         let total_bytes = row_offsets.len().checked_mul(row_bytes).ok_or_else(|| {
-            FitsError::Data("write_image_subarray: total byte count overflows usize".to_string())
+            FitsError::Data("total byte count overflows usize".to_string())
         })?;
         let mut new_bytes = Vec::with_capacity(total_bytes);
         for px in pixels {

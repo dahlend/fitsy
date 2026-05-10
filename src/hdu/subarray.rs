@@ -16,18 +16,15 @@
 use crate::error::{FitsError, Result};
 
 /// Validate that `start` and `shape` describe a sub-cuboid that fits
-/// inside an image with the given `axes`. `op` prefixes any error
-/// message so callers can produce diagnostics that name the public
-/// entry point.
+/// inside an image with the given `axes`.
 pub(crate) fn validate_subarray_shape(
     axes: &[u64],
     start: &[u64],
     shape: &[u64],
-    op: &str,
 ) -> Result<()> {
     if start.len() != axes.len() || shape.len() != axes.len() {
         return Err(FitsError::Data(format!(
-            "{op}: start/shape have length {}/{}, expected NAXIS = {}",
+            "start/shape have length {}/{}, expected NAXIS = {}",
             start.len(),
             shape.len(),
             axes.len()
@@ -37,7 +34,7 @@ pub(crate) fn validate_subarray_shape(
         let axis = axes[k];
         if s.checked_add(n).is_none_or(|end| end > axis) {
             return Err(FitsError::Data(format!(
-                "{op}: axis {} (NAXIS{}) range {s}..{} out of bounds (length {axis})",
+                "axis {} (NAXIS{}) range {s}..{} out of bounds (length {axis})",
                 k,
                 k + 1,
                 s + n
@@ -50,14 +47,14 @@ pub(crate) fn validate_subarray_shape(
 /// Element strides for `axes` in FITS order (NAXIS1 fastest-varying).
 /// Returns the per-axis stride in elements; the first entry is `1`.
 /// Errors if any cumulative product overflows `u64`.
-pub(crate) fn checked_strides(axes: &[u64], op: &str) -> Result<Vec<u64>> {
+pub(crate) fn checked_strides(axes: &[u64]) -> Result<Vec<u64>> {
     let mut strides: Vec<u64> = Vec::with_capacity(axes.len());
     let mut s = 1_u64;
     for &a in axes {
         strides.push(s);
-        s = s.checked_mul(a).ok_or_else(|| {
-            FitsError::Data(format!("{op}: axis stride overflows u64"))
-        })?;
+        s = s
+            .checked_mul(a)
+            .ok_or_else(|| FitsError::Data("axis stride overflows u64".into()))?;
     }
     Ok(strides)
 }

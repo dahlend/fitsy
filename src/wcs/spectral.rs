@@ -484,7 +484,7 @@ impl SpectralAxis {
             Ok(f0)
         } else if let Some(w0) = self.restwav {
             if w0 <= 0.0 {
-                return Err(FitsError::Wcs("spectral: RESTWAV must be positive".into()));
+                return Err(FitsError::Wcs("RESTWAV must be positive".into()));
             }
             Ok(SPEED_OF_LIGHT / w0)
         } else {

@@ -364,25 +364,25 @@ impl FitsFile {
     ) -> Result<Vec<u8>> {
         use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
 
-        const OP: &str = "read_image_subarray_be";
+        
         let span = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
         })?;
-        validate_subarray_shape(axes, start, shape, OP)?;
+        validate_subarray_shape(axes, start, shape)?;
         let bsize = bitpix.byte_size();
         let total_elems: u64 = shape
             .iter()
             .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| FitsError::Data(format!("{OP}: shape product overflows u64")))?;
+            .ok_or_else(|| FitsError::Data(format!("shape product overflows u64")))?;
         let total_bytes = (total_elems as usize)
             .checked_mul(bsize)
-            .ok_or_else(|| FitsError::Data(format!("{OP}: total bytes overflows usize")))?;
+            .ok_or_else(|| FitsError::Data(format!("total bytes overflows usize")))?;
         let mut out = vec![0_u8; total_bytes];
         if total_elems == 0 {
             return Ok(out);
         }
 
-        let strides = checked_strides(axes, OP)?;
+        let strides = checked_strides(axes)?;
 
         let n1 = shape[0];
         let row_elems = n1 as usize;
@@ -398,14 +398,14 @@ impl FitsFile {
                     .and_then(|v| v.checked_mul(strides[ax]))
                     .and_then(|v| elem_off.checked_add(v))
                     .ok_or_else(|| {
-                        FitsError::Data(format!("{OP}: element offset overflows u64"))
+                        FitsError::Data(format!("element offset overflows u64"))
                     })?;
                 elem_off = s;
             }
             let byte_off = elem_off
                 .checked_mul(bsize as u64)
                 .and_then(|v| data_offset.checked_add(v))
-                .ok_or_else(|| FitsError::Data(format!("{OP}: byte offset overflows u64")))?;
+                .ok_or_else(|| FitsError::Data(format!("byte offset overflows u64")))?;
 
             let dst = &mut out[dst_row_start..dst_row_start + row_bytes];
             match &self.backing {
@@ -415,7 +415,7 @@ impl FitsFile {
                     let end_byte = start_byte + row_bytes;
                     if end_byte > src_bytes.len() {
                         return Err(FitsError::Data(format!(
-                            "{OP}: row at byte {byte_off}..{end_byte} exceeds buffer length {}",
+                            "row at byte {byte_off}..{end_byte} exceeds buffer length {}",
                             src_bytes.len()
                         )));
                     }

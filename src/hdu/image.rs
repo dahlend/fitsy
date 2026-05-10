@@ -218,7 +218,7 @@ impl<'a> ImageHdu<'a> {
                 found: bitpix_name(self.bitpix).into(),
             });
         }
-        validate_subarray_shape(&self.axes, start, shape, "read_subarray")?;
+        validate_subarray_shape(&self.axes, start, shape)?;
         if shape.contains(&0) {
             return ImageData::new(Vec::new(), shape.to_vec());
         }
@@ -226,7 +226,7 @@ impl<'a> ImageHdu<'a> {
         let total: usize = shape.iter().copied().product::<u64>() as usize;
         let mut out: Vec<T> = Vec::with_capacity(total);
 
-        let strides = checked_strides(&self.axes, "read_subarray")?;
+        let strides = checked_strides(&self.axes)?;
 
         let n1 = shape[0];
         let row_bytes = (n1 as usize) * bsize;
