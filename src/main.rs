@@ -12,13 +12,16 @@
 //! Designed to require no external dependencies: argument parsing is
 //! manual and intentionally simple.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(feature = "compression")]
+use fitsy::FitsWriter;
 use fitsy::header::{HeaderEntry, Value};
 use fitsy::wcs::celestial::CelestialFrame;
-use fitsy::{FitsFile, FitsWriter, Hdu, Header};
+use fitsy::{FitsFile, Hdu, Header};
+#[cfg(feature = "compression")]
+use std::fs::File;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

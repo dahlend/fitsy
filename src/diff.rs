@@ -178,6 +178,7 @@ fn hdu_kind_str(h: &Hdu<'_>) -> &'static str {
         Hdu::Image(_) => "IMAGE",
         Hdu::BinTable(_) => "BINTABLE",
         Hdu::AsciiTable(_) => "TABLE",
+        #[cfg(feature = "compression")]
         Hdu::CompressedImage(_) => "COMPRESSED_IMAGE",
         Hdu::RandomGroups(_) => "RANDOM_GROUPS",
         Hdu::Conforming(_) => "CONFORMING",
@@ -189,6 +190,7 @@ fn hdu_header<'a>(h: &'a Hdu<'a>) -> &'a Header {
         Hdu::Image(i) => i.header(),
         Hdu::BinTable(t) => t.header(),
         Hdu::AsciiTable(t) => t.header(),
+        #[cfg(feature = "compression")]
         Hdu::CompressedImage(c) => c.header(),
         Hdu::RandomGroups(r) => r.header(),
         Hdu::Conforming(c) => c.header(),
