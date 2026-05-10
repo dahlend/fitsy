@@ -362,59 +362,33 @@ impl FitsFile {
         shape: &[u64],
         bitpix: Bitpix,
     ) -> Result<Vec<u8>> {
+        use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
+
+        const OP: &str = "read_image_subarray_be";
         let span = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
         })?;
-        if start.len() != axes.len() || shape.len() != axes.len() {
-            return Err(FitsError::Data(format!(
-                "read_image_subarray_be: start/shape have length {}/{}, expected NAXIS = {}",
-                start.len(),
-                shape.len(),
-                axes.len()
-            )));
-        }
-        for (k, (&s, &n)) in start.iter().zip(shape.iter()).enumerate() {
-            let axis = axes[k];
-            if s.checked_add(n).is_none_or(|end| end > axis) {
-                return Err(FitsError::Data(format!(
-                    "read_image_subarray_be: axis {} (NAXIS{}) range {s}..{} out of bounds (length {axis})",
-                    k,
-                    k + 1,
-                    s + n
-                )));
-            }
-        }
+        validate_subarray_shape(axes, start, shape, OP)?;
         let bsize = bitpix.byte_size();
         let total_elems: u64 = shape
             .iter()
             .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| {
-                FitsError::Data("read_image_subarray_be: shape product overflows u64".to_string())
-            })?;
-        let total_bytes = (total_elems as usize).checked_mul(bsize).ok_or_else(|| {
-            FitsError::Data("read_image_subarray_be: total bytes overflows usize".to_string())
-        })?;
+            .ok_or_else(|| FitsError::Data(format!("{OP}: shape product overflows u64")))?;
+        let total_bytes = (total_elems as usize)
+            .checked_mul(bsize)
+            .ok_or_else(|| FitsError::Data(format!("{OP}: total bytes overflows usize")))?;
         let mut out = vec![0_u8; total_bytes];
         if total_elems == 0 {
             return Ok(out);
         }
 
-        // Strides in elements for each axis (FITS order).
-        let mut strides: Vec<u64> = Vec::with_capacity(axes.len());
-        let mut s = 1_u64;
-        for &a in axes {
-            strides.push(s);
-            s = s.checked_mul(a).ok_or_else(|| {
-                FitsError::Data("read_image_subarray_be: axis stride overflows u64".to_string())
-            })?;
-        }
+        let strides = checked_strides(axes, OP)?;
 
         let n1 = shape[0];
         let row_elems = n1 as usize;
         let row_bytes = row_elems * bsize;
-        let outer_axes = axes.len();
         let data_offset = span.header_end;
-        let mut idx = vec![0_u64; outer_axes];
+        let mut idx = vec![0_u64; axes.len()];
         let mut dst_row_start: usize = 0;
         loop {
             let mut elem_off: u64 = start[0];
@@ -424,18 +398,14 @@ impl FitsFile {
                     .and_then(|v| v.checked_mul(strides[ax]))
                     .and_then(|v| elem_off.checked_add(v))
                     .ok_or_else(|| {
-                        FitsError::Data(
-                            "read_image_subarray_be: element offset overflows u64".to_string(),
-                        )
+                        FitsError::Data(format!("{OP}: element offset overflows u64"))
                     })?;
                 elem_off = s;
             }
             let byte_off = elem_off
                 .checked_mul(bsize as u64)
                 .and_then(|v| data_offset.checked_add(v))
-                .ok_or_else(|| {
-                    FitsError::Data("read_image_subarray_be: byte offset overflows u64".to_string())
-                })?;
+                .ok_or_else(|| FitsError::Data(format!("{OP}: byte offset overflows u64")))?;
 
             let dst = &mut out[dst_row_start..dst_row_start + row_bytes];
             match &self.backing {
@@ -445,7 +415,7 @@ impl FitsFile {
                     let end_byte = start_byte + row_bytes;
                     if end_byte > src_bytes.len() {
                         return Err(FitsError::Data(format!(
-                            "read_image_subarray_be: row at byte {byte_off}..{end_byte} exceeds buffer length {}",
+                            "{OP}: row at byte {byte_off}..{end_byte} exceeds buffer length {}",
                             src_bytes.len()
                         )));
                     }
@@ -458,20 +428,8 @@ impl FitsFile {
             }
 
             dst_row_start += row_bytes;
-            if outer_axes == 1 {
+            if !next_subarray_index(&mut idx, shape) {
                 break;
-            }
-            let mut ax = 1;
-            loop {
-                idx[ax] += 1;
-                if idx[ax] < shape[ax] {
-                    break;
-                }
-                idx[ax] = 0;
-                ax += 1;
-                if ax == outer_axes {
-                    return Ok(out);
-                }
             }
         }
         Ok(out)
@@ -1081,6 +1039,15 @@ fn pread_exact(file: &File, mut off: u64, mut buf: &mut [u8]) -> Result<()> {
 }
 
 /// Data section size in bytes (Standard Sec.4.4.1.1, Sec.6, Sec.7).
+///
+/// Two modes share the formula
+/// `|BITPIX|/8 * GCOUNT * (PCOUNT + prod NAXIS{start..=naxis})`:
+///
+/// - Random Groups (Sec.6): NAXIS1 = 0 is the marker, so the product
+///   starts at NAXIS2; an empty data axis still leaves PCOUNT bytes
+///   per group.
+/// - Generic conforming extension (Sec.7.1.3): product starts at
+///   NAXIS1; an empty data axis means zero bytes total.
 fn data_section_size(h: &Header) -> Result<u64> {
     let bitpix = Bitpix::from_i64(h.bitpix()?)?;
     let naxis = h.naxis()?;
@@ -1088,54 +1055,16 @@ fn data_section_size(h: &Header) -> Result<u64> {
         return Ok(0);
     }
 
-    // Random Groups (Sec.6): NAXIS1 = 0, NAXIS >= 2, GROUPS = T.
-    // Total bytes = |BITPIX|/8 * GCOUNT * (PCOUNT + prod NAXIS2..NAXISn).
-    if is_random_groups(h) {
-        let mut prod: u64 = 1;
-        for i in 2..=naxis {
-            let n = h.naxisn(i)?;
-            if n == 0 {
+    let rg = is_random_groups(h);
+    let start_axis = if rg { 2 } else { 1 };
+    let mut prod: u64 = 1;
+    for i in start_axis..=naxis {
+        let n = h.naxisn(i)?;
+        if n == 0 {
+            if rg {
                 prod = 0;
                 break;
             }
-            prod = prod
-                .checked_mul(n)
-                .ok_or_else(|| FitsError::Data("axis product overflows u64".into()))?;
-        }
-        let pcount = h
-            .first("PCOUNT")
-            .map(|v| match v {
-                Value::Integer(i) => Ok(*i as u64),
-                _ => Err(FitsError::Value {
-                    keyword: "PCOUNT".into(),
-                    msg: "PCOUNT must be integer".into(),
-                }),
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let gcount = h
-            .first("GCOUNT")
-            .map(|v| match v {
-                Value::Integer(i) => Ok(*i as u64),
-                _ => Err(FitsError::Value {
-                    keyword: "GCOUNT".into(),
-                    msg: "GCOUNT must be integer".into(),
-                }),
-            })
-            .transpose()?
-            .unwrap_or(1);
-        let bytes_per_elem = bitpix.byte_size() as u64;
-        let total = bytes_per_elem
-            .checked_mul(gcount)
-            .and_then(|v| v.checked_mul(pcount.checked_add(prod)?))
-            .ok_or_else(|| FitsError::Data("data size overflows u64".into()))?;
-        return Ok(total);
-    }
-
-    let mut prod: u64 = 1;
-    for i in 1..=naxis {
-        let n = h.naxisn(i)?;
-        if n == 0 {
             return Ok(0);
         }
         prod = prod
@@ -1143,33 +1072,8 @@ fn data_section_size(h: &Header) -> Result<u64> {
             .ok_or_else(|| FitsError::Data("axis product overflows u64".into()))?;
     }
 
-    // Sec.7.1.3: BINTABLE-style PCOUNT/GCOUNT also appear as reserved
-    // keywords in IMAGE extensions. For IMAGE: PCOUNT must be 0,
-    // GCOUNT must be 1. For unknown XTENSIONs we still apply the
-    // generic conforming-extension formula: |BITPIX|/8 * GCOUNT *
-    // (PCOUNT + NAXIS1*...*NAXISn).
-    let pcount = h
-        .first("PCOUNT")
-        .map(|v| match v {
-            Value::Integer(i) => Ok(*i as u64),
-            _ => Err(FitsError::Value {
-                keyword: "PCOUNT".into(),
-                msg: "PCOUNT must be integer".into(),
-            }),
-        })
-        .transpose()?
-        .unwrap_or(0);
-    let gcount = h
-        .first("GCOUNT")
-        .map(|v| match v {
-            Value::Integer(i) => Ok(*i as u64),
-            _ => Err(FitsError::Value {
-                keyword: "GCOUNT".into(),
-                msg: "GCOUNT must be integer".into(),
-            }),
-        })
-        .transpose()?
-        .unwrap_or(1);
+    let pcount = h.optional_int("PCOUNT").unwrap_or(0) as u64;
+    let gcount = h.optional_int("GCOUNT").unwrap_or(1) as u64;
 
     let bytes_per_elem = bitpix.byte_size() as u64;
     let total = bytes_per_elem

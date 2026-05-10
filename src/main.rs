@@ -728,62 +728,34 @@ fn pixel_stats(pixels: &[f64]) -> Stats {
 fn decode_owned_physical(
     img: &fitsy::compression::OwnedImage,
 ) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    use fitsy::data::Scaling;
     use fitsy::data::encoding::Bitpix;
     let h = img.header();
-    let bzero = h.bzero();
-    let bscale = h.bscale();
-    let blank: Option<i64> = h.blank();
+    let scaling = Scaling {
+        bzero: h.bzero(),
+        bscale: h.bscale(),
+        blank: h.blank(),
+    };
     let bytes = img.raw_bytes();
     let bp = img.bitpix();
     let bsize = bp.byte_size();
     let mut out = Vec::with_capacity(bytes.len() / bsize.max(1));
     for chunk in bytes.chunks_exact(bsize) {
         let v: f64 = match bp {
-            Bitpix::U8 => {
-                let raw = i64::from(chunk[0]);
-                if blank == Some(raw) {
-                    f64::NAN
-                } else {
-                    bscale * raw as f64 + bzero
-                }
-            }
-            Bitpix::I16 => {
-                let raw = i64::from(i16::from_be_bytes([chunk[0], chunk[1]]));
-                if blank == Some(raw) {
-                    f64::NAN
-                } else {
-                    bscale * raw as f64 + bzero
-                }
-            }
-            Bitpix::I32 => {
-                let raw = i64::from(i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                if blank == Some(raw) {
-                    f64::NAN
-                } else {
-                    bscale * raw as f64 + bzero
-                }
-            }
-            Bitpix::I64 => {
-                let raw = i64::from_be_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]);
-                if blank == Some(raw) {
-                    f64::NAN
-                } else {
-                    bscale * raw as f64 + bzero
-                }
-            }
-            Bitpix::F32 => {
-                let raw =
-                    f32::from_bits(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                bscale * f64::from(raw) + bzero
-            }
-            Bitpix::F64 => {
-                let raw = f64::from_bits(u64::from_be_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]));
-                bscale * raw + bzero
-            }
+            Bitpix::U8 => scaling.apply_int(i64::from(chunk[0])),
+            Bitpix::I16 => scaling.apply_int(i64::from(i16::from_be_bytes([chunk[0], chunk[1]]))),
+            Bitpix::I32 => scaling.apply_int(i64::from(i32::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3],
+            ]))),
+            Bitpix::I64 => scaling.apply_int(i64::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])),
+            Bitpix::F32 => scaling.apply_real(f64::from(f32::from_bits(u32::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3],
+            ])))),
+            Bitpix::F64 => scaling.apply_real(f64::from_bits(u64::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]))),
         };
         out.push(v);
     }

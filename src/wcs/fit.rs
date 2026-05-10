@@ -469,11 +469,11 @@ fn build_wcs(
     rotation: CelestialRotation,
     projection: Box<dyn Projection>,
 ) -> Result<Wcs> {
-    let proj_code = ProjectionCode::for_kind(proj_kind);
+    let proj_code = proj_kind.code();
     let suffix = if sip.is_some() { "-SIP" } else { "" };
-    let (lon_prefix, lat_prefix) = ctype_prefixes(frame);
-    let ctype1 = format!("{lon_prefix}-{}{}", proj_code.0, suffix);
-    let ctype2 = format!("{lat_prefix}-{}{}", proj_code.0, suffix);
+    let (lon_prefix, lat_prefix) = frame.axis_prefixes();
+    let ctype1 = format!("{lon_prefix}-{proj_code}{suffix}");
+    let ctype2 = format!("{lat_prefix}-{proj_code}{suffix}");
     // Pad to 8 chars per FITS string convention used elsewhere.
     let pad = |s: String| {
         let mut t = s;
@@ -523,54 +523,6 @@ fn build_wcs(
         tab_specs: Vec::new(),
         tab: Vec::new(),
     })
-}
-
-struct ProjectionCode(&'static str);
-
-fn ctype_prefixes(frame: CelestialFrame) -> (&'static str, &'static str) {
-    match frame {
-        CelestialFrame::Equatorial => ("RA--", "DEC-"),
-        CelestialFrame::Galactic => ("GLON", "GLAT"),
-        CelestialFrame::Ecliptic => ("ELON", "ELAT"),
-        CelestialFrame::Supergalactic => ("SLON", "SLAT"),
-        CelestialFrame::HelioEcliptic => ("HLON", "HLAT"),
-        CelestialFrame::Other => ("XLON", "XLAT"),
-    }
-}
-
-impl ProjectionCode {
-    fn for_kind(kind: ProjectionKind) -> Self {
-        Self(match kind {
-            ProjectionKind::Tan => "TAN",
-            ProjectionKind::Stg => "STG",
-            ProjectionKind::Sin => "SIN",
-            ProjectionKind::Arc => "ARC",
-            ProjectionKind::Zea => "ZEA",
-            ProjectionKind::Zpn => "ZPN",
-            ProjectionKind::Azp => "AZP",
-            ProjectionKind::Szp => "SZP",
-            ProjectionKind::Air => "AIR",
-            ProjectionKind::Cyp => "CYP",
-            ProjectionKind::Cea => "CEA",
-            ProjectionKind::Car => "CAR",
-            ProjectionKind::Mer => "MER",
-            ProjectionKind::Sfl => "SFL",
-            ProjectionKind::Par => "PAR",
-            ProjectionKind::Mol => "MOL",
-            ProjectionKind::Ait => "AIT",
-            ProjectionKind::Cop => "COP",
-            ProjectionKind::Coe => "COE",
-            ProjectionKind::Cod => "COD",
-            ProjectionKind::Coo => "COO",
-            ProjectionKind::Bon => "BON",
-            ProjectionKind::Pco => "PCO",
-            ProjectionKind::Tsc => "TSC",
-            ProjectionKind::Csc => "CSC",
-            ProjectionKind::Qsc => "QSC",
-            ProjectionKind::Hpx => "HPX",
-            ProjectionKind::Xph => "XPH",
-        })
-    }
 }
 
 // ---- Self-contained least-squares solver -------------------------------

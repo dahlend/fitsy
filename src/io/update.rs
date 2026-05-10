@@ -239,6 +239,9 @@ impl FitsUpdater {
         shape: &[u64],
         pixels: &[T],
     ) -> Result<()> {
+        use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
+
+        const OP: &str = "write_image_subarray";
         let meta = self
             .images
             .get(i)
@@ -255,69 +258,38 @@ impl FitsUpdater {
                 found: bitpix_name(meta.bitpix).into(),
             });
         }
-        if start.len() != meta.axes.len() || shape.len() != meta.axes.len() {
-            return Err(FitsError::Data(format!(
-                "write_image_subarray: start/shape have length {}/{}, expected NAXIS = {}",
-                start.len(),
-                shape.len(),
-                meta.axes.len()
-            )));
-        }
-        for (k, (&s, &n)) in start.iter().zip(shape.iter()).enumerate() {
-            let axis = meta.axes[k];
-            if s.checked_add(n).is_none_or(|end| end > axis) {
-                return Err(FitsError::Data(format!(
-                    "write_image_subarray: axis {} (NAXIS{}) range {s}..{} out of bounds (length {axis})",
-                    k,
-                    k + 1,
-                    s + n
-                )));
-            }
-        }
+        validate_subarray_shape(&meta.axes, start, shape, OP)?;
         if shape.contains(&0) {
             return Ok(());
         }
         let expected: u64 = shape
             .iter()
             .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| {
-                FitsError::Data("write_image_subarray: shape product overflows u64".to_string())
-            })?;
+            .ok_or_else(|| FitsError::Data(format!("{OP}: shape product overflows u64")))?;
         if pixels.len() as u64 != expected {
             return Err(FitsError::Data(format!(
-                "write_image_subarray: pixels.len() = {} but shape implies {expected} elements",
+                "{OP}: pixels.len() = {} but shape implies {expected} elements",
                 pixels.len(),
             )));
         }
         let bsize = meta.bitpix.byte_size();
 
-        // Strides in elements for each axis (FITS order).
-        let mut strides: Vec<u64> = Vec::with_capacity(meta.axes.len());
-        let mut s = 1_u64;
-        for &a in &meta.axes {
-            strides.push(s);
-            s = s.checked_mul(a).ok_or_else(|| {
-                FitsError::Data("write_image_subarray: axis stride overflows u64".to_string())
-            })?;
-        }
+        let strides = checked_strides(&meta.axes, OP)?;
 
         let n1 = shape[0];
         let row_elems = n1 as usize;
         let row_bytes = row_elems * bsize;
-
-        let outer_axes = meta.axes.len();
 
         // ---- Pass 1: compute the byte offset of every patch row.
         // Done eagerly so that bounds checks fail BEFORE we touch
         // the file -- partial writes don't leave the file in an
         // indeterminate state on bad input.
         let n_rows: u64 = shape[1..].iter().product::<u64>().max(1);
-        let n_rows_usize = usize::try_from(n_rows).map_err(|_| {
-            FitsError::Data("write_image_subarray: row count overflows usize".to_string())
-        })?;
+        let n_rows_usize = usize::try_from(n_rows)
+            .map_err(|_| FitsError::Data(format!("{OP}: row count overflows usize")))?;
         let mut row_offsets: Vec<u64> = Vec::with_capacity(n_rows_usize);
         {
-            let mut idx = vec![0_u64; outer_axes];
+            let mut idx = vec![0_u64; meta.axes.len()];
             loop {
                 let mut elem_off: u64 = start[0];
                 for (ax, &io) in idx.iter().enumerate().skip(1) {
@@ -326,48 +298,26 @@ impl FitsUpdater {
                         .and_then(|v| v.checked_mul(strides[ax]))
                         .and_then(|v| elem_off.checked_add(v))
                         .ok_or_else(|| {
-                            FitsError::Data(
-                                "write_image_subarray: element offset overflows u64".to_string(),
-                            )
+                            FitsError::Data(format!("{OP}: element offset overflows u64"))
                         })?;
                     elem_off = s;
                 }
                 let byte_off = elem_off
                     .checked_mul(bsize as u64)
                     .and_then(|v| meta.data_offset.checked_add(v))
-                    .ok_or_else(|| {
-                        FitsError::Data(
-                            "write_image_subarray: byte offset overflows u64".to_string(),
-                        )
-                    })?;
-                let end = byte_off.checked_add(row_bytes as u64).ok_or_else(|| {
-                    FitsError::Data("write_image_subarray: byte range overflows u64".to_string())
-                })?;
+                    .ok_or_else(|| FitsError::Data(format!("{OP}: byte offset overflows u64")))?;
+                let end = byte_off
+                    .checked_add(row_bytes as u64)
+                    .ok_or_else(|| FitsError::Data(format!("{OP}: byte range overflows u64")))?;
                 if end > self.len {
                     return Err(FitsError::Data(format!(
-                        "write_image_subarray: byte range {byte_off}..{end} exceeds file length {}",
+                        "{OP}: byte range {byte_off}..{end} exceeds file length {}",
                         self.len
                     )));
                 }
                 row_offsets.push(byte_off);
 
-                if outer_axes == 1 {
-                    break;
-                }
-                let mut ax = 1;
-                loop {
-                    idx[ax] += 1;
-                    if idx[ax] < shape[ax] {
-                        break;
-                    }
-                    idx[ax] = 0;
-                    ax += 1;
-                    if ax == outer_axes {
-                        // Sentinel: drop out of the outer loop.
-                        break;
-                    }
-                }
-                if (1..outer_axes).all(|ax| idx[ax] == 0) {
+                if !next_subarray_index(&mut idx, shape) {
                     break;
                 }
             }

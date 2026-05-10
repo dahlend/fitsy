@@ -11,6 +11,7 @@ pub mod file;
 pub mod image;
 pub mod kind;
 pub mod random_groups;
+pub(crate) mod subarray;
 
 pub use ascii_table::{AsciiCell, AsciiColumn, AsciiFormat, AsciiTableHdu};
 pub use bintable::{BinColumn, BinFieldKind, BinFormat, BinTableHdu, BinValue, IntStorage};

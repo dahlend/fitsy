@@ -36,6 +36,18 @@ pub enum CelestialFrame {
     Other,
 }
 
+/// Mapping between named celestial frames and their CTYPE axis-prefix
+/// pair `(lon, lat)`. `Other` is excluded: it is the catch-all frame
+/// for unrecognized prefixes and is not part of the parsing table
+/// (its serialization-time prefix is hard-coded as `XLON`/`XLAT`).
+const NAMED_FRAME_PREFIXES: &[(CelestialFrame, &str, &str)] = &[
+    (CelestialFrame::Equatorial, "RA--", "DEC-"),
+    (CelestialFrame::Galactic, "GLON", "GLAT"),
+    (CelestialFrame::Ecliptic, "ELON", "ELAT"),
+    (CelestialFrame::Supergalactic, "SLON", "SLAT"),
+    (CelestialFrame::HelioEcliptic, "HLON", "HLAT"),
+];
+
 impl CelestialFrame {
     /// Recognize the frame from the first 4 characters of the
     /// longitude axis `CTYPE` value.
@@ -49,6 +61,27 @@ impl CelestialFrame {
             "HLON" => Self::HelioEcliptic,
             _ => Self::Other,
         }
+    }
+
+    /// Canonical CTYPE axis-prefix pair `(lon, lat)` for this frame.
+    /// `Other` is encoded as `("XLON", "XLAT")` per Paper II Sec.3.1.
+    #[must_use]
+    pub fn axis_prefixes(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Equatorial => ("RA--", "DEC-"),
+            Self::Galactic => ("GLON", "GLAT"),
+            Self::Ecliptic => ("ELON", "ELAT"),
+            Self::Supergalactic => ("SLON", "SLAT"),
+            Self::HelioEcliptic => ("HLON", "HLAT"),
+            Self::Other => ("XLON", "XLAT"),
+        }
+    }
+
+    /// Iterate the five named frames (excludes `Other`). Useful for
+    /// scanning a header's CTYPE values to pick a celestial axis pair.
+    pub(crate) fn named_with_prefixes()
+    -> impl Iterator<Item = (Self, &'static str, &'static str)> {
+        NAMED_FRAME_PREFIXES.iter().copied()
     }
 }
 

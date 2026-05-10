@@ -210,31 +210,15 @@ impl<'a> ImageHdu<'a> {
     /// I/O is still bounded by the volume of the requested cuboid
     /// (not the full image).
     pub fn read_subarray<T: Pixel>(&self, start: &[u64], shape: &[u64]) -> Result<ImageData<T>> {
+        use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
+
         if T::BITPIX != self.bitpix {
             return Err(FitsError::HduMismatch {
                 expected: bitpix_name(T::BITPIX),
                 found: bitpix_name(self.bitpix).into(),
             });
         }
-        if start.len() != self.axes.len() || shape.len() != self.axes.len() {
-            return Err(FitsError::Data(format!(
-                "read_subarray: start/shape have length {}/{}, expected NAXIS = {}",
-                start.len(),
-                shape.len(),
-                self.axes.len()
-            )));
-        }
-        for (i, (&s, &n)) in start.iter().zip(shape.iter()).enumerate() {
-            let axis = self.axes[i];
-            if s.checked_add(n).is_none_or(|end| end > axis) {
-                return Err(FitsError::Data(format!(
-                    "read_subarray: axis {} (NAXIS{}) range {s}..{} out of bounds (length {axis})",
-                    i,
-                    i + 1,
-                    s + n
-                )));
-            }
-        }
+        validate_subarray_shape(&self.axes, start, shape, "read_subarray")?;
         if shape.contains(&0) {
             return ImageData::new(Vec::new(), shape.to_vec());
         }
@@ -242,13 +226,7 @@ impl<'a> ImageHdu<'a> {
         let total: usize = shape.iter().copied().product::<u64>() as usize;
         let mut out: Vec<T> = Vec::with_capacity(total);
 
-        // Strides in elements for each axis (FITS order, NAXIS1 first).
-        let mut strides: Vec<u64> = Vec::with_capacity(self.axes.len());
-        let mut s = 1_u64;
-        for &a in &self.axes {
-            strides.push(s);
-            s = s.saturating_mul(a);
-        }
+        let strides = checked_strides(&self.axes, "read_subarray")?;
 
         let n1 = shape[0];
         let row_bytes = (n1 as usize) * bsize;
@@ -256,7 +234,6 @@ impl<'a> ImageHdu<'a> {
         // Recursively iterate axes 1..NAXIS, copying contiguous rows
         // of length n1 along axis 0.
         let mut idx = vec![0_u64; self.axes.len()];
-        let outer_axes = self.axes.len();
         loop {
             // Axis-0 contribution to the flat element offset.
             let mut elem_off: u64 = start[0];
@@ -268,22 +245,8 @@ impl<'a> ImageHdu<'a> {
             for el in chunk.chunks_exact(bsize) {
                 out.push(T::from_be_bytes(el));
             }
-            if outer_axes == 1 {
+            if !next_subarray_index(&mut idx, shape) {
                 break;
-            }
-            // Increment the outer-axes counter (axis 1 is fastest in
-            // the iteration; that matches contiguous order in memory).
-            let mut ax = 1;
-            loop {
-                idx[ax] += 1;
-                if idx[ax] < shape[ax] {
-                    break;
-                }
-                idx[ax] = 0;
-                ax += 1;
-                if ax == outer_axes {
-                    return ImageData::new(out, shape.to_vec());
-                }
             }
         }
         ImageData::new(out, shape.to_vec())
