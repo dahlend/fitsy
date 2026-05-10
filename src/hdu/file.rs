@@ -372,10 +372,10 @@ impl FitsFile {
         let total_elems: u64 = shape
             .iter()
             .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| FitsError::Data(format!("shape product overflows u64")))?;
+            .ok_or_else(|| FitsError::Data("shape product overflows u64".into()))?;
         let total_bytes = (total_elems as usize)
             .checked_mul(bsize)
-            .ok_or_else(|| FitsError::Data(format!("total bytes overflows usize")))?;
+            .ok_or_else(|| FitsError::Data("total bytes overflows usize".into()))?;
         let mut out = vec![0_u8; total_bytes];
         if total_elems == 0 {
             return Ok(out);
@@ -396,13 +396,13 @@ impl FitsFile {
                     .checked_add(io)
                     .and_then(|v| v.checked_mul(strides[ax]))
                     .and_then(|v| elem_off.checked_add(v))
-                    .ok_or_else(|| FitsError::Data(format!("element offset overflows u64")))?;
+                    .ok_or_else(|| FitsError::Data("element offset overflows u64".into()))?;
                 elem_off = s;
             }
             let byte_off = elem_off
                 .checked_mul(bsize as u64)
                 .and_then(|v| data_offset.checked_add(v))
-                .ok_or_else(|| FitsError::Data(format!("byte offset overflows u64")))?;
+                .ok_or_else(|| FitsError::Data("byte offset overflows u64".into()))?;
 
             let dst = &mut out[dst_row_start..dst_row_start + row_bytes];
             match &self.backing {
