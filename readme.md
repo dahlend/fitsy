@@ -9,7 +9,7 @@ Read and write astronomical FITS files with WCS coordinates.
 - Reads and writes fits files of all image types, and tables (bin and ascii).
 - Query subsets of images without loading the whole thing.
 - Reads `.fz` compressed images.
-- Parses all WCS Projections, including spectral (if we a missing one let me know!)
+- Parses all WCS Projections, including spectral (if we are missing one let me know!)
 - SIP, TPV, TNX, and DSS distortion support.
 - Support for fitting WCS as well.
 - Hierarchy/History support.
