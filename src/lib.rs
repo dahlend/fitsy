@@ -64,22 +64,22 @@
 //! # Runnable examples
 //!
 //! Each row below is a real file under
-//! [`examples/`](https://github.com/ddahlen/fitsy/tree/main/examples).
+//! [`examples/`](https://github.com/dahlend/fitsy/tree/main/examples).
 //! Clone the repo and run any of them with `cargo run --example NAME`:
 //!
 //! | Example                                                                              | Description                                              |
 //! |--------------------------------------------------------------------------------------|----------------------------------------------------------|
-//! | [`read_image`](https://github.com/ddahlen/fitsy/blob/main/examples/read_image.rs)    | Open an image, inspect header, decode pixels             |
-//! | [`read_table`](https://github.com/ddahlen/fitsy/blob/main/examples/read_table.rs)    | Iterate columns of a binary table and decode cells       |
-//! | [`write_image`](https://github.com/ddahlen/fitsy/blob/main/examples/write_image.rs)  | Build and write a 2D image FITS file                     |
-//! | [`write_table`](https://github.com/ddahlen/fitsy/blob/main/examples/write_table.rs)  | Build and write a multi-column binary table              |
-//! | [`wcs`](https://github.com/ddahlen/fitsy/blob/main/examples/wcs.rs)                  | Pixel &lt;-&gt; sky transforms on the bundled NGC 2403 image     |
-//! | [`fit_wcs`](https://github.com/ddahlen/fitsy/blob/main/examples/fit_wcs.rs)          | Fit a celestial WCS from pixel/sky correspondences       |
+//! | [`read_image`](https://github.com/dahlend/fitsy/blob/main/examples/read_image.rs)    | Open an image, inspect header, decode pixels             |
+//! | [`read_table`](https://github.com/dahlend/fitsy/blob/main/examples/read_table.rs)    | Iterate columns of a binary table and decode cells       |
+//! | [`write_image`](https://github.com/dahlend/fitsy/blob/main/examples/write_image.rs)  | Build and write a 2D image FITS file                     |
+//! | [`write_table`](https://github.com/dahlend/fitsy/blob/main/examples/write_table.rs)  | Build and write a multi-column binary table              |
+//! | [`wcs`](https://github.com/dahlend/fitsy/blob/main/examples/wcs.rs)                  | Pixel &lt;-&gt; sky transforms on the bundled NGC 2403 image     |
+//! | [`fit_wcs`](https://github.com/dahlend/fitsy/blob/main/examples/fit_wcs.rs)          | Fit a celestial WCS from pixel/sky correspondences       |
 //!
 //! Sample data lives in
-//! [`examples/data/`](https://github.com/ddahlen/fitsy/tree/main/examples/data),
+//! [`examples/data/`](https://github.com/dahlend/fitsy/tree/main/examples/data),
 //! and parallel Python scripts (for the `python` feature) are under
-//! [`examples/python/`](https://github.com/ddahlen/fitsy/tree/main/examples/python).
+//! [`examples/python/`](https://github.com/dahlend/fitsy/tree/main/examples/python).
 //!
 //! # Cargo features
 //!

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fitsy"
-version = "0.1.1"
+version = "0.1.2"
 description = "Strictly-conformant FITS 4.0 reader and writer."
 readme = "readme.md"
 license = { text = "MIT OR Apache-2.0" }
@@ -25,11 +25,11 @@ classifiers = [
 dependencies = ["numpy>=1.23"]
 
 [project.urls]
-Homepage = "https://github.com/ddahlen/fitsy"
-Repository = "https://github.com/ddahlen/fitsy"
-Documentation = "https://github.com/ddahlen/fitsy#readme"
-Changelog = "https://github.com/ddahlen/fitsy/blob/main/CHANGELOG.md"
-Issues = "https://github.com/ddahlen/fitsy/issues"
+Homepage = "https://github.com/dahlend/fitsy"
+Repository = "https://github.com/dahlend/fitsy"
+Documentation = "https://github.com/dahlend/fitsy#readme"
+Changelog = "https://github.com/dahlend/fitsy/blob/main/CHANGELOG.md"
+Issues = "https://github.com/dahlend/fitsy/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

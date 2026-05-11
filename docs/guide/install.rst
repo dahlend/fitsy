@@ -24,7 +24,7 @@ and Python 3.10+.
 .. code-block:: console
 
    $ pip install maturin
-   $ git clone https://github.com/ddahlen/fitsy
+   $ git clone https://github.com/dahlend/fitsy
    $ cd fitsy
    $ maturin develop --release --features python
 
