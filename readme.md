@@ -6,13 +6,29 @@
 
 Read and write astronomical FITS files with WCS coordinates.
 
-A pure-Rust implementation of FITS file I/O and WCS coordinate
-transforms. Reads and writes images of all `BITPIX` types, binary
-and ASCII tables, and random-groups HDUs; reads `.fz` compressed
-images; parses the standard WCS suite plus the SIP, TPV, TNX, and
-DSS conventions.
+- Reads and writes fits files of all image types, and tables (bin and ascii).
+- Query subsets of images without loading the whole thing.
+- Reads `.fz` compressed images.
+- Parses all WCS Projections, including spectral (if we a missing one let me know!)
+- SIP, TPV, TNX, and DSS distortion support.
+- Support for fitting WCS as well.
+- Hierarchy/History support.
 
-Available as a Python package and a Rust crate.
+Available as a Python package and a Rust crate with minimal dependencies.
+
+I have tried my best to make this fully compliant with modern fits requirements, if
+something is missing please let me know.
+
+## Memory Mapping
+
+The fits standard defines data using big-endian values, all modern computers are little
+endian. What this means is that when you load data from a fits file, the moment you do
+anything with it (even plot it) your computer has to flip the endian-ness of the data.
+This means putting it into memory. As a result of this, memory mapping is pretty much
+useless in practice.
+
+Because of this, Fitsy has optimized loading subsections of data from images into memory
+instead of memory mapping, this includes editing in place.
 
 ## Python
 
@@ -38,13 +54,6 @@ img = fitsy.image(np.zeros((512, 512), dtype=np.float32),
 fitsy.write("out.fits", [img])
 ```
 
-Supports:
-- Images of all `BITPIX` types
-- Binary and ASCII tables (fixed-width columns)
-- Tile-compressed image read (RICE_1, GZIP_1/2, HCOMPRESS_1, PLIO_1)
-- Random-groups HDUs
-- WCS celestial projections from Paper II + SIP, TPV, TNX, DSS conventions
-
 ### Build the wheel from source
 
 ```bash
@@ -57,7 +66,7 @@ maturin develop --features python
 
 ```toml
 [dependencies]
-fitsy = { version = "0.1", features = ["compression"] }
+fitsy = { version = "0.1.2", features = ["compression"] }
 ```
 
 ```rust
