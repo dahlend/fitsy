@@ -256,7 +256,7 @@ impl Header {
         if let Some(v) = self.optional_real("MJD-OBS") {
             return mjd_to_utc(v, &ts);
         }
-        if let Some(dt) = IsoDateTime::parse(self.optional_string("DATE-OBS")?) {
+        if let Some(dt) = self.optional_string("DATE-OBS").and_then(IsoDateTime::parse) {
             return mjd_to_utc(dt.mjd(), &ts);
         }
         // JEPOCH: J = 2000.0 + (JD - 2451545.0) / 365.25 -> MJD = 51544.5 + (J - 2000.0) * 365.25
