@@ -997,7 +997,7 @@ impl PyHeader {
     ///     A new independent snapshot of this header (fixed when
     ///     ``fix=True``, otherwise an unmodified clone).
     #[pyo3(signature = (fix = false, warn = true))]
-    fn validate(&self, py: Python<'_>, fix: bool, warn: bool) -> PyResult<Py<PyHeader>> {
+    fn validate(&self, py: Python<'_>, fix: bool, warn: bool) -> PyResult<Py<Self>> {
         let (diags, fixed_hdr) = self.lock().validate(fix);
         if warn {
             let warnings = py.import("warnings")?;
@@ -1012,7 +1012,7 @@ impl PyHeader {
         }
         Py::new(
             py,
-            PyHeader {
+            Self {
                 inner: Arc::new(Mutex::new(fixed_hdr)),
                 read_only: false,
                 dirty: None,
