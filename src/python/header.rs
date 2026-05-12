@@ -7,7 +7,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::header::{Header, Value};
+use crate::header::{Header, Level, Value};
 
 /// Convert a fitsy `Value` to a native Python object.
 fn value_to_py(py: Python<'_>, v: &Value) -> Py<PyAny> {
@@ -826,6 +826,181 @@ impl PyHeader {
     #[getter]
     fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    // -- Time accessors -------------------------------------------------------
+
+    /// Creation date of this HDU (``DATE``), always UTC, as an ISO-8601 string.
+    ///
+    /// Returns ``None`` if the keyword is absent.
+    #[getter]
+    fn date(&self) -> Option<String> {
+        let h = self.lock();
+        h.date().map(|dt| {
+            if dt.hour == 0 && dt.minute == 0 && dt.second == 0 && dt.frac_second == 0.0 {
+                format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day)
+            } else {
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+                    dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+                )
+            }
+        })
+    }
+
+    /// Active time scale (``TIMESYS``), upper-cased.
+    ///
+    /// Returns ``"UTC"`` when the keyword is absent, per the FITS standard
+    /// default.
+    ///
+    /// Returns
+    /// -------
+    /// str
+    ///     One of ``"UTC"``, ``"TAI"``, ``"TT"``, ``"TDB"``, ``"TCG"``,
+    ///     ``"TCB"``, ``"GPS"``, ``"LOCAL"``, etc. (WCS Paper IV Table 1).
+    #[getter]
+    fn time_sys(&self) -> String {
+        self.lock().time_sys()
+    }
+
+    /// Reference epoch as MJD: ``MJDREFI``+``MJDREFF`` -> ``MJDREF`` -> ``JDREFI``+``JDREFF``
+    /// -> ``JDREF`` -> ``DATEREF``. Zero point for relative time values in the HDU.
+    #[getter]
+    fn mjd_ref(&self) -> Option<f64> {
+        self.lock().mjd_ref()
+    }
+
+    /// Time unit for numeric time values (``TIMEUNIT``), lower-cased.
+    ///
+    /// Returns ``"s"`` when the keyword is absent (FITS standard default).
+    #[getter]
+    fn time_unit(&self) -> String {
+        self.lock().time_unit()
+    }
+
+    /// Start of the observation as MJD in the native ``TIMESYS`` scale.
+    ///
+    /// Effective exposure time in seconds (``XPOSURE``), excluding dead time.
+    /// ``None`` if absent or ``TIMEUNIT`` is unrecognized.
+    #[getter]
+    fn time_exposure(&self) -> Option<f64> {
+        self.lock().time_exposure()
+    }
+
+    /// Wall-clock elapsed time in seconds (``TELAPSE``), including dead time.
+    /// ``None`` if absent or ``TIMEUNIT`` is unrecognized.
+    #[getter]
+    fn time_elapsed(&self) -> Option<f64> {
+        self.lock().time_elapsed()
+    }
+
+    /// Start of the observation as UTC MJD. Reads ``MJD-BEG``/``DATE-BEG``/``TSTART``
+    /// and converts from ``TIMESYS``; falls back to ``UTSTART``.
+    #[getter]
+    fn mjd_begin_utc(&self) -> Option<f64> {
+        self.lock().mjd_begin_utc()
+    }
+
+    /// End of the observation as UTC MJD. Reads ``MJD-END``/``DATE-END``/``TSTOP``
+    /// and converts from ``TIMESYS``; falls back to ``UTSTOP``.
+    #[getter]
+    fn mjd_end_utc(&self) -> Option<f64> {
+        self.lock().mjd_end_utc()
+    }
+
+    /// Average/mid time of the observation as UTC MJD (``MJD-AVG``/``DATE-AVG``).
+    #[getter]
+    fn mjd_avg_utc(&self) -> Option<f64> {
+        self.lock().mjd_avg_utc()
+    }
+
+    /// Observation start converted to UTC MJD, regardless of ``TIMESYS``.
+    ///
+    /// Handles the full set of time scales defined in WCS Paper IV:
+    /// ``UTC``, ``GMT``, ``TAI``, ``TT``/``TDT``/``ET``, ``GPS``,
+    /// ``TCG``, ``TDB``, and ``TCB``.  Barycentric/geocentric scales
+    /// are reduced to TT via the linear relations in Sec.3.1.2 before the
+    /// leap-second table is applied.
+    ///
+    /// Returns
+    /// -------
+    /// float or None
+    ///     UTC MJD of the observation start, or ``None`` if the observation
+    ///     time is absent or the time scale cannot be reduced to UTC
+    ///     (e.g. ``LOCAL``, ``UT1``).
+    #[getter]
+    fn mjd_obs_utc(&self) -> Option<f64> {
+        self.lock().mjd_obs_utc()
+    }
+
+    // -- Observatory location -------------------------------------------------
+
+    /// Observatory location as ITRS/ECEF Cartesian ``(x, y, z)`` in metres.
+    /// Reads ``OBSGEO-X/Y/Z`` directly; falls back to geodetic keywords
+    /// converted via WGS84.
+    #[getter]
+    fn obs_ecef(&self) -> Option<(f64, f64, f64)> {
+        let g = self.lock().obs_ecef()?;
+        Some((g.x, g.y, g.z))
+    }
+
+    /// Observatory geodetic coordinates ``(lat_deg, lon_deg, alt_m)`` on the
+    /// WGS84 ellipsoid.
+    ///
+    /// Tries ``OBSGEO-B/L/H`` first, then non-standard variants
+    /// (``SITELAT``, ``SITELONG``, ``SITEELEV``, etc.). ``None`` if neither
+    /// latitude nor longitude is present.
+    #[getter]
+    fn obs_geodetic(&self) -> Option<(f64, f64, f64)> {
+        let g = self.lock().obs_geodetic()?;
+        Some((g.lat, g.lon, g.alt))
+    }
+
+    /// Orbit ephemeris file (``OBSORBIT``): URI, URL, or name.
+    #[getter]
+    fn obs_orbit(&self) -> Option<String> {
+        self.lock().obs_orbit()
+    }
+
+    /// Check the header for deprecated, non-standard, or missing keywords.
+    ///
+    /// Parameters
+    /// ----------
+    /// fix : bool, optional
+    ///     When ``True``, every suggested fix is applied to the returned
+    ///     header copy. Defaults to ``False``.
+    /// warn : bool, optional
+    ///     When ``True`` (the default), each issue is emitted as a Python
+    ///     :mod:`warnings` warning prefixed with ``[warning]`` or
+    ///     ``[error]``. Set to ``False`` to suppress all output.
+    ///
+    /// Returns
+    /// -------
+    /// Header
+    ///     A new independent snapshot of this header (fixed when
+    ///     ``fix=True``, otherwise an unmodified clone).
+    #[pyo3(signature = (fix = false, warn = true))]
+    fn validate(&self, py: Python<'_>, fix: bool, warn: bool) -> PyResult<Py<PyHeader>> {
+        let (diags, fixed_hdr) = self.lock().validate(fix);
+        if warn {
+            let warnings = py.import("warnings")?;
+            for d in diags {
+                let level = match d.level {
+                    Level::Warning => "warning",
+                    Level::Error => "error",
+                };
+                let msg = format!("[{level}] {}: {}", d.keyword, d.message);
+                warnings.call_method1("warn", (msg,))?;
+            }
+        }
+        Py::new(
+            py,
+            PyHeader {
+                inner: Arc::new(Mutex::new(fixed_hdr)),
+                read_only: false,
+                dirty: None,
+            },
+        )
     }
 }
 

@@ -125,7 +125,7 @@ pub use hdu::{
     BinFormat, BinTableBuilder, BinTableHdu, BinValue, FitsFile, FitsOpenOptions, Hdu,
     ImageBuilder, ImageHdu, ImagePixels,
 };
-pub use header::{Card, CommentaryKind, Header, IsoDateTime, Value};
+pub use header::{Card, CommentaryKind, Diagnostic, Fix, Header, IsoDateTime, Level, Value};
 #[cfg(not(target_arch = "wasm32"))]
 pub use io::FitsAppender;
 #[cfg(not(target_arch = "wasm32"))]

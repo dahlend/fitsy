@@ -41,7 +41,10 @@ impl Wcs {
         // WCSAXES (Standard Sec.8.2): may declare more (or fewer) WCS
         // axes than NAXIS. When present it overrides NAXIS for the
         // dimensionality of the WCS pipeline.
-        let naxis = match header.first(&format!("WCSAXES{alt_suffix}")) {
+        let naxis = match header
+            .first(&format!("WCSAXES{alt_suffix}"))
+            .or_else(|| header.first(&format!("WCSDIM{alt_suffix}")))
+        {
             Some(Value::Integer(n)) if *n > 0 => *n as usize,
             _ => header_naxis,
         };
@@ -178,7 +181,7 @@ impl Wcs {
             || RadeSys::default_for_equinox(equinox),
             RadeSys::from_keyword,
         );
-        let mjd_obs = read_optional_real(header, "MJD-OBS");
+        let mjd_obs = header.mjd_obs_utc();
 
         // WCSNAME (Standard Sec.8.2.6): free-form name for this alternate.
         let wcsname = read_optional_string(header, &format!("WCSNAME{alt_suffix}"));

@@ -9,13 +9,17 @@
 
 pub mod builder;
 pub mod card;
+pub mod observatory;
 pub mod reserved;
+pub mod validation;
 pub mod time;
 pub mod units;
 pub mod value;
 
 pub use builder::CommentaryKind;
 pub use card::{CARD_SIZE, Card, CardKind};
+pub use observatory::{ObsGeo, ObsGeodetic};
+pub use validation::{Diagnostic, Fix, Level};
 pub use time::IsoDateTime;
 pub use value::Value;
 

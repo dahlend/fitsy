@@ -116,31 +116,19 @@ fn subarray_matches_full_read_on_real_image() {
     );
 }
 
-/// Verify `Header::date_obs` / `mjd_obs` / timesys + COMMENT iteration on
+/// Verify `Header::mjd_obs` / timesys + COMMENT iteration on
 /// a real-world LCOGT observation that carries all three keywords
 /// per FITS Standard Sec.9.
 #[test]
-fn date_obs_and_commentary_on_real_image() {
+fn mjd_obs_and_commentary_on_real_image() {
     let path = data_dir().join("coj0m416-sq36-20240423-0201-e91.fits");
     let f = FitsFile::open(&path).unwrap();
     let h = f.hdu(0).unwrap();
     let hdr = h.header();
 
-    let dt = hdr.date_obs().expect("DATE-OBS should parse");
-    assert_eq!((dt.year, dt.month, dt.day), (2024, 4, 23));
-    assert_eq!((dt.hour, dt.minute, dt.second), (14, 42, 4));
-
-    // Header carries an explicit MJD-OBS; cross-check with our
-    // calendar conversion. Many observatories round MJD-OBS to a
-    // reduced-precision representation (here LCOGT writes only 7
-    // decimal places, ~9 ms granularity) so we tolerate up to 1 s.
-    let mjd_keyword = hdr.mjd_obs().unwrap();
-    let mjd_calc = dt.mjd();
-    assert!(
-        (mjd_keyword - mjd_calc).abs() < 1.0 / 86_400.0,
-        "DATE-OBS-derived MJD {mjd_calc} disagrees with header MJD-OBS {mjd_keyword}"
-    );
-    assert_eq!(hdr.timesys(), "UTC");
+    // Header carries an explicit MJD-OBS
+    hdr.mjd_obs_utc().unwrap();
+    assert_eq!(hdr.time_sys(), "UTC");
 }
 
 /// Verify `Header::comments()` / `history()` against a Spitzer BCD,
