@@ -863,8 +863,9 @@ impl PyHeader {
         self.lock().time_sys()
     }
 
-    /// Reference epoch as MJD: ``MJDREFI``+``MJDREFF`` -> ``MJDREF`` -> ``JDREFI``+``JDREFF``
-    /// -> ``JDREF`` -> ``DATEREF``. Zero point for relative time values in the HDU.
+    /// Reference epoch as MJD. Reads ``MJDREFI``+``MJDREFF`` -> ``MJDREF`` ->
+    /// ``JDREFI``+``JDREFF`` -> ``JDREF`` -> ``DATEREF``. Zero point for
+    /// relative time values in the HDU.
     #[getter]
     fn mjd_ref(&self) -> Option<f64> {
         self.lock().mjd_ref()

@@ -304,7 +304,7 @@ impl Header {
     }
 
     /// Average time as UTC MJD: `MJD-AVG` -> `DATE-AVG` (converted via `TIMESYS`)
-    /// -> mean of [`Self::mjd_beg_utc`] and [`Self::mjd_end_utc`].
+    /// -> mean of [`Self::mjd_begin_utc`] and [`Self::mjd_end_utc`].
     #[must_use]
     pub fn mjd_avg_utc(&self) -> Option<f64> {
         if let Some(mjd) = self.optional_real("MJD-AVG").or_else(|| {
