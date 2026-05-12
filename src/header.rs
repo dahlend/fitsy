@@ -11,16 +11,16 @@ pub mod builder;
 pub mod card;
 pub mod observatory;
 pub mod reserved;
-pub mod validation;
 pub mod time;
 pub mod units;
+pub mod validation;
 pub mod value;
 
 pub use builder::CommentaryKind;
 pub use card::{CARD_SIZE, Card, CardKind};
 pub use observatory::{ObsGeo, ObsGeodetic};
-pub use validation::{Diagnostic, Fix, Level};
 pub use time::IsoDateTime;
+pub use validation::{Diagnostic, Fix, Level};
 pub use value::Value;
 
 use std::collections::BTreeMap;
@@ -153,6 +153,24 @@ impl Header {
         self.blocks
     }
 
+    /// Return `keyword` with `_` and `-` swapped, for use as a fallback query
+    /// key. Returns `None` when the keyword contains neither character.
+    pub(crate) fn alt_key(keyword: &str) -> Option<String> {
+        if !keyword.contains(['-', '_']) {
+            return None;
+        }
+        Some(
+            keyword
+                .chars()
+                .map(|c| match c {
+                    '-' => '_',
+                    '_' => '-',
+                    c => c,
+                })
+                .collect(),
+        )
+    }
+
     /// Find the value of the first occurrence of `keyword`.
     ///
     /// # Examples
@@ -171,14 +189,21 @@ impl Header {
     /// ```
     #[must_use]
     pub fn first(&self, keyword: &str) -> Option<&Value> {
-        let idx = *self.index.get(keyword)?;
+        if let Some(&idx) = self.index.get(keyword) {
+            return self.cards[idx].value.as_ref();
+        }
+        // Some files use '_' where the standard uses '-' (e.g. MJD_OBS for MJD-OBS).
+        let &idx = self.index.get(Self::alt_key(keyword)?.as_str())?;
         self.cards[idx].value.as_ref()
     }
 
     /// True if `keyword` is present (with any kind).
     #[must_use]
     pub fn contains(&self, keyword: &str) -> bool {
-        self.cards.iter().any(|e| e.keyword == keyword)
+        if self.cards.iter().any(|e| e.keyword == keyword) {
+            return true;
+        }
+        Self::alt_key(keyword).is_some_and(|alt| self.cards.iter().any(|e| e.keyword == alt))
     }
 
     /// Iterate over the body text of every `COMMENT` card in the

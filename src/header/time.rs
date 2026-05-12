@@ -197,20 +197,6 @@ fn parse_hms(s: &str) -> Option<f64> {
     Some(f64::from(h) * 3_600.0 + f64::from(m) * 60.0 + f64::from(sec) + frac)
 }
 
-/// Convert a `TIMEUNIT` string to a day multiplier.
-/// Returns `None` for unrecognized units.
-fn timeunit_to_days(unit: &str) -> Option<f64> {
-    match unit.trim() {
-        "s" => Some(1.0 / 86_400.0),
-        "min" => Some(60.0 / 86_400.0),
-        "h" => Some(3_600.0 / 86_400.0),
-        "d" => Some(1.0),
-        "a" | "yr" => Some(365.25),
-        "cy" => Some(36_525.0),
-        _ => None,
-    }
-}
-
 impl Header {
     /// HDU creation date (`DATE`), always UTC.
     #[must_use]
@@ -256,7 +242,10 @@ impl Header {
         if let Some(v) = self.optional_real("MJD-OBS") {
             return mjd_to_utc(v, &ts);
         }
-        if let Some(dt) = self.optional_string("DATE-OBS").and_then(IsoDateTime::parse) {
+        if let Some(dt) = self
+            .optional_string("DATE-OBS")
+            .and_then(IsoDateTime::parse)
+        {
             return mjd_to_utc(dt.mjd(), &ts);
         }
         // JEPOCH: J = 2000.0 + (JD - 2451545.0) / 365.25 -> MJD = 51544.5 + (J - 2000.0) * 365.25
@@ -283,8 +272,8 @@ impl Header {
                     .map(|dt| dt.mjd())
             })
             .or_else(|| {
-                let t = self.optional_real("TSTART")?;
-                Some(self.mjd_ref()? + t * timeunit_to_days(&self.time_unit())?)
+                let seconds = self.read_time_in_seconds("TSTART")?;
+                Some(self.mjd_ref()? + seconds / 86_400.0)
             });
         if let Some(utc) = mjd.and_then(|m| mjd_to_utc(m, &ts)) {
             return Some(utc);
@@ -305,8 +294,8 @@ impl Header {
                     .map(|dt| dt.mjd())
             })
             .or_else(|| {
-                let t = self.optional_real("TSTOP")?;
-                Some(self.mjd_ref()? + t * timeunit_to_days(&self.time_unit())?)
+                let seconds = self.read_time_in_seconds("TSTOP")?;
+                Some(self.mjd_ref()? + seconds / 86_400.0)
             });
         if let Some(utc) = mjd.and_then(|m| mjd_to_utc(m, &ts)) {
             return Some(utc);
@@ -335,22 +324,31 @@ impl Header {
             .map_or_else(|| "s".into(), |s| s.trim().to_ascii_lowercase())
     }
 
-    /// Effective exposure time in seconds: `XPOSURE` (in `TIMEUNIT`) -> `EXPTIME`
-    /// (pre-standard, always seconds).
+    /// Effective exposure time in seconds: `XPOSURE` (in `TIMEUNIT`, with
+    /// per-card `[unit]` annotation as override) -> `EXPTIME` (pre-standard,
+    /// always seconds).
     #[must_use]
     pub fn time_exposure(&self) -> Option<f64> {
-        if let Some(raw) = self.optional_real("XPOSURE") {
-            return Some(raw * timeunit_to_days(&self.time_unit())? * 86_400.0);
+        if let Some(v) = self.read_time_in_seconds("XPOSURE") {
+            return Some(v);
         }
         // EXPTIME is a pre-standard keyword always expressed in seconds.
         self.optional_real("EXPTIME")
     }
 
-    /// Wall-clock elapsed time in seconds (`TELAPSE` in `TIMEUNIT`).
+    /// Wall-clock elapsed time in seconds (`TELAPSE` in `TIMEUNIT`, with
+    /// per-card `[unit]` annotation as override).
     #[must_use]
     pub fn time_elapsed(&self) -> Option<f64> {
-        let raw = self.optional_real("TELAPSE")?;
-        Some(raw * timeunit_to_days(&self.time_unit())? * 86_400.0)
+        self.read_time_in_seconds("TELAPSE")
+    }
+
+    /// Read a TIMEUNIT-scaled keyword and return its value in seconds.
+    /// Per-card `[unit]` annotation, if present, overrides the global TIMEUNIT.
+    fn read_time_in_seconds(&self, key: &str) -> Option<f64> {
+        let v = self.optional_real(key)?;
+        let unit = self.keyword_unit(key).unwrap_or_else(|| self.time_unit());
+        Some(v * super::units::si_factor(&unit)?)
     }
 
     /// Reference epoch as MJD: `MJDREFI`+`MJDREFF` -> `MJDREF` -> `JDREFI`+`JDREFF`

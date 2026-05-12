@@ -935,7 +935,7 @@ impl PyHeader {
 
     // -- Observatory location -------------------------------------------------
 
-    /// Observatory location as ITRS/ECEF Cartesian ``(x, y, z)`` in metres.
+    /// Observatory location as ITRS/ECEF Cartesian ``(x, y, z)`` in meters.
     /// Reads ``OBSGEO-X/Y/Z`` directly; falls back to geodetic keywords
     /// converted via WGS84.
     #[getter]
@@ -960,6 +960,23 @@ impl PyHeader {
     #[getter]
     fn obs_orbit(&self) -> Option<String> {
         self.lock().obs_orbit()
+    }
+
+    // -- Unit helpers ---------------------------------------------------------
+
+    /// Unit string for `key` extracted from the `[unit]` comment convention.
+    /// Returns ``None`` if the keyword is absent or carries no unit annotation.
+    fn unit_for(&self, key: &str) -> Option<String> {
+        self.lock().keyword_unit(key)
+    }
+
+    /// Value of `key` converted to the SI base unit for its dimension.
+    ///
+    /// Reads the unit from the `[unit]` comment annotation and applies the
+    /// conversion factor. Returns ``None`` if the keyword is absent,
+    /// non-numeric, unannotated, or the unit is unrecognized.
+    fn value_in_si(&self, key: &str) -> Option<f64> {
+        self.lock().real_in_unit(key, "")
     }
 
     /// Check the header for deprecated, non-standard, or missing keywords.

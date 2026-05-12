@@ -101,32 +101,38 @@ impl Header {
     /// Reads `OBSGEO-X/Y/Z` from keywords, without any fallback.
     fn read_cartesian_raw(&self) -> Option<ObsGeo> {
         Some(ObsGeo {
-            x: self.optional_real("OBSGEO-X")?,
-            y: self.optional_real("OBSGEO-Y")?,
-            z: self.optional_real("OBSGEO-Z")?,
+            x: self.real_in_unit("OBSGEO-X", "m")?,
+            y: self.real_in_unit("OBSGEO-Y", "m")?,
+            z: self.real_in_unit("OBSGEO-Z", "m")?,
         })
     }
 
     /// Reads geodetic keywords without any fallback.
     fn read_geodetic_raw(&self) -> Option<ObsGeodetic> {
         let lat = self
-            .optional_real("OBSGEO-B")
-            .or_else(|| self.optional_real("LAT-OBS"))
-            .or_else(|| self.optional_real("OBS-LAT"))
-            .or_else(|| self.optional_real("OBSLAT"))
-            .or_else(|| self.optional_real("SITELAT"))?;
+            .real_in_unit("OBSGEO-B", "DEG")
+            .or_else(|| self.real_in_unit("LAT-OBS", "DEG"))
+            .or_else(|| self.real_in_unit("OBS-LAT", "DEG"))
+            .or_else(|| self.real_in_unit("OBSLAT", "DEG"))
+            .or_else(|| self.real_in_unit("SITELAT", "DEG"))
+            .or_else(|| self.real_in_unit("GEOLAT", "DEG"))?;
         let lon = self
-            .optional_real("OBSGEO-L")
-            .or_else(|| self.optional_real("LONG-OBS"))
-            .or_else(|| self.optional_real("OBS-LONG"))
-            .or_else(|| self.optional_real("OBSLONG"))
-            .or_else(|| self.optional_real("SITELONG"))?;
+            .real_in_unit("OBSGEO-L", "DEG")
+            .or_else(|| self.real_in_unit("LONG-OBS", "DEG"))
+            .or_else(|| self.real_in_unit("OBS-LONG", "DEG"))
+            .or_else(|| self.real_in_unit("OBSLONG", "DEG"))
+            .or_else(|| self.real_in_unit("SITELONG", "DEG"))
+            .or_else(|| self.real_in_unit("GEOLON", "DEG"))?;
+        // Altitude keywords may carry a [unit] annotation (e.g. [km], [m]).
+        // optional_real_si_or_raw converts to meters when a recognized unit is
+        // present, otherwise returns the raw value (assumed meters per the standard).
         let alt = self
-            .optional_real("OBSGEO-H")
-            .or_else(|| self.optional_real("OBS-ELEV"))
-            .or_else(|| self.optional_real("OBSELEV"))
-            .or_else(|| self.optional_real("ALT-OBS"))
-            .or_else(|| self.optional_real("SITEELEV"))
+            .real_in_unit("OBSGEO-H", "m")
+            .or_else(|| self.real_in_unit("OBS-ELEV", "m"))
+            .or_else(|| self.real_in_unit("OBSELEV", "m"))
+            .or_else(|| self.real_in_unit("ALT-OBS", "m"))
+            .or_else(|| self.real_in_unit("SITEELEV", "m"))
+            .or_else(|| self.real_in_unit("GEOALT", "m"))
             .unwrap_or(0.0);
         Some(ObsGeodetic { lat, lon, alt })
     }
