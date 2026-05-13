@@ -66,7 +66,7 @@ maturin develop --features python
 
 ```toml
 [dependencies]
-fitsy = { version = "0.1.2", features = ["compression"] }
+fitsy = { version = "0.1.3", features = ["compression"] }
 ```
 
 ```rust
