@@ -148,6 +148,14 @@ impl FitsFile {
         let mut is_first = true;
 
         while cursor < total {
+            // Several CCD capture programs append a run of zero bytes after
+            // the final HDU (sometimes not even padded to the 2880-byte block
+            // size). An all-zero region can never be a valid HDU -- a header
+            // must begin with a keyword -- so treat an all-zero tail as
+            // padding and stop rather than failing the whole read.
+            if bytes[cursor as usize..total as usize].iter().all(|&b| b == 0) {
+                break;
+            }
             let header_start = cursor;
             let (header, header_blocks_bytes) = Header::parse(bytes, cursor)?;
             let header_end = header_start + header_blocks_bytes;
@@ -193,6 +201,11 @@ impl FitsFile {
         let mut is_first = true;
 
         while cursor < total {
+            // See `from_source`: tolerate an all-zero trailing region emitted
+            // by some non-standard writers instead of failing the read.
+            if remaining_is_zero(&file, cursor, total)? {
+                break;
+            }
             let header_start = cursor;
             let header_buf = read_header_blocks(&mut file, cursor, total)?;
             let (header, header_blocks_bytes) = Header::parse(&header_buf, 0)?;
@@ -988,6 +1001,26 @@ fn read_header_blocks(file: &mut File, cursor: u64, total: u64) -> Result<Vec<u8
     }
 }
 
+/// True if every byte in `start..total` is zero. Reads positionally in
+/// block-sized chunks and short-circuits on the first non-zero byte, so the
+/// common case (a real extension header follows) costs a single block read.
+/// Used to tolerate the all-zero trailing padding some non-standard writers
+/// append after the final HDU.
+#[cfg(not(target_arch = "wasm32"))]
+fn remaining_is_zero(file: &File, start: u64, total: u64) -> Result<bool> {
+    let mut off = start;
+    let mut buf = [0_u8; BLOCK_SIZE];
+    while off < total {
+        let want = ((total - off) as usize).min(BLOCK_SIZE);
+        pread_exact(file, off, &mut buf[..want])?;
+        if buf[..want].iter().any(|&b| b != 0) {
+            return Ok(false);
+        }
+        off += want as u64;
+    }
+    Ok(true)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn block_contains_end(block: &[u8]) -> bool {
     use crate::header::card::CARD_SIZE;
@@ -1170,6 +1203,22 @@ mod tests {
             phys,
             pixels.iter().map(|&v| f64::from(v)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn trailing_zero_padding_is_tolerated() {
+        // Several CCD capture programs append a run of zero bytes after the
+        // final HDU, sometimes not even padded to the 2880-byte block size
+        // (e.g. ZWO ASI camera captures). The primary HDU must still read.
+        let mut buf = build_simple_no_data();
+        // Non-block-aligned trailing zeros, as seen in the wild.
+        buf.extend(std::iter::repeat_n(0_u8, 12345));
+        let f = FitsFile::from_bytes(buf).unwrap();
+        assert_eq!(f.len(), 1);
+        match f.hdu(0).unwrap() {
+            Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
+            other => panic!("expected image, got {other:?}"),
+        }
     }
 
     fn build_simple_f_no_data() -> Vec<u8> {
