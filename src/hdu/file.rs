@@ -43,7 +43,10 @@ use crate::hdu::image::ImageHdu;
 use crate::hdu::kind::{ConformingHdu, Hdu};
 use crate::header::Header;
 use crate::header::value::Value;
-use crate::io::block::{BLOCK_SIZE, pad_to_block};
+use crate::io::block::pad_to_block;
+// `BLOCK_SIZE` is only referenced by the on-disk reader, which is excluded on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io::block::BLOCK_SIZE;
 use crate::io::source::ByteSource;
 
 /// Top-level FITS file. `Send` but not `Sync`; for concurrent access
@@ -60,7 +63,9 @@ pub struct FitsFile {
     header_bytes: Vec<Vec<u8>>,
     /// Lazy per-HDU data section cache. Populated on the first
     /// access via `pread`. Empty for in-memory backings (the bytes
-    /// live in `Backing::InMemory` instead).
+    /// live in `Backing::InMemory` instead) -- so on wasm, where the
+    /// on-disk backing is excluded, it is written but never read.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     data_cache: Vec<OnceLock<Vec<u8>>>,
     /// Map `EXTNAME` (trimmed) -> sorted list of HDU indices that
     /// declare it. Built once at open time so [`hdu_by_name`] is
@@ -750,6 +755,8 @@ impl FitsFile {
     pub fn verify_checksums(&self) -> Result<Vec<ChecksumReport>> {
         // Streaming chunk size for the on-disk path. 1 MiB is a
         // good balance between syscall overhead and peak RSS.
+        // Only the on-disk path uses it, so it is absent on wasm.
+        #[cfg(not(target_arch = "wasm32"))]
         const CHUNK: usize = 1 << 20;
 
         let mut out = Vec::with_capacity(self.hdu_spans.len());

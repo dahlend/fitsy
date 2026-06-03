@@ -22,6 +22,7 @@
 //! [`FitsDiff::compare`] to compare two already-loaded files.
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use crate::error::Result;
@@ -119,6 +120,7 @@ pub struct FitsDiff {
 
 impl FitsDiff {
     /// Open both files and compare them.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(a: impl AsRef<Path>, b: impl AsRef<Path>, options: DiffOptions) -> Result<Self> {
         let fa = FitsFile::open(a)?;
         let fb = FitsFile::open(b)?;
