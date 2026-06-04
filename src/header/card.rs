@@ -46,6 +46,23 @@ impl Card {
                 msg: format!("expected {CARD_SIZE} bytes, got {}", bytes.len()),
             });
         }
+        // NUL (0x00) is never a legal byte in a FITS header (Sec.3.2:
+        // headers are ASCII text 0x20..=0x7E). Yet many non-conforming
+        // writers leak NUL into cards -- zero-padding a keyword field,
+        // a quoted string, the value/comment area, the END card body, or
+        // whole post-END fill cards -- the natural artifact of writing
+        // into fixed-width buffers left zero-initialized. Map every NUL to
+        // a space so such cards parse. Other non-printable bytes are left
+        // untouched and rejected below, so a non-FITS file (binary garbage)
+        // is still caught.
+        let mut card = [0_u8; CARD_SIZE];
+        card.copy_from_slice(bytes);
+        for b in &mut card {
+            if *b == 0 {
+                *b = b' ';
+            }
+        }
+        let bytes: &[u8] = &card;
         for (i, &b) in bytes.iter().enumerate() {
             if !is_ascii_text(b) {
                 return Err(FitsError::Card {
@@ -312,6 +329,71 @@ mod tests {
     fn end_with_garbage_rejected() {
         let mut raw = make_card("END");
         raw[10] = b'X';
+        assert!(Card::parse(&raw, 0).is_err());
+    }
+
+    #[test]
+    fn end_card_nul_padded_accepted() {
+        // Some writers zero-fill the END card body instead of space-padding.
+        let mut raw = make_card("END");
+        for b in &mut raw[3..] {
+            *b = 0;
+        }
+        let c = Card::parse(&raw, 0).unwrap();
+        assert!(c.is_end());
+    }
+
+    #[test]
+    fn value_card_trailing_nul_padding_accepted() {
+        // Trailing NUL padding after the value is normalized to spaces.
+        let mut raw = make_card("OBJECT  = 'M31'");
+        for b in &mut raw[15..] {
+            *b = 0;
+        }
+        let c = Card::parse(&raw, 0).unwrap();
+        assert_eq!(c.keyword, "OBJECT");
+        assert_eq!(c.kind, CardKind::Value);
+    }
+
+    #[test]
+    fn all_nul_card_is_blank_commentary() {
+        // A whole zero card (post-END fill) normalizes to a blank card.
+        let raw = [0_u8; CARD_SIZE];
+        let c = Card::parse(&raw, 0).unwrap();
+        assert_eq!(c.keyword, "");
+        assert_eq!(c.kind, CardKind::Commentary);
+    }
+
+    #[test]
+    fn nul_padded_keyword_field_accepted() {
+        // Keyword field zero-padded instead of space-padded: "OBJECT\0\0".
+        let mut raw = make_card("OBJECT  = 'M31'");
+        raw[6] = 0;
+        raw[7] = 0;
+        let c = Card::parse(&raw, 0).unwrap();
+        assert_eq!(c.keyword, "OBJECT");
+        assert_eq!(c.kind, CardKind::Value);
+    }
+
+    #[test]
+    fn nul_inside_quoted_string_accepted() {
+        // A fixed-width string value zero-padded inside the quotes:
+        // "'M31\0\0\0\0\0'". The embedded NULs map to spaces.
+        let mut raw = make_card("OBJECT  = 'M31     '");
+        for b in &mut raw[13..18] {
+            *b = 0;
+        }
+        let c = Card::parse(&raw, 0).unwrap();
+        assert_eq!(c.keyword, "OBJECT");
+        assert_eq!(c.kind, CardKind::Value);
+    }
+
+    #[test]
+    fn non_nul_binary_garbage_still_rejected() {
+        // A non-printable byte that is not NUL still errors -- this is how
+        // a non-FITS / binary file is caught rather than silently parsed.
+        let mut raw = make_card("OBJECT  = 'M31'");
+        raw[2] = 0xFF;
         assert!(Card::parse(&raw, 0).is_err());
     }
 

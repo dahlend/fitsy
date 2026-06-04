@@ -1024,9 +1024,11 @@ fn remaining_is_zero(file: &File, start: u64, total: u64) -> Result<bool> {
 #[cfg(not(target_arch = "wasm32"))]
 fn block_contains_end(block: &[u8]) -> bool {
     use crate::header::card::CARD_SIZE;
+    // Accept NUL as well as space after `END`: some writers zero-pad the
+    // END card rather than space-padding it (see `Card::parse`).
     block
         .chunks_exact(CARD_SIZE)
-        .any(|c| c.starts_with(b"END") && c[3..].iter().all(|&b| b == b' '))
+        .any(|c| c.starts_with(b"END") && c[3..].iter().all(|&b| b == b' ' || b == 0))
 }
 
 /// Positional read filling `buf` exactly. Loops over short reads
@@ -1219,6 +1221,57 @@ mod tests {
             Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
             other => panic!("expected image, got {other:?}"),
         }
+    }
+
+    /// SIMPLE primary HDU whose single header block is NUL-padded after
+    /// the END card instead of space-padded (a non-conforming form emitted
+    /// by some capture software).
+    fn build_simple_nul_padded_header() -> Vec<u8> {
+        let cards = [
+            pad_card("SIMPLE  =                    T"),
+            pad_card("BITPIX  =                    8"),
+            pad_card("NAXIS   =                    0"),
+            pad_card("END"),
+        ];
+        let mut buf = Vec::new();
+        for c in &cards {
+            buf.extend_from_slice(c);
+        }
+        while buf.len() % BLOCK_SIZE != 0 {
+            buf.push(0); // NUL pad rather than space pad
+        }
+        buf
+    }
+
+    #[test]
+    fn nul_padded_header_block_is_tolerated() {
+        let bytes = build_simple_nul_padded_header();
+        let f = FitsFile::from_bytes(bytes).unwrap();
+        assert_eq!(f.len(), 1);
+        match f.hdu(0).unwrap() {
+            Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
+            other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn nul_padded_header_and_trailing_zeros_on_disk() {
+        // Exercises the on-disk `from_file` path (the in-memory tests do
+        // not): a NUL-padded header block followed by a non-block-aligned
+        // run of trailing zero bytes, both of which must be tolerated.
+        let mut bytes = build_simple_nul_padded_header();
+        bytes.extend(std::iter::repeat_n(0_u8, 4321));
+        let dir = std::env::temp_dir();
+        let path = dir.join("fitsy_nul_padded_test.fits");
+        std::fs::write(&path, &bytes).unwrap();
+        let f = FitsFile::open(&path).unwrap();
+        assert_eq!(f.len(), 1);
+        match f.hdu(0).unwrap() {
+            Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
+            other => panic!("expected image, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     fn build_simple_f_no_data() -> Vec<u8> {

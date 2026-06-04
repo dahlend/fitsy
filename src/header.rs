@@ -82,7 +82,9 @@ impl Header {
 
                 if end_seen {
                     // Sec.4.4.1.2: every card after END must be all spaces.
-                    if raw.iter().any(|&b| b != b' ') {
+                    // Tolerate NUL padding here too (see `Card::parse`): some
+                    // writers zero-fill the remainder of the final header block.
+                    if raw.iter().any(|&b| b != b' ' && b != 0) {
                         return Err(FitsError::EndCardMisplaced { offset: off as u64 });
                     }
                     continue;
