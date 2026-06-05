@@ -156,6 +156,14 @@ impl FitsFile {
             if bytes[cursor as usize..total as usize].iter().all(|&b| b == 0) {
                 break;
             }
+            // Some capture programs (e.g. ZWO ASI Studio) append vendor
+            // metadata or thumbnail blobs after the last HDU's data section.
+            // A conforming extension must begin with an XTENSION card
+            // (Standard Sec.7.1.3); if the bytes here don't, treat them as
+            // trailing junk and stop.
+            if !is_first && !looks_like_extension_start(&bytes[cursor as usize..total as usize]) {
+                break;
+            }
             let header_start = cursor;
             let (header, header_blocks_bytes) = Header::parse(bytes, cursor)?;
             let header_end = header_start + header_blocks_bytes;
@@ -204,6 +212,11 @@ impl FitsFile {
             // See `from_source`: tolerate an all-zero trailing region emitted
             // by some non-standard writers instead of failing the read.
             if remaining_is_zero(&file, cursor, total)? {
+                break;
+            }
+            // See `from_source`: also tolerate non-zero trailing junk that
+            // is not a conforming extension start.
+            if !is_first && !next_is_extension(&file, cursor, total)? {
                 break;
             }
             let header_start = cursor;
@@ -1031,6 +1044,29 @@ fn block_contains_end(block: &[u8]) -> bool {
         .any(|c| c.starts_with(b"END") && c[3..].iter().all(|&b| b == b' ' || b == 0))
 }
 
+/// True if `probe` could be the first card of a conforming extension HDU.
+/// Every conforming extension begins with `XTENSION` in columns 1-8
+/// (Standard Sec.7.1.3); bytes that don't are treated as trailing
+/// non-FITS junk rather than parsed as a header.
+fn looks_like_extension_start(probe: &[u8]) -> bool {
+    use crate::header::card::CARD_SIZE;
+    probe.len() >= CARD_SIZE && probe.starts_with(b"XTENSION")
+}
+
+/// On-disk variant of [`looks_like_extension_start`]: positional read of
+/// the keyword bytes at `cursor`. Returns `Ok(false)` when there is not
+/// enough room for a full card or the keyword is not `XTENSION`.
+#[cfg(not(target_arch = "wasm32"))]
+fn next_is_extension(file: &File, cursor: u64, total: u64) -> Result<bool> {
+    use crate::header::card::CARD_SIZE;
+    if total - cursor < CARD_SIZE as u64 {
+        return Ok(false);
+    }
+    let mut probe = [0_u8; 8];
+    pread_exact(file, cursor, &mut probe)?;
+    Ok(&probe == b"XTENSION")
+}
+
 /// Positional read filling `buf` exactly. Loops over short reads
 /// and retries on `EINTR`.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
@@ -1252,6 +1288,44 @@ mod tests {
             Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
             other => panic!("expected image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn trailing_non_zero_junk_is_tolerated() {
+        // Some CCD capture programs (ZWO ASI Studio is a known case) append
+        // a block of vendor metadata / thumbnail data after the final HDU.
+        // The bytes are not all-zero and do not begin with `XTENSION`, so
+        // they cannot be a conforming extension; the primary HDU must still
+        // read.
+        let mut buf = build_simple_no_data();
+        // 87 blocks of non-zero junk, mirroring the real-world ZWO files.
+        let junk_len = 87 * BLOCK_SIZE + 879;
+        buf.extend((0..junk_len).map(|i| (i & 0xff) as u8 | 1));
+        let f = FitsFile::from_bytes(buf).unwrap();
+        assert_eq!(f.len(), 1);
+        match f.hdu(0).unwrap() {
+            Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
+            other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trailing_non_zero_junk_on_disk() {
+        // On-disk path equivalent of `trailing_non_zero_junk_is_tolerated`.
+        let mut bytes = build_simple_no_data();
+        let junk_len = 87 * BLOCK_SIZE + 879;
+        bytes.extend((0..junk_len).map(|i| (i & 0xff) as u8 | 1));
+        let dir = std::env::temp_dir();
+        let path = dir.join("fitsy_trailing_junk_test.fits");
+        std::fs::write(&path, &bytes).unwrap();
+        let f = FitsFile::open(&path).unwrap();
+        assert_eq!(f.len(), 1);
+        match f.hdu(0).unwrap() {
+            Hdu::Image(img) => assert_eq!(img.n_elements(), 0),
+            other => panic!("expected image, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
