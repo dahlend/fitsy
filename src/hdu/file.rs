@@ -153,7 +153,10 @@ impl FitsFile {
             // size). An all-zero region can never be a valid HDU -- a header
             // must begin with a keyword -- so treat an all-zero tail as
             // padding and stop rather than failing the whole read.
-            if bytes[cursor as usize..total as usize].iter().all(|&b| b == 0) {
+            if bytes[cursor as usize..total as usize]
+                .iter()
+                .all(|&b| b == 0)
+            {
                 break;
             }
             // Some capture programs (e.g. ZWO ASI Studio) append vendor
