@@ -144,13 +144,21 @@ impl Tpv {
         // polynomial is close to identity).
         let mut xi = xi_p;
         let mut eta = eta_p;
+        // Tolerance scales with coordinate magnitude: the residual's
+        // rounding floor is ~eps*|coord|, so a fixed absolute tolerance
+        // becomes unreachable for large |xi'|,|eta'| (see SIP inverse).
+        // In degree-scale intermediate coords this is rarely hit, but the
+        // scaled form removes the latent failure and keeps accuracy far
+        // below any sub-pixel relevance.
+        let scale = 1.0 + xi_p.abs() + eta_p.abs();
+        let tol = 1e-11 * scale;
         // Numerical Jacobian via central differences in degrees.
-        let h = 1e-6_f64.max(1e-10 * (xi_p.abs() + eta_p.abs() + 1.0));
+        let h = 1e-6_f64.max(1e-10 * scale);
         for _ in 0..32 {
             let (fx, fy) = self.forward(xi, eta);
             let rx = fx - xi_p;
             let ry = fy - eta_p;
-            if rx.abs() < 1e-13 && ry.abs() < 1e-13 {
+            if rx.abs() < tol && ry.abs() < tol {
                 return Ok((xi, eta));
             }
             let (fxp, fyp) = self.forward(xi + h, eta);
@@ -172,7 +180,7 @@ impl Tpv {
             let dy = (-j21 * rx + j11 * ry) / det;
             xi -= dx;
             eta -= dy;
-            if dx.abs() < 1e-13 && dy.abs() < 1e-13 {
+            if dx.abs() < tol && dy.abs() < tol {
                 return Ok((xi, eta));
             }
         }

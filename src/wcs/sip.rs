@@ -137,12 +137,26 @@ impl Sip {
             (up, vp)
         };
         // Newton iteration on F(u, v) = (u + A(u,v), v + B(u,v)) - (u', v') = 0.
-        let h = 1e-4_f64.max(1e-8 * (up.abs() + vp.abs() + 1.0));
+        //
+        // Tolerances scale with the coordinate magnitude. The residual
+        // `r = F(u,v) - (u',v')` is formed by subtracting two numbers of
+        // size ~|u'|,|v'|, so its smallest representable magnitude is the
+        // rounding floor ~eps*|coord|. A fixed absolute tolerance (the old
+        // 1e-13) is therefore unreachable once |coord| exceeds a few
+        // hundred pixels -- e.g. WISE frames evaluated past the array edge,
+        // where |u'|,|v'| ~ thousands give a floor ~5e-13. Newton finds the
+        // correct root but then spends all 32 iterations bouncing on
+        // rounding noise and spuriously reports non-convergence. A relative
+        // tolerance tracks that floor while staying far below any
+        // sub-pixel accuracy that matters (~1e-8 px even out at |coord|~1e3).
+        let scale = 1.0 + up.abs() + vp.abs();
+        let tol = 1e-11 * scale;
+        let h = 1e-4_f64.max(1e-8 * scale);
         for _ in 0..32 {
             let (fu, fv) = self.forward(u, v);
             let rx = fu - up;
             let ry = fv - vp;
-            if rx.abs() < 1e-13 && ry.abs() < 1e-13 {
+            if rx.abs() < tol && ry.abs() < tol {
                 return Ok((u, v));
             }
             let (fup, fvp) = self.forward(u + h, v);
@@ -163,7 +177,7 @@ impl Sip {
             let dv = (-j21 * rx + j11 * ry) / det;
             u -= du;
             v -= dv;
-            if du.abs() < 1e-13 && dv.abs() < 1e-13 {
+            if du.abs() < tol && dv.abs() < tol {
                 return Ok((u, v));
             }
         }
@@ -232,6 +246,30 @@ mod tests {
         assert!((up - 10.5).abs() < 1e-12 && (vp - 20.0).abs() < 1e-12);
         let (u, v) = sip.inverse(up, vp).unwrap();
         assert!((u - 10.0).abs() < 1e-12 && (v - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inverse_converges_at_large_coordinates() {
+        // Regression: a fixed 1e-13 residual tolerance is below the
+        // rounding floor (~eps*|coord|) once |u'|,|v'| reach thousands,
+        // so the Newton inverse used to spuriously fail to converge far
+        // from the reference pixel (e.g. WISE frames past the array edge).
+        // The tolerance now scales with coordinate magnitude.
+        let a = SipPoly::from_terms(2, &[(2, 0, 1e-7), (0, 2, -2e-7)]).unwrap();
+        let b = SipPoly::from_terms(2, &[(1, 1, 5e-8)]).unwrap();
+        let sip = Sip {
+            a,
+            b,
+            ap: None,
+            bp: None,
+        };
+        for &(u, v) in &[(3000.0_f64, -3500.0_f64), (-4000.0, 2500.0)] {
+            let (up, vp) = sip.forward(u, v);
+            let (ub, vb) = sip.inverse(up, vp).unwrap();
+            // Sub-pixel accuracy at this scale (relative ~1e-11).
+            assert!((ub - u).abs() < 1e-4, "u {u} -> {ub}");
+            assert!((vb - v).abs() < 1e-4, "v {v} -> {vb}");
+        }
     }
 
     #[test]

@@ -276,12 +276,17 @@ impl Tnx {
     /// Returns `Wcs` error on non-convergence or singular Jacobian.
     pub fn inverse(&self, xip: f64, etap: f64) -> Result<(f64, f64)> {
         let (mut xi, mut eta) = (xip, etap);
-        let h = 1e-6_f64.max(1e-9 * (xip.abs() + etap.abs() + 1.0));
+        // Tolerance scales with coordinate magnitude so the residual's
+        // rounding floor (~eps*|coord|) stays reachable for large
+        // |xi'|,|eta'|; see the SIP inverse for the failure mode.
+        let scale = 1.0 + xip.abs() + etap.abs();
+        let tol = 1e-11 * scale;
+        let h = 1e-6_f64.max(1e-9 * scale);
         for _ in 0..32 {
             let (fx, fy) = self.forward(xi, eta);
             let rx = fx - xip;
             let ry = fy - etap;
-            if rx.abs() < 1e-13 && ry.abs() < 1e-13 {
+            if rx.abs() < tol && ry.abs() < tol {
                 return Ok((xi, eta));
             }
             let (fxp, fyp) = self.forward(xi + h, eta);
@@ -302,7 +307,7 @@ impl Tnx {
             let deta = (-j21 * rx + j11 * ry) / det;
             xi -= dxi;
             eta -= deta;
-            if dxi.abs() < 1e-13 && deta.abs() < 1e-13 {
+            if dxi.abs() < tol && deta.abs() < tol {
                 return Ok((xi, eta));
             }
         }
