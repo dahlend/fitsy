@@ -67,7 +67,11 @@ jobs:
         with:
           command: build
           args: --release --features python --out target/wheels
-          manylinux: auto
+          # Build natively on the runner instead of pulling the
+          # quay.io manylinux container: this wheel is only installed
+          # and tested on this same runner below, so manylinux
+          # portability is irrelevant here.
+          container: off
       - name: Install wheel + run tests
         run: |
           pip install pytest numpy
