@@ -28,6 +28,9 @@ fn value_to_py(py: Python<'_>, v: &Value) -> Py<PyAny> {
             .unwrap(),
         Value::String(s) => s.into_py_any(py).unwrap(),
         Value::Undefined => py.None(),
+        // Preserved verbatim by lenient parsing; expose the raw text so
+        // the card is at least inspectable from Python.
+        Value::Unparsed(s) => s.into_py_any(py).unwrap(),
     }
 }
 

@@ -280,7 +280,7 @@ fn format_value(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
         Value::Real(f) => format!("{f}"),
-        Value::String(s) => format!("{s:?}"),
+        Value::String(s) | Value::Unparsed(s) => format!("{s:?}"),
         Value::Logical(b) => {
             if *b {
                 "T".into()

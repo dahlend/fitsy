@@ -91,9 +91,31 @@ fn parse_mode(mode: &str) -> PyResult<bool> {
 ///     in this release; reconstruct the table with
 ///     :func:`fitsy.bintable` to change column values.
 /// lenient : bool, optional
-///     When True, accept ``SIMPLE = F`` primary headers (non-standard
-///     FITS files written by some pipelines). Does **not** downgrade
-///     any other validation errors to warnings. Default False.
+///     Tolerate common non-conforming header content so real-world files
+///     load. **Default True.** Pass ``lenient=False`` to require strict
+///     FITS conformance instead.
+///
+///     Non-conforming bytes in free-text *comments* (Latin-1, tabs, other
+///     control bytes) are always tolerated and sanitized to spaces even
+///     when ``lenient=False`` -- a stray byte in a comment never fails
+///     the load.
+///
+///     Leniency additionally tolerates non-conforming *values* that would
+///     otherwise abort the load:
+///
+///     * ``SIMPLE = F`` primary headers written by some pipelines;
+///     * non-ASCII bytes in string *values* -- sanitized to spaces;
+///     * lower-case keywords (folded to upper case) and other stray
+///       keyword characters;
+///     * value fields that match no standard type (e.g. a malformed
+///       number or unquoted string) -- kept verbatim as a string so the
+///       rest of the header and the pixel/table data still load;
+///     * some structural defects: stray bytes trailing the ``END`` card,
+///       a lower-case ``end`` terminator, and broken ``CONTINUE``
+///       long-string chains.
+///
+///     A present ``END`` card, block alignment, and the declared
+///     data-section size are always enforced, in every mode.
 ///
 /// Returns
 /// -------
@@ -114,13 +136,10 @@ fn parse_mode(mode: &str) -> PyResult<bool> {
 /// ...     img = f[0]
 /// ...     print(img.axes)
 #[pyfunction]
-#[pyo3(signature = (path, mode="readonly", lenient=false))]
+#[pyo3(signature = (path, mode="readonly", lenient=true))]
 pub fn open(_py: Python<'_>, path: PathBuf, mode: &str, lenient: bool) -> PyResult<PyFitsFile> {
     let read_only = parse_mode(mode)?;
-    let inner = crate::FitsOpenOptions::new()
-        .lenient(lenient)
-        .open(&path)
-        .into_py_result()?;
+    let inner = FitsFile::open_with(&path, lenient).into_py_result()?;
     let n = inner.len();
     // Lazy: just record one Pending slot per HDU. Each slot is
     // materialized into a Python object only when first accessed.
@@ -598,9 +617,7 @@ impl PyFitsFile {
         // keep working. Slots that were `Pending` before are still
         // `Pending` against the same indices in the new file (which
         // is a byte-for-byte rewrite of those HDUs anyway).
-        let new_inner = crate::FitsOpenOptions::new()
-            .open(&original_path)
-            .into_py_result()?;
+        let new_inner = FitsFile::open(&original_path).into_py_result()?;
         {
             let mut st = self.lock_state();
             st.file = Some(Arc::new(new_inner));

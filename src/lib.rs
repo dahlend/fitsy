@@ -122,8 +122,8 @@ pub use data::{Bitpix, ImageData};
 pub use error::FitsError;
 pub use hdu::{
     AsciiCell, AsciiColumn, AsciiFormat, AsciiTableBuilder, AsciiTableHdu, BinColumn, BinFieldKind,
-    BinFormat, BinTableBuilder, BinTableHdu, BinValue, FitsFile, FitsOpenOptions, Hdu,
-    ImageBuilder, ImageHdu, ImagePixels,
+    BinFormat, BinTableBuilder, BinTableHdu, BinValue, FitsFile, Hdu, ImageBuilder, ImageHdu,
+    ImagePixels,
 };
 pub use header::{Card, CommentaryKind, Diagnostic, Fix, Header, IsoDateTime, Level, Value};
 #[cfg(not(target_arch = "wasm32"))]

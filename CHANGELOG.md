@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Header parsing is now lenient by default.
+- Non-ASCII bytes in header comments are now sanitized rather than
+  rejected by default.
+
+### Added
+
+- `lenient` parsing now tolerates most malformed header content:
+  bad values, non-standard keywords, a lower-case `end` terminator, and
+  broken `CONTINUE` chains.
+
+
 ## [v0.1.4]
 
 ### Fixed

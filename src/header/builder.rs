@@ -640,6 +640,10 @@ fn format_scalar_value(v: &Value) -> Result<String> {
             format!("({r}, {i})")
         }
         Value::Undefined => String::new(),
+        // A value preserved verbatim by lenient parsing: re-emit its raw
+        // text unchanged (it already holds the exact value-field bytes,
+        // possibly including its own `/comment`).
+        Value::Unparsed(s) => s.clone(),
         Value::String(_) => unreachable!("strings handled separately"),
     })
 }

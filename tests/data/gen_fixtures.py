@@ -731,7 +731,7 @@ def gen_wcs_dss() -> None:
     The test dss_plate_model_used_for_real_file (tests/wcs.rs) expects:
     - PLT* = RA 0h07m25.68s Dec +00d48m26s  (plate_ra=1.857deg, plate_dec=0.807deg)
     - plate_centre_x = PPO3/XPIXELSZ - CNPIX1 + 0.5 - 1  (0-based Wcs pixel)
-    - pixel_to_world(plate_centre_x, plate_centre_y) ≈ (plate_ra, plate_dec) ±0.05deg
+    - pixel_to_world(plate_centre_x, plate_centre_y) ~= (plate_ra, plate_dec) +/-0.05deg
 
     We set geometry so the plate center falls at pixel (3.5, 3.5) 0-based
     of our 8x8 image, which is FITS pixel (4.5, 4.5).  Choose:
@@ -741,7 +741,7 @@ def gen_wcs_dss() -> None:
     so that  PPO3/XPIXELSZ - CNPIX1 + 0.5 - 1 = 200/25 - 4 + 0.5 - 1 = 8 - 4.5 = 3.5.
 
     AMDX1 (plate scale X, arcsec/mm): must map plate-mm to arcsec.
-    At plate center, AMDX1*xi ≈ RA offset (arcsec) where xi is mm from
+    At plate center, AMDX1*xi ~= RA offset (arcsec) where xi is mm from
     plate center.  At the plate center itself, offsets are zero, so
     pixel_to_world(3.5, 3.5) will return the plate RA/Dec exactly
     (since all non-linear AMD terms are zero in our simplified model).

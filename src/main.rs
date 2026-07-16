@@ -387,6 +387,7 @@ fn display_value(v: &Value) -> String {
         Value::ComplexReal(re, im) => format!("({re:.17e}, {im:.17e})"),
         Value::String(s) => format!("'{s}'"),
         Value::Undefined => "(undefined)".into(),
+        Value::Unparsed(s) => s.clone(),
     }
 }
 

@@ -16,7 +16,7 @@ pub(crate) mod subarray;
 pub use ascii_table::{AsciiCell, AsciiColumn, AsciiFormat, AsciiTableHdu};
 pub use bintable::{BinColumn, BinFieldKind, BinFormat, BinTableHdu, BinValue, IntStorage};
 pub use builder::{AsciiColumnData, AsciiTableBuilder, BinTableBuilder, ImageBuilder};
-pub use file::{FitsFile, FitsOpenOptions};
+pub use file::FitsFile;
 pub use image::{ImageHdu, ImagePixels};
 pub use kind::{ConformingHdu, Hdu};
 pub use random_groups::RandomGroupsHdu;

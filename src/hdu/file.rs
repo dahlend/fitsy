@@ -4,7 +4,9 @@
 //! index with [`FitsFile::hdu`], by name with [`FitsFile::hdu_by_name`],
 //! or iterate all of them with [`FitsFile::iter`].
 //!
-//! For lenient parsing (e.g. `SIMPLE = F`) use [`FitsOpenOptions`].
+//! Headers are parsed **leniently** by default (tolerating e.g.
+//! `SIMPLE = F`); use [`FitsFile::open_with`] with `lenient = false` to
+//! require strict FITS conformance.
 //!
 //! # Memory model
 //!
@@ -71,6 +73,10 @@ pub struct FitsFile {
     /// declare it. Built once at open time so [`hdu_by_name`] is
     /// O(log n + k) instead of O(n).
     extname_index: BTreeMap<String, Vec<usize>>,
+    /// Whether headers were opened in lenient mode. Retained so the
+    /// per-HDU re-parses done by [`hdu`], [`parsed_header`], etc. apply
+    /// the same leniency as the initial open.
+    lenient: bool,
 }
 
 #[derive(Debug)]
@@ -93,8 +99,10 @@ impl FitsFile {
     /// sections are **not** read up front; each HDU's data is loaded
     /// on demand the first time it is accessed.
     ///
-    /// For non-default options (lenient parsing) use
-    /// [`FitsOpenOptions`].
+    /// Headers are parsed **leniently** by default (see
+    /// [`FitsFile::open_with`]): common non-conforming header content is
+    /// tolerated so real-world files load. To require strict FITS
+    /// conformance instead, use `FitsFile::open_with(path, false)`.
     ///
     /// # Examples
     ///
@@ -107,11 +115,26 @@ impl FitsFile {
     /// ```
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with(path, false)
+        Self::open_with(path, true)
     }
 
+    /// Open `path` with explicit control over lenient parsing.
+    ///
+    /// When `lenient` is `true` (the default used by [`FitsFile::open`]),
+    /// common non-conforming header content is tolerated: `SIMPLE = F`
+    /// headers, non-ASCII bytes in string values (sanitized to spaces),
+    /// lower-case keywords (folded to upper case), value fields that parse
+    /// as no standard type (preserved verbatim as
+    /// [`crate::header::Value::Unparsed`]), and some structural defects
+    /// (stray bytes after `END`, a lower-case `end`, broken `CONTINUE`
+    /// chains). A present `END` card, block alignment, and the declared
+    /// data-section size are always enforced.
+    ///
+    /// When `lenient` is `false`, any of the above is an error. The flag is
+    /// retained on the resulting [`FitsFile`] so per-HDU re-parses stay
+    /// consistent.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn open_with(path: impl AsRef<Path>, lenient: bool) -> Result<Self> {
+    pub fn open_with(path: impl AsRef<Path>, lenient: bool) -> Result<Self> {
         let path = path.as_ref();
         // gzip files cannot be `pread`'d in place, so detect the
         // magic bytes and fall back to a full read + decompress
@@ -135,8 +158,19 @@ impl FitsFile {
 
     /// Build a `FitsFile` from an in-memory buffer. The whole buffer
     /// is retained for the life of the `FitsFile`.
+    ///
+    /// Like [`FitsFile::open`], headers are parsed leniently by default;
+    /// use [`FitsFile::from_bytes_with`] with `lenient = false` for strict
+    /// parsing.
     pub fn from_bytes(buf: Vec<u8>) -> Result<Self> {
-        Self::from_source(ByteSource::from_vec(buf)?, false)
+        Self::from_source(ByteSource::from_vec(buf)?, true)
+    }
+
+    /// Build a `FitsFile` from an in-memory buffer with explicit control
+    /// over lenient parsing. See [`FitsFile::open_with`] for what the
+    /// `lenient` flag tolerates.
+    pub fn from_bytes_with(buf: Vec<u8>, lenient: bool) -> Result<Self> {
+        Self::from_source(ByteSource::from_vec(buf)?, lenient)
     }
 
     fn from_source(src: ByteSource, lenient: bool) -> Result<Self> {
@@ -168,7 +202,7 @@ impl FitsFile {
                 break;
             }
             let header_start = cursor;
-            let (header, header_blocks_bytes) = Header::parse(bytes, cursor)?;
+            let (header, header_blocks_bytes) = Header::parse_with(bytes, cursor, lenient)?;
             let header_end = header_start + header_blocks_bytes;
 
             if is_first {
@@ -200,7 +234,12 @@ impl FitsFile {
             is_first = false;
         }
 
-        Self::finish_open(Backing::InMemory(src), hdu_spans, header_bytes_per_hdu)
+        Self::finish_open(
+            Backing::InMemory(src),
+            hdu_spans,
+            header_bytes_per_hdu,
+            lenient,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -223,8 +262,8 @@ impl FitsFile {
                 break;
             }
             let header_start = cursor;
-            let header_buf = read_header_blocks(&mut file, cursor, total)?;
-            let (header, header_blocks_bytes) = Header::parse(&header_buf, 0)?;
+            let header_buf = read_header_blocks(&mut file, cursor, total, lenient)?;
+            let (header, header_blocks_bytes) = Header::parse_with(&header_buf, 0, lenient)?;
             let header_end = header_start + header_blocks_bytes;
             // Truncate the header buffer to the exact block-padded
             // length the parser consumed (it may have read one extra
@@ -261,20 +300,26 @@ impl FitsFile {
             is_first = false;
         }
 
-        Self::finish_open(Backing::OnDisk(file), hdu_spans, header_bytes_per_hdu)
+        Self::finish_open(
+            Backing::OnDisk(file),
+            hdu_spans,
+            header_bytes_per_hdu,
+            lenient,
+        )
     }
 
     fn finish_open(
         backing: Backing,
         hdu_spans: Vec<HduSpan>,
         header_bytes: Vec<Vec<u8>>,
+        lenient: bool,
     ) -> Result<Self> {
         if hdu_spans.is_empty() {
             return Err(FitsError::Header("file contains no HDU".into()));
         }
         let mut extname_index: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, hb) in header_bytes.iter().enumerate() {
-            if let Ok((header, _)) = Header::parse(hb, 0)
+            if let Ok((header, _)) = Header::parse_with(hb, 0, lenient)
                 && let Some(Value::String(s)) = header.first("EXTNAME")
             {
                 extname_index
@@ -290,6 +335,7 @@ impl FitsFile {
             header_bytes,
             data_cache: (0..n).map(|_| OnceLock::new()).collect(),
             extname_index,
+            lenient,
         })
     }
 
@@ -485,7 +531,7 @@ impl FitsFile {
         let _ = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
         })?;
-        let (header, _) = Header::parse(&self.header_bytes[i], 0)?;
+        let (header, _) = Header::parse_with(&self.header_bytes[i], 0, self.lenient)?;
         Ok(header)
     }
 
@@ -540,7 +586,7 @@ impl FitsFile {
         let _ = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
         })?;
-        let (header, _) = Header::parse(&self.header_bytes[i], 0)?;
+        let (header, _) = Header::parse_with(&self.header_bytes[i], 0, self.lenient)?;
         let data = self.data_bytes(i)?;
 
         if i == 0 {
@@ -619,14 +665,14 @@ impl FitsFile {
         let _ = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
         })?;
-        let (mut header, _) = Header::parse(&self.header_bytes[i], 0)?;
+        let (mut header, _) = Header::parse_with(&self.header_bytes[i], 0, self.lenient)?;
         if i == 0 {
             return Ok(header);
         }
         if !matches!(header.first("INHERIT"), Some(Value::Logical(true))) {
             return Ok(header);
         }
-        let (primary, _) = Header::parse(&self.header_bytes[0], 0)?;
+        let (primary, _) = Header::parse_with(&self.header_bytes[0], 0, self.lenient)?;
         header.merge_inherited(&primary);
         Ok(header)
     }
@@ -664,7 +710,7 @@ impl FitsFile {
         let candidates: &[usize] = self.extname_index.get(name).map_or(&[], Vec::as_slice);
         for &i in candidates {
             if let Some(want) = ver {
-                let (header, _) = Header::parse(&self.header_bytes[i], 0)?;
+                let (header, _) = Header::parse_with(&self.header_bytes[i], 0, self.lenient)?;
                 let have = match header.first("EXTVER") {
                     Some(Value::Integer(v)) => *v,
                     _ => 1,
@@ -791,7 +837,7 @@ impl FitsFile {
         let mut out = Vec::with_capacity(self.hdu_spans.len());
         for i in 0..self.hdu_spans.len() {
             let header_bytes: &[u8] = &self.header_bytes[i];
-            let (header, _) = Header::parse(header_bytes, 0)?;
+            let (header, _) = Header::parse_with(header_bytes, 0, self.lenient)?;
             let checksum_card = match header.first("CHECKSUM") {
                 Some(Value::String(s)) => Some(s.clone()),
                 _ => None,
@@ -876,55 +922,6 @@ pub enum ImageOrOwned<'a> {
     Owned(crate::compression::OwnedImage),
 }
 
-/// Builder for opening FITS files with non-default options.
-///
-/// ```ignore
-/// use fitsy::FitsOpenOptions;
-///
-/// let f = FitsOpenOptions::new()
-///     .lenient(true)
-///     .open("legacy.fits")?;
-/// # Ok::<(), fitsy::FitsError>(())
-/// ```
-///
-/// The shortcut constructors on [`FitsFile`] (`open`, `from_bytes`)
-/// cover the strict-mode common cases without going through the
-/// builder.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct FitsOpenOptions {
-    lenient: bool,
-}
-
-impl FitsOpenOptions {
-    /// New options with all flags off (matches [`FitsFile::open`]).
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// If `true`, accept `SIMPLE = F` headers. The Standard
-    /// (Sec.3.4.1) calls these "non-standard FITS-like files"; many
-    /// legacy IRAF and survey products use this form. All other
-    /// validation rules apply unchanged.
-    #[must_use]
-    pub fn lenient(mut self, lenient: bool) -> Self {
-        self.lenient = lenient;
-        self
-    }
-
-    /// Open the file at `path` using the configured options.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(self, path: impl AsRef<Path>) -> Result<FitsFile> {
-        FitsFile::from_source(ByteSource::read_file(path)?, self.lenient)
-    }
-
-    /// Build a `FitsFile` from an in-memory buffer using the
-    /// configured `lenient` flag.
-    pub fn from_bytes(self, buf: Vec<u8>) -> Result<FitsFile> {
-        FitsFile::from_source(ByteSource::from_vec(buf)?, self.lenient)
-    }
-}
-
 /// Per-HDU result returned by [`FitsFile::verify_checksums`]. A
 /// `None` means the corresponding keyword was absent (FITS standard
 /// permits omitting either independently).
@@ -952,8 +949,8 @@ fn require_simple_t(h: &Header, lenient: bool) -> Result<()> {
         Some(Value::Logical(true)) => Ok(()),
         Some(Value::Logical(false)) if lenient => Ok(()),
         Some(Value::Logical(false)) => Err(FitsError::NonStandard(
-            "SIMPLE = F (file does not conform to FITS); use \
-             FitsOpenOptions::new().lenient(true) to read anyway"
+            "SIMPLE = F (file does not conform to FITS); lenient parsing \
+             (the default) reads it anyway -- drop `.lenient(false)`"
                 .into(),
         )),
         Some(_) => Err(FitsError::Value {
@@ -994,8 +991,12 @@ fn is_random_groups(h: &Header) -> bool {
 /// returns the entire block-aligned header buffer (including the
 /// terminating block, with whatever trailing space padding it
 /// contained).
+///
+/// A missing `END` card is a hard error, matching [`Header::parse_with`]:
+/// `END` is the only header/data delimiter, so it is required in every
+/// mode.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_header_blocks(file: &mut File, cursor: u64, total: u64) -> Result<Vec<u8>> {
+fn read_header_blocks(file: &mut File, cursor: u64, total: u64, lenient: bool) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(BLOCK_SIZE * 2);
     let mut at = cursor;
     file.seek(SeekFrom::Start(cursor))?;
@@ -1009,8 +1010,8 @@ fn read_header_blocks(file: &mut File, cursor: u64, total: u64) -> Result<Vec<u8
         let mut block = [0_u8; BLOCK_SIZE];
         file.read_exact(&mut block)?;
         buf.extend_from_slice(&block);
-        // Scan this block for END card.
-        if block_contains_end(&block) {
+        // Scan this block for the END card.
+        if block_contains_end(&block, lenient) {
             return Ok(buf);
         }
         at += BLOCK_SIZE as u64;
@@ -1038,13 +1039,19 @@ fn remaining_is_zero(file: &File, start: u64, total: u64) -> Result<bool> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn block_contains_end(block: &[u8]) -> bool {
-    use crate::header::card::CARD_SIZE;
-    // Accept NUL as well as space after `END`: some writers zero-pad the
-    // END card rather than space-padding it (see `Card::parse`).
+fn block_contains_end(block: &[u8], lenient: bool) -> bool {
+    use crate::header::card::{CARD_SIZE, Card};
+    // Detect the END card with the *same* logic the header parser uses
+    // (`Card::parse_with`), so the on-disk reader and the in-memory
+    // parser never disagree about where a header ends. In particular this
+    // inherits the parser's handling of NUL-padded END bodies and, in
+    // lenient mode, a lower-case/mixed-case `end` keyword (folded to
+    // `END`). A card that fails to parse is simply "not END" for the
+    // purposes of this scan; its error, if any, surfaces during the full
+    // parse of the header buffer.
     block
         .chunks_exact(CARD_SIZE)
-        .any(|c| c.starts_with(b"END") && c[3..].iter().all(|&b| b == b' ' || b == 0))
+        .any(|c| Card::parse_with(c, 0, lenient).is_ok_and(|card| card.is_end()))
 }
 
 /// True if `probe` could be the first card of a conforming extension HDU.
@@ -1351,6 +1358,108 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn loaders_agree_across_malformed_headers() {
+        // Regression guard for loader consistency: the in-memory
+        // (`from_source`) and on-disk (`from_file`) paths must reach the
+        // same accept/reject verdict for the same bytes, in both strict and
+        // lenient modes. This is what stops the two code paths (notably the
+        // on-disk END scan vs. the card parser) from silently drifting.
+        fn block(cards: &[&[u8]]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            for c in cards {
+                let mut card = [b' '; CARD_SIZE];
+                let n = c.len().min(CARD_SIZE);
+                card[..n].copy_from_slice(&c[..n]);
+                buf.extend_from_slice(&card);
+            }
+            while buf.len() % BLOCK_SIZE != 0 {
+                buf.push(b' ');
+            }
+            buf
+        }
+        let primary = |extra: &[&[u8]]| -> Vec<u8> {
+            let base: [&[u8]; 3] = [
+                b"SIMPLE  =                    T",
+                b"BITPIX  =                    8",
+                b"NAXIS   =                    0",
+            ];
+            block(&base.iter().chain(extra).copied().collect::<Vec<_>>())
+        };
+
+        let mut junk_after_end = primary(&[b"END"]);
+        junk_after_end[4 * CARD_SIZE] = b'X'; // stray byte in the post-END fill
+
+        // A valid IMAGE extension (header-only, NAXIS=0) appended to a
+        // primary, exercising the extension-detection pre-check on both
+        // loaders.
+        let mut two_hdu = primary(&[b"EXTEND  =                    T", b"END"]);
+        two_hdu.extend_from_slice(&block(&[
+            b"XTENSION= 'IMAGE   '",
+            b"BITPIX  =                    8",
+            b"NAXIS   =                    0",
+            b"PCOUNT  =                    0",
+            b"GCOUNT  =                    1",
+            b"END",
+        ]));
+        // Same, but the second unit's keyword is lower-case `xtension`:
+        // neither loader recognizes it as an extension, so both stop at 1.
+        let mut lower_xtension = primary(&[b"END"]);
+        lower_xtension.extend_from_slice(&block(&[
+            b"xtension= 'IMAGE   '",
+            b"BITPIX  =                    8",
+            b"NAXIS   =                    0",
+            b"END",
+        ]));
+
+        let cases: [(&str, Vec<u8>); 9] = [
+            ("valid", primary(&[b"END"])),
+            ("lowercase_end", primary(&[b"end"])),
+            ("mixed_case_end", primary(&[b"eNd"])),
+            ("missing_end", primary(&[])),
+            ("junk_after_end", junk_after_end),
+            (
+                "broken_continue",
+                primary(&[b"OBJECT  = 'ab'", b"CONTINUE  ' cd'", b"END"]),
+            ),
+            (
+                "bad_value",
+                primary(&[b"EXPTIME =              12.3.4.5", b"END"]),
+            ),
+            ("two_hdu", two_hdu),
+            ("lower_xtension", lower_xtension),
+        ];
+
+        let path = std::env::temp_dir().join("fitsy_loader_consistency.fits");
+        for (name, bytes) in &cases {
+            for lenient in [false, true] {
+                let mem =
+                    FitsFile::from_source(ByteSource::from_vec(bytes.clone()).unwrap(), lenient);
+                std::fs::write(&path, bytes).unwrap();
+                let disk = FitsFile::from_file(File::open(&path).unwrap(), lenient);
+                assert_eq!(
+                    mem.is_ok(),
+                    disk.is_ok(),
+                    "loader verdict mismatch for `{name}` at lenient={lenient}: \
+                     in-memory={} on-disk={}",
+                    mem.is_ok(),
+                    disk.is_ok()
+                );
+                // When both accept, they must agree on the HDU count too --
+                // this is what catches an extension-detection divergence.
+                if let (Ok(m), Ok(d)) = (&mem, &disk) {
+                    assert_eq!(
+                        m.len(),
+                        d.len(),
+                        "HDU-count mismatch for `{name}` at lenient={lenient}"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn build_simple_f_no_data() -> Vec<u8> {
         let cards = [
             pad_card("SIMPLE  =                    F"),
@@ -1370,18 +1479,25 @@ mod tests {
 
     #[test]
     fn simple_f_strict_rejected() {
+        // Parsing is lenient by default now, so strict must be requested
+        // explicitly to reject a `SIMPLE = F` file.
         let bytes = build_simple_f_no_data();
-        let err = FitsFile::from_bytes(bytes).unwrap_err();
+        let err = FitsFile::from_bytes_with(bytes, false).unwrap_err();
         assert!(matches!(err, FitsError::NonStandard(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn simple_f_accepted_by_default() {
+        // The default (lenient) path reads a `SIMPLE = F` file.
+        let bytes = build_simple_f_no_data();
+        let f = FitsFile::from_bytes(bytes).unwrap();
+        assert_eq!(f.len(), 1);
     }
 
     #[test]
     fn simple_f_lenient_accepted() {
         let bytes = build_simple_f_no_data();
-        let f = FitsOpenOptions::new()
-            .lenient(true)
-            .from_bytes(bytes)
-            .unwrap();
+        let f = FitsFile::from_bytes_with(bytes, true).unwrap();
         assert_eq!(f.len(), 1);
     }
 

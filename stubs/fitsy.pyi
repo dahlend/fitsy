@@ -286,7 +286,7 @@ Builder = Union[ImageBuilder, BinTableBuilder, AsciiTableBuilder]
 def open(
     path: StrPath,
     mode: str = "readonly",
-    lenient: bool = False,
+    lenient: bool = True,
 ) -> FitsFile: ...
 def image(
     data: np.ndarray,

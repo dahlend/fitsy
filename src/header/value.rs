@@ -20,6 +20,13 @@ pub enum Value {
     String(String),
     /// Empty value field (Sec.4.2.7).
     Undefined,
+    /// A value field that could not be parsed as any of the standard
+    /// types. Only produced by lenient parsing (see
+    /// [`Header::parse_with`](crate::header::Header::parse_with)); strict
+    /// parsing rejects such cards. Holds the raw value-field text
+    /// (trailing spaces trimmed) so the card can still be inspected and
+    /// re-encoded verbatim.
+    Unparsed(String),
 }
 
 // Ergonomic constructors. FITS has no narrower integer or float type,
@@ -84,73 +91,131 @@ pub fn parse(keyword: &str, body: &[u8]) -> Result<(Value, Option<String>)> {
     Ok((val, parts.comment))
 }
 
+/// Fault-tolerant variant of [`parse`] used by lenient header parsing.
+///
+/// Never fails: when the value field cannot be split from its comment
+/// (e.g. an unterminated string) or cannot be parsed as any standard
+/// type, the raw field text is preserved as [`Value::Unparsed`] so the
+/// rest of the header still loads. When only the value fails to parse
+/// but the comment split succeeded, the comment is retained.
+#[must_use]
+pub fn parse_lenient(keyword: &str, body: &[u8]) -> (Value, Option<String>) {
+    let Ok(parts) = split_value_and_comment(body, keyword) else {
+        // Even splitting failed (unterminated string, non-UTF-8). Keep the
+        // whole field verbatim, minus trailing padding.
+        let raw = String::from_utf8_lossy(body).trim_end().to_string();
+        return (Value::Unparsed(raw), None);
+    };
+    match parse_value(&parts.value_field, keyword) {
+        Ok(val) => (val, parts.comment),
+        Err(_) => (
+            Value::Unparsed(parts.value_field.trim().to_string()),
+            parts.comment,
+        ),
+    }
+}
+
 /// Split the body into value field and optional comment, respecting
 /// the rule that a `/` inside a string literal is not a comment marker
 /// (Sec.4.1.2.3).
+///
+/// The scan runs over raw bytes: every character that matters to it --
+/// the quote `'`, the space, and the comment slash `/` -- is ASCII, so a
+/// non-ASCII byte is treated as ordinary content. The extracted comment
+/// is free text and is always sanitized (any byte outside 0x20..=0x7E is
+/// mapped to a space) so a stray byte there never fails the parse. The
+/// value field, by contrast, is returned verbatim and must be valid
+/// ASCII text: a non-ASCII byte in it is an error (strict callers
+/// propagate it; [`parse_lenient`] turns it into [`Value::Unparsed`]).
 pub fn split_value_and_comment(body: &[u8], keyword: &str) -> Result<ValueAndComment> {
-    let s = std::str::from_utf8(body).map_err(|_| FitsError::Value {
-        keyword: keyword.into(),
-        msg: "non-UTF-8 body".into(),
-    })?;
+    // Skip leading spaces; the first non-space byte tells us whether the
+    // value is a string literal (which may contain a `/`).
+    let Some(start) = body.iter().position(|&b| b != b' ') else {
+        return Ok(ValueAndComment {
+            value_field: String::new(),
+            comment: None,
+        });
+    };
 
-    // Skip leading spaces; remember offset for parser.
-    let mut chars = s.char_indices().peekable();
-    let mut value_end = s.len();
-    let mut comment: Option<String> = None;
-
-    // Detect the value type by the first non-space char to know whether
-    // we are inside a string literal.
-    let first_non_space = chars.find(|&(_, c)| c != ' ');
-
-    match first_non_space {
-        None => {
-            return Ok(ValueAndComment {
-                value_field: String::new(),
-                comment: None,
-            });
-        }
-        Some((_, '\'')) => {
-            // Walk the string literal handling `''` escapes.
-            let mut iter = s.char_indices().skip_while(|&(_, c)| c == ' ');
-            // consume opening quote
-            let _ = iter.next();
-            let mut close_idx = None;
-            while let Some((i, c)) = iter.next() {
-                if c == '\'' {
-                    // Possible escape: peek next.
-                    let next = iter.clone().next();
-                    if let Some((_, '\'')) = next {
-                        let _ = iter.next();
-                        continue;
-                    }
-                    close_idx = Some(i + c.len_utf8());
-                    break;
+    let (value_end, comment_start): (usize, Option<usize>) = if body[start] == b'\'' {
+        // Walk the string literal handling `''` escapes.
+        let mut i = start + 1;
+        let mut close = None;
+        while i < body.len() {
+            if body[i] == b'\'' {
+                if body.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
                 }
+                close = Some(i + 1);
+                break;
             }
-            let close_idx = close_idx.ok_or_else(|| FitsError::Value {
-                keyword: keyword.into(),
-                msg: "unterminated string literal".into(),
-            })?;
-            value_end = close_idx;
-            // Look for `/` after value end.
-            let rest = &s[close_idx..];
-            if let Some(slash_pos) = rest.find('/') {
-                comment = Some(rest[slash_pos + 1..].trim().to_string());
-            }
+            i += 1;
         }
-        Some(_) => {
-            // Non-string scalar. The first `/` ends the value.
-            if let Some(slash_pos) = s.find('/') {
-                value_end = slash_pos;
-                comment = Some(s[slash_pos + 1..].trim().to_string());
-            }
+        let close = close.ok_or_else(|| FitsError::Value {
+            keyword: keyword.into(),
+            msg: "unterminated string literal".into(),
+        })?;
+        // A `/` after the closing quote starts the comment.
+        let slash = body[close..].iter().position(|&b| b == b'/');
+        (close, slash.map(|p| close + p))
+    } else {
+        // Non-string scalar: the first `/` ends the value.
+        match body.iter().position(|&b| b == b'/') {
+            Some(p) => (p, Some(p)),
+            None => (body.len(), None),
         }
+    };
+
+    // A value field must be printable ASCII (Sec.4.2). Reject any byte
+    // outside 0x20..=0x7E -- this covers Latin-1 bytes (invalid UTF-8) and
+    // valid-UTF-8 multibyte sequences alike, so `'caf\u{e9}'` and its
+    // UTF-8 encoding are both rejected in strict mode. In lenient mode the
+    // card scanner has already sanitized these bytes to spaces, so this
+    // check never fires there.
+    let value_bytes = &body[..value_end];
+    if let Some(pos) = value_bytes
+        .iter()
+        .position(|&b| !(0x20..=0x7E).contains(&b))
+    {
+        return Err(FitsError::Value {
+            keyword: keyword.into(),
+            msg: format!("non-ASCII byte 0x{:02X} in value field", value_bytes[pos]),
+        });
     }
+    // Every byte is printable ASCII (validated above), so a direct
+    // byte-to-char map is a lossless, panic-free conversion.
+    let value_field: String = value_bytes.iter().map(|&b| b as char).collect();
+    // The comment text follows the slash; sanitize and trim it.
+    let comment = comment_start.map(|slash| sanitize_comment(&body[slash + 1..]));
 
     Ok(ValueAndComment {
-        value_field: s[..value_end].to_string(),
+        value_field,
         comment,
     })
+}
+
+/// Map every byte outside printable ASCII (0x20..=0x7E) to a space,
+/// leaving printable bytes untouched. Used to make free-text fields
+/// (comments, commentary cards) tolerant of the Latin-1 and control
+/// bytes that non-conforming writers routinely leak into them.
+pub(crate) fn sanitize_free_text(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| {
+            if (0x20..=0x7E).contains(&b) {
+                b as char
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+/// Sanitize and trim an inline comment (the text after a value card's
+/// `/` comment marker).
+fn sanitize_comment(bytes: &[u8]) -> String {
+    sanitize_free_text(bytes).trim().to_string()
 }
 
 fn parse_value(field: &str, keyword: &str) -> Result<Value> {
@@ -354,5 +419,37 @@ mod tests {
     fn comment_extracted() {
         let (_, c) = parse("X", b"                   16 / bits").unwrap();
         assert_eq!(c.as_deref(), Some("bits"));
+    }
+
+    #[test]
+    fn parse_lenient_keeps_bad_value_and_comment() {
+        // A malformed number: value is unparseable, but the comment still
+        // splits cleanly and is retained.
+        let (v, c) = parse_lenient("EXPTIME", b"             12.3.4.5 / seconds");
+        assert_eq!(v, Value::Unparsed("12.3.4.5".into()));
+        assert_eq!(c.as_deref(), Some("seconds"));
+    }
+
+    #[test]
+    fn parse_lenient_keeps_unterminated_string() {
+        // Splitting fails outright; the whole field is kept verbatim.
+        let (v, c) = parse_lenient("OBJECT", b"'M31");
+        assert_eq!(v, Value::Unparsed("'M31".into()));
+        assert_eq!(c, None);
+    }
+
+    #[test]
+    fn parse_lenient_passes_through_valid_values() {
+        let (v, _) = parse_lenient("BITPIX", b"                   16");
+        assert_eq!(v, Value::Integer(16));
+    }
+
+    #[test]
+    fn non_ascii_in_value_rejected_strict_both_encodings() {
+        // A non-ASCII byte in a value field is rejected in strict mode
+        // whether it is a bare Latin-1 byte (invalid UTF-8) or a valid
+        // UTF-8 multibyte sequence.
+        assert!(parse("OBSERVER", b"'caf\xe9'").is_err()); // Latin-1 e-acute
+        assert!(parse("OBSERVER", b"'caf\xc3\xa9'").is_err()); // UTF-8 e-acute
     }
 }

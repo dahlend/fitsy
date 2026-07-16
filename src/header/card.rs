@@ -37,9 +37,24 @@ pub struct Card {
 }
 
 impl Card {
-    /// Parse a single 80-byte card. `offset` is the byte offset within
-    /// the file (used in error messages).
+    /// Parse a single 80-byte card in strict mode. `offset` is the byte
+    /// offset within the file (used in error messages).
     pub fn parse(bytes: &[u8], offset: u64) -> Result<Self> {
+        Self::parse_with(bytes, offset, false)
+    }
+
+    /// Parse a single 80-byte card. `lenient` controls how the *value*
+    /// field of a value card is treated: when true, non-ASCII bytes
+    /// (Latin-1 text, tabs, other control bytes) anywhere in the card are
+    /// sanitized to spaces and lower-case keyword letters are folded to
+    /// upper case, so a corrupted value still loads. When false (strict),
+    /// a non-ASCII byte in the keyword or value field is a hard error.
+    ///
+    /// Free-text *comments* are always lenient: the card scanner does not
+    /// reject non-ASCII bytes outright in either mode; commentary bodies
+    /// and the comment portion of a value card are sanitized downstream
+    /// (in `card_to_entry` and `value::split_value_and_comment`).
+    pub fn parse_with(bytes: &[u8], offset: u64, lenient: bool) -> Result<Self> {
         if bytes.len() != CARD_SIZE {
             return Err(FitsError::Card {
                 offset,
@@ -52,29 +67,36 @@ impl Card {
         // a quoted string, the value/comment area, the END card body, or
         // whole post-END fill cards -- the natural artifact of writing
         // into fixed-width buffers left zero-initialized. Map every NUL to
-        // a space so such cards parse. Other non-printable bytes are left
-        // untouched and rejected below, so a non-FITS file (binary garbage)
-        // is still caught.
+        // a space so such cards parse. In `lenient` mode, every non-ASCII
+        // byte is sanitized to a space up front as well (so a corrupted
+        // value field still loads).
+        //
+        // Non-ASCII bytes are NOT rejected wholesale here. Binary garbage
+        // is still caught downstream: `parse_keyword_field` rejects a
+        // non-keyword byte in the keyword field, the END-card check rejects
+        // a stray byte in an END body, and value parsing rejects a
+        // non-ASCII byte in a value field (strict). What this deliberately
+        // permits is a stray byte in a free-text comment -- which carries
+        // no structural meaning and should not sink an otherwise-valid
+        // file -- to survive into the body and be sanitized when the
+        // comment is extracted.
         let mut card = [0_u8; CARD_SIZE];
         card.copy_from_slice(bytes);
         for b in &mut card {
-            if *b == 0 {
+            if *b == 0 || (lenient && !is_ascii_text(*b)) {
                 *b = b' ';
             }
         }
         let bytes: &[u8] = &card;
-        for (i, &b) in bytes.iter().enumerate() {
-            if !is_ascii_text(b) {
-                return Err(FitsError::Card {
-                    offset: offset + i as u64,
-                    msg: format!("non-ASCII-text byte 0x{b:02X}"),
-                });
-            }
-        }
 
         let kw_field = &bytes[..KEYWORD_LEN];
-        let keyword = parse_keyword_field(kw_field, offset)?;
+        let keyword = parse_keyword_field(kw_field, offset, lenient)?;
 
+        // `parse_keyword_field` folds lower-case letters to upper case in
+        // lenient mode, so this comparison also recognizes a lower-case or
+        // mixed-case `end` terminator there. In strict mode a non-upper-case
+        // keyword is rejected before reaching this point, so only the
+        // conformant upper-case `END` matches.
         if keyword == "END" {
             // Sec.4.4.1.2: bytes 9-80 of the END card must be ASCII spaces.
             for (i, &b) in bytes[KEYWORD_LEN..].iter().enumerate() {
@@ -135,7 +157,7 @@ fn is_ascii_text(b: u8) -> bool {
     (0x20..=0x7E).contains(&b)
 }
 
-fn parse_keyword_field(field: &[u8], offset: u64) -> Result<String> {
+fn parse_keyword_field(field: &[u8], offset: u64, lenient: bool) -> Result<String> {
     debug_assert_eq!(
         field.len(),
         KEYWORD_LEN,
@@ -147,18 +169,29 @@ fn parse_keyword_field(field: &[u8], offset: u64) -> Result<String> {
     let trimmed_end = field.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
     let name = &field[..trimmed_end];
     // Trailing spaces only -- interior spaces are not permitted.
+    let mut out = String::with_capacity(name.len());
     for (i, &b) in name.iter().enumerate() {
-        if !is_keyword_char(b) {
+        if is_keyword_char(b) {
+            out.push(b as char);
+        } else if lenient && b.is_ascii_lowercase() {
+            // Fold a lower-case keyword (e.g. `exptime`) to upper case;
+            // this is the most common real-world keyword defect and the
+            // fold preserves the intended keyword semantics.
+            out.push(b.to_ascii_uppercase() as char);
+        } else if lenient {
+            // Any other stray byte (an interior space left by an earlier
+            // non-ASCII sanitization, punctuation, ...) becomes `_` so the
+            // card still carries a usable keyword instead of aborting the
+            // whole header.
+            out.push('_');
+        } else {
             return Err(FitsError::Card {
                 offset: offset + i as u64,
                 msg: format!("invalid character 0x{b:02X} in keyword name"),
             });
         }
     }
-    // Safe: validated to be ASCII subset.
-    Ok(std::str::from_utf8(name)
-        .expect("validated ASCII")
-        .to_string())
+    Ok(out)
 }
 
 #[inline]
@@ -451,5 +484,50 @@ mod tests {
     fn wrong_length_rejected() {
         let raw = vec![b' '; 79];
         assert!(Card::parse(&raw, 0).is_err());
+    }
+
+    #[test]
+    fn non_ascii_in_body_accepted_at_card_layer() {
+        // The card scanner no longer rejects a non-ASCII byte in the
+        // value/comment area even in strict mode -- comment sanitization
+        // happens downstream (see value::split_value_and_comment). A stray
+        // byte in a keyword field is still caught (see the test below).
+        let s = "EXPTIME =                 30.0 / temp in C";
+        let mut raw = make_card(s);
+        raw[s.rfind('C').unwrap()] = 0xB0; // Latin-1 degree sign in comment
+        let c = Card::parse(&raw, 0).unwrap();
+        assert_eq!(c.keyword, "EXPTIME");
+        assert_eq!(c.kind, CardKind::Value);
+    }
+
+    #[test]
+    fn non_ascii_in_keyword_field_still_rejected_strict() {
+        let mut raw = make_card("OBJECT  = 'M31'");
+        raw[2] = 0xB0; // inside the keyword name
+        assert!(Card::parse(&raw, 0).is_err());
+    }
+
+    #[test]
+    fn lowercase_keyword_folded_when_lenient() {
+        let raw = make_card("exptime =                 30.0");
+        assert!(Card::parse(&raw, 0).is_err());
+        let c = Card::parse_with(&raw, 0, true).unwrap();
+        assert_eq!(c.keyword, "EXPTIME");
+        assert_eq!(c.kind, CardKind::Value);
+    }
+
+    #[test]
+    fn interior_space_keyword_becomes_underscore_when_lenient() {
+        let raw = make_card("CD1 1   =                  1.0");
+        assert!(Card::parse(&raw, 0).is_err());
+        let c = Card::parse_with(&raw, 0, true).unwrap();
+        assert_eq!(c.keyword, "CD1_1");
+    }
+
+    #[test]
+    fn lenient_still_rejects_wrong_length() {
+        // Sanitizing content does not excuse a structurally broken card.
+        let raw = vec![b' '; 79];
+        assert!(Card::parse_with(&raw, 0, true).is_err());
     }
 }

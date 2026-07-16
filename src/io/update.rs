@@ -80,9 +80,11 @@ impl FitsUpdater {
     /// Open `path` for in-place updates.
     ///
     /// Parses the file once to discover HDU layouts, then memory-maps
-    /// it read/write.
+    /// it read/write. Headers are parsed leniently by default (matching
+    /// [`FitsFile::open`](crate::FitsFile::open)); use
+    /// [`Self::open_with`] with `lenient = false` for strict parsing.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with(path, false)
+        Self::open_with(path, true)
     }
 
     /// As [`Self::open`], but propagates the `lenient` flag through
@@ -91,7 +93,7 @@ impl FitsUpdater {
     /// already opted into lenient parsing.
     pub fn open_with(path: impl AsRef<Path>, lenient: bool) -> Result<Self> {
         let path = path.as_ref();
-        let probe = crate::FitsOpenOptions::new().lenient(lenient).open(path)?;
+        let probe = crate::FitsFile::open_with(path, lenient)?;
         let n = probe.len();
         let mut images = Vec::with_capacity(n);
         for i in 0..n {

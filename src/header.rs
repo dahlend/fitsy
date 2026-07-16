@@ -54,10 +54,33 @@ pub struct HeaderEntry {
 }
 
 impl Header {
-    /// Parse a header starting at the given byte offset within `bytes`.
-    /// Returns the header and the number of bytes consumed (a multiple
-    /// of 2880).
+    /// Parse a header starting at the given byte offset within `bytes`
+    /// in strict mode. Returns the header and the number of bytes
+    /// consumed (a multiple of 2880).
     pub fn parse(bytes: &[u8], start: u64) -> Result<(Self, u64)> {
+        Self::parse_with(bytes, start, false)
+    }
+
+    /// Parse a header. Non-conforming bytes in free-text *comments* and
+    /// commentary cards (Latin-1, tabs, other control bytes) are always
+    /// sanitized to spaces, in both modes -- a stray byte in a comment
+    /// never fails the parse.
+    ///
+    /// When `lenient` is true, tolerance extends to non-conforming
+    /// *values*: the card scanner sanitizes non-ASCII bytes and folds
+    /// lower-case keywords (see
+    /// [`Card::parse_with`](crate::header::card::Card::parse_with)), and a
+    /// value field that matches no standard type is kept as
+    /// [`Value::Unparsed`] rather than aborting the load. It also recovers
+    /// from some structural defects: stray bytes after the `END` card,
+    /// broken `CONTINUE` chains, and an `END` keyword written in any case
+    /// (folded to `END`).
+    ///
+    /// A present `END` card is required in **both** modes: it is the only
+    /// thing that marks the header/data boundary, so a header without it
+    /// cannot be delimited and is always an error. Block alignment is also
+    /// always enforced.
+    pub fn parse_with(bytes: &[u8], start: u64, lenient: bool) -> Result<(Self, u64)> {
         let start_usize = start as usize;
         if start_usize > bytes.len() || !(bytes.len() - start_usize).is_multiple_of(BLOCK_SIZE) {
             return Err(FitsError::Block {
@@ -78,13 +101,15 @@ impl Header {
             for c in 0..CARDS_PER_BLOCK {
                 let off = block_start + c * CARD_SIZE;
                 let raw = &bytes[off..off + CARD_SIZE];
-                let card = Card::parse(raw, off as u64)?;
+                let card = Card::parse_with(raw, off as u64, lenient)?;
 
                 if end_seen {
                     // Sec.4.4.1.2: every card after END must be all spaces.
                     // Tolerate NUL padding here too (see `Card::parse`): some
                     // writers zero-fill the remainder of the final header block.
-                    if raw.iter().any(|&b| b != b' ' && b != 0) {
+                    // In lenient mode, ignore any other trailing bytes in the
+                    // final header block (some writers leave stray fill there).
+                    if !lenient && raw.iter().any(|&b| b != b' ' && b != 0) {
                         return Err(FitsError::EndCardMisplaced { offset: off as u64 });
                     }
                     continue;
@@ -97,11 +122,11 @@ impl Header {
                     }
                     CardKind::Continue => {
                         let idx = cards.len();
-                        cards.push(card_to_entry(card, off as u64)?);
+                        cards.push(card_to_entry(card, off as u64, lenient)?);
                         continuations.push(idx);
                     }
                     CardKind::Commentary | CardKind::Value => {
-                        cards.push(card_to_entry(card, off as u64)?);
+                        cards.push(card_to_entry(card, off as u64, lenient)?);
                     }
                 }
             }
@@ -112,11 +137,17 @@ impl Header {
         }
 
         if !end_seen {
+            // Sec.4.4.1.2 requires an END card. It is enforced even in
+            // lenient mode: END is the sole delimiter between the header and
+            // the data section, so without it there is no way to know where
+            // the header ends. (A lower-case or mixed-case `end` keyword is
+            // still accepted in lenient mode -- the card scanner folds it to
+            // `END` -- so this only fires when no END card is present at all.)
             return Err(FitsError::Header("no END card found in header".into()));
         }
 
         // Resolve CONTINUE long-string concatenation (Sec.4.2.1.2).
-        merge_continuations(&mut cards, &continuations)?;
+        merge_continuations(&mut cards, &continuations, lenient)?;
 
         // Build index.
         let mut index = BTreeMap::new();
@@ -396,10 +427,17 @@ fn is_structural_keyword(kw: &str) -> bool {
     false
 }
 
-fn card_to_entry(card: Card, _offset: u64) -> Result<HeaderEntry> {
+fn card_to_entry(card: Card, _offset: u64, lenient: bool) -> Result<HeaderEntry> {
     match card.kind {
         CardKind::Value | CardKind::Continue => {
-            let (val, comment) = value::parse(&card.keyword, &card.body)?;
+            // In lenient mode a value field that matches no standard type
+            // is kept as `Value::Unparsed` instead of aborting the header;
+            // strict mode propagates the parse error.
+            let (val, comment) = if lenient {
+                value::parse_lenient(&card.keyword, &card.body)
+            } else {
+                value::parse(&card.keyword, &card.body)?
+            };
             Ok(HeaderEntry {
                 keyword: card.keyword,
                 kind: card.kind,
@@ -409,10 +447,12 @@ fn card_to_entry(card: Card, _offset: u64) -> Result<HeaderEntry> {
             })
         }
         CardKind::Commentary => {
-            let text = std::str::from_utf8(&card.body)
-                .map_err(|_| FitsError::Header("non-UTF-8 commentary card".into()))?
-                .trim_end()
-                .to_string();
+            // Commentary cards (COMMENT, HISTORY, blank keyword) are free
+            // text; sanitize any non-ASCII/control bytes to spaces (they
+            // carry no structural meaning) rather than rejecting an
+            // otherwise-valid header. Comment leniency is the default and
+            // does not require the `lenient` flag.
+            let text = value::sanitize_free_text(&card.body).trim_end().to_string();
             Ok(HeaderEntry {
                 keyword: card.keyword,
                 kind: card.kind,
@@ -428,12 +468,23 @@ fn card_to_entry(card: Card, _offset: u64) -> Result<HeaderEntry> {
 /// Resolve `CONTINUE` long-string concatenation. A string value ending
 /// with `&` is continued by the next `CONTINUE` card whose value is
 /// itself a string (Sec.4.2.1.2). We merge each chain into the parent
-/// card and remove the `CONTINUE` entries.
-fn merge_continuations(cards: &mut Vec<HeaderEntry>, continuations: &[usize]) -> Result<()> {
+/// card and remove the merged `CONTINUE` entries.
+///
+/// In strict mode a malformed chain is an error. In `lenient` mode each
+/// defect is recovered instead: a parent string missing its trailing `&`
+/// is still concatenated (a common writer omission), and a `CONTINUE`
+/// with no usable string parent (orphaned, or following a non-string
+/// value) is left in place as a standalone card rather than aborting the
+/// whole header.
+fn merge_continuations(
+    cards: &mut Vec<HeaderEntry>,
+    continuations: &[usize],
+    lenient: bool,
+) -> Result<()> {
     if continuations.is_empty() {
         return Ok(());
     }
-    let to_remove: std::collections::BTreeSet<usize> = continuations.iter().copied().collect();
+    let mut to_remove: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     // Walk forwards: for each CONTINUE, find the most recent prior
     // value card whose String ends in `&`, and append.
     for &cont_idx in continuations {
@@ -446,13 +497,19 @@ fn merge_continuations(cards: &mut Vec<HeaderEntry>, continuations: &[usize]) ->
             parent_idx = Some(back);
             break;
         }
-        let parent_idx = parent_idx.ok_or_else(|| {
-            FitsError::Header("CONTINUE card without preceding value card".into())
-        })?;
+        let Some(parent_idx) = parent_idx else {
+            if lenient {
+                continue; // orphan CONTINUE: keep as a standalone card.
+            }
+            return Err(FitsError::Header(
+                "CONTINUE card without preceding value card".into(),
+            ));
+        };
 
         // Mutate parent string.
         let cont_text = match &cards[cont_idx].value {
             Some(Value::String(s)) => s.clone(),
+            _ if lenient => continue,
             _ => {
                 return Err(FitsError::Header(
                     "CONTINUE card value is not a string".into(),
@@ -462,17 +519,22 @@ fn merge_continuations(cards: &mut Vec<HeaderEntry>, continuations: &[usize]) ->
         let cont_comment = cards[cont_idx].comment.clone();
         let parent = &mut cards[parent_idx];
         let Some(Value::String(parent_str)) = parent.value.as_mut() else {
+            if lenient {
+                continue; // no string parent to extend: keep CONTINUE as-is.
+            }
             return Err(FitsError::Header(
                 "CONTINUE follows a non-string value".into(),
             ));
         };
-        if !parent_str.ends_with('&') {
+        if parent_str.ends_with('&') {
+            // Drop the trailing `&` continuation marker.
+            parent_str.pop();
+        } else if !lenient {
             return Err(FitsError::Header(
                 "CONTINUE follows a string that does not end with `&`".into(),
             ));
         }
-        // Drop the trailing `&` continuation marker.
-        parent_str.pop();
+        // In lenient mode a missing `&` is tolerated: concatenate anyway.
         parent_str.push_str(&cont_text);
         if let Some(c) = cont_comment {
             match parent.comment.as_mut() {
@@ -483,9 +545,10 @@ fn merge_continuations(cards: &mut Vec<HeaderEntry>, continuations: &[usize]) ->
                 None => parent.comment = Some(c),
             }
         }
+        to_remove.insert(cont_idx);
     }
 
-    // Drop all CONTINUE entries in one pass.
+    // Drop only the CONTINUE entries that were successfully merged.
     let mut i = 0_usize;
     cards.retain(|_| {
         let keep = !to_remove.contains(&i);
@@ -588,6 +651,206 @@ mod tests {
             Value::String(s) => assert_eq!(s, "first part middle part final piece"),
             other => panic!("not a string: {other:?}"),
         }
+    }
+
+    #[test]
+    fn continue_missing_ampersand_concatenates_lenient() {
+        // A parent string that omits the trailing `&` is a common writer
+        // defect. Strict rejects it; lenient concatenates anyway.
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "OBJECT  = 'first part'",
+            "CONTINUE  ' and second'",
+            "END",
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        match h.first("OBJECT").unwrap() {
+            Value::String(s) => assert_eq!(s, "first part and second"),
+            other => panic!("not a string: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_with_non_string_parent_kept_lenient() {
+        // A CONTINUE that cannot attach to a string value must not abort
+        // the header in lenient mode; it is kept as a standalone card.
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "CONTINUE  'dangling'",
+            "END",
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        assert_eq!(h.naxis().unwrap(), 0);
+    }
+
+    #[test]
+    fn missing_end_rejected_even_when_lenient() {
+        // END is the only header/data delimiter, so it is required in both
+        // modes: a header without it cannot be delimited.
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        assert!(Header::parse_with(&bytes, 0, true).is_err());
+    }
+
+    #[test]
+    fn lowercase_end_accepted_when_lenient() {
+        // A lower-case/mixed-case `end` keyword is folded to `END` in
+        // lenient mode and recognized as the terminator; strict rejects it.
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "end",
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        assert_eq!(h.naxis().unwrap(), 0);
+    }
+
+    #[test]
+    fn junk_after_end_ignored_lenient() {
+        let mut bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "END",
+        ]);
+        // A stray non-space byte in the block after END.
+        bytes[4 * CARD_SIZE] = b'X';
+        assert!(Header::parse(&bytes, 0).is_err());
+        assert!(Header::parse_with(&bytes, 0, true).is_ok());
+    }
+
+    #[test]
+    fn malformed_value_aborts_strict_but_loads_lenient() {
+        // A value that matches no standard type. Strict parsing rejects
+        // the whole header; lenient keeps it as `Value::Unparsed` so the
+        // rest of the header (and the HDU) still load.
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "EXPTIME =              12.3.4.5",
+            "OBJECT  = 'M31'",
+            "END",
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        assert!(matches!(h.first("EXPTIME"), Some(Value::Unparsed(s)) if s == "12.3.4.5"));
+        // A later card still parses normally.
+        assert!(matches!(h.first("OBJECT"), Some(Value::String(s)) if s == "M31"));
+    }
+
+    #[test]
+    fn unterminated_string_kept_lenient() {
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "OBJECT  = 'M31",
+            "END",
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        assert!(matches!(h.first("OBJECT"), Some(Value::Unparsed(_))));
+    }
+
+    /// Build header bytes from raw card byte-slices (each padded/truncated
+    /// to 80 bytes), append an END card, and pad to a block. Unlike
+    /// `make_header`, this accepts non-ASCII bytes.
+    fn make_header_raw(cards: &[&[u8]]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for c in cards {
+            let mut card = [b' '; CARD_SIZE];
+            let n = c.len().min(CARD_SIZE);
+            card[..n].copy_from_slice(&c[..n]);
+            buf.extend_from_slice(&card);
+        }
+        let mut end = [b' '; CARD_SIZE];
+        end[..3].copy_from_slice(b"END");
+        buf.extend_from_slice(&end);
+        while buf.len() % BLOCK_SIZE != 0 {
+            buf.push(b' ');
+        }
+        buf
+    }
+
+    #[test]
+    fn non_ascii_in_comment_loads_in_strict_mode() {
+        // A Latin-1 degree sign (0xB0) in a value card's comment must not
+        // fail the default (strict) parse; comments are free text and are
+        // sanitized to spaces.
+        let mut exptime = b"EXPTIME =                 30.0 / temp in C".to_vec();
+        let idx = exptime.iter().rposition(|&b| b == b'C').unwrap();
+        exptime[idx] = 0xB0;
+        let bytes = make_header_raw(&[
+            b"SIMPLE  =                    T",
+            b"BITPIX  =                    8",
+            b"NAXIS   =                    0",
+            &exptime,
+        ]);
+        // Default (strict) parse succeeds and the value is still numeric.
+        let (h, _) = Header::parse(&bytes, 0).unwrap();
+        assert_eq!(h.first("EXPTIME"), Some(&Value::Real(30.0)));
+    }
+
+    #[test]
+    fn non_ascii_in_commentary_card_loads_in_strict_mode() {
+        let mut comment = b"COMMENT observed at 12 deg C".to_vec();
+        let idx = comment.iter().rposition(|&b| b == b'C').unwrap();
+        comment[idx] = 0xB0;
+        let bytes = make_header_raw(&[
+            b"SIMPLE  =                    T",
+            b"BITPIX  =                    8",
+            b"NAXIS   =                    0",
+            &comment,
+        ]);
+        let (h, _) = Header::parse(&bytes, 0).unwrap();
+        assert_eq!(h.comments().count(), 1);
+    }
+
+    #[test]
+    fn non_ascii_in_string_value_needs_lenient() {
+        // A non-ASCII byte in a *value* field is data, not free text: it
+        // fails the strict parse and only loads under `lenient`.
+        let mut obs = b"OBSERVER= 'Xose'".to_vec();
+        let idx = obs.iter().position(|&b| b == b'X').unwrap();
+        obs[idx] = 0xE9; // Latin-1 'e-acute'
+        let bytes = make_header_raw(&[
+            b"SIMPLE  =                    T",
+            b"BITPIX  =                    8",
+            b"NAXIS   =                    0",
+            &obs,
+        ]);
+        assert!(Header::parse(&bytes, 0).is_err());
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        assert!(matches!(h.first("OBSERVER"), Some(Value::String(_))));
+    }
+
+    #[test]
+    fn unparsed_value_round_trips_verbatim() {
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "EXPTIME =              12.3.4.5",
+            "END",
+        ]);
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        // Re-encoding preserves the raw value text unchanged.
+        let out = h.to_bytes().unwrap();
+        let (h2, _) = Header::parse_with(&out, 0, true).unwrap();
+        assert!(matches!(h2.first("EXPTIME"), Some(Value::Unparsed(s)) if s == "12.3.4.5"));
     }
 
     #[test]
