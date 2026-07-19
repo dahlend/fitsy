@@ -410,9 +410,9 @@ impl PyBinTable {
     /// Raises
     /// ------
     /// KeyError
-    ///     If a string key names no column.
+    ///   If a string key names no column.
     /// IndexError
-    ///     If an integer key is out of range.
+    ///   If an integer key is out of range.
     fn __getitem__(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = key.extract::<String>() {
             return self.column(py, &name);

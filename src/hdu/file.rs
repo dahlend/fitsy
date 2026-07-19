@@ -1133,7 +1133,7 @@ fn pread_exact(file: &File, mut off: u64, mut buf: &mut [u8]) -> Result<()> {
 ///   per group.
 /// - Generic conforming extension (Sec.7.1.3): product starts at
 ///   NAXIS1; an empty data axis means zero bytes total.
-fn data_section_size(h: &Header) -> Result<u64> {
+pub(crate) fn data_section_size(h: &Header) -> Result<u64> {
     let bitpix = Bitpix::from_i64(h.bitpix()?)?;
     let naxis = h.naxis()?;
     if naxis == 0 {

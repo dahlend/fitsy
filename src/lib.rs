@@ -115,7 +115,11 @@ pub mod compression;
 #[cfg(any(feature = "nalgebra", feature = "faer"))]
 pub mod interop;
 
+// Hidden from rustdoc: this is the PyO3 binding surface, not Rust API.
+// Its doc comments are numpydoc-format Python docstrings (kept below
+// 4-space indentation so rustdoc does not collect them as doctests).
 #[cfg(feature = "python")]
+#[doc(hidden)]
 pub mod python;
 
 pub use data::{Bitpix, ImageData};

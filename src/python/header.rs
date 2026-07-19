@@ -26,11 +26,10 @@ fn value_to_py(py: Python<'_>, v: &Value) -> Py<PyAny> {
         Value::ComplexReal(r, i) => pyo3::types::PyComplex::from_doubles(py, *r, *i)
             .into_py_any(py)
             .unwrap(),
-        Value::String(s) => s.into_py_any(py).unwrap(),
+        // Unparsed text is preserved verbatim by lenient parsing; expose
+        // the raw string so the card is at least inspectable from Python.
+        Value::String(s) | Value::Unparsed(s) => s.into_py_any(py).unwrap(),
         Value::Undefined => py.None(),
-        // Preserved verbatim by lenient parsing; expose the raw text so
-        // the card is at least inspectable from Python.
-        Value::Unparsed(s) => s.into_py_any(py).unwrap(),
     }
 }
 
@@ -206,26 +205,26 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// key : str or tuple[str, int]
-    ///     A keyword (case-insensitive). Pass ``(keyword, n)`` to
-    ///     fetch the n-th occurrence of a duplicated keyword
-    ///     (negative indices count from the end).
+    ///   A keyword (case-insensitive). Pass ``(keyword, n)`` to
+    ///   fetch the n-th occurrence of a duplicated keyword
+    ///   (negative indices count from the end).
     ///
     /// Returns
     /// -------
     /// bool, int, float, complex, str, None, or HeaderCommentary
-    ///     Regular value cards return the native Python scalar
-    ///     matching the FITS value type. Undefined values come
-    ///     through as ``None``. Indexing with ``"COMMENT"``,
-    ///     ``"HISTORY"`` or ``""`` returns a list-like
-    ///     :class:`HeaderCommentary` view of every text body.
-    ///     For a value card with multiple occurrences, only the
-    ///     first value is returned -- use ``header[(key, n)]`` or
-    ///     :meth:`cards` to access the rest.
+    ///   Regular value cards return the native Python scalar
+    ///   matching the FITS value type. Undefined values come
+    ///   through as ``None``. Indexing with ``"COMMENT"``,
+    ///   ``"HISTORY"`` or ``""`` returns a list-like
+    ///   :class:`HeaderCommentary` view of every text body.
+    ///   For a value card with multiple occurrences, only the
+    ///   first value is returned -- use ``header[(key, n)]`` or
+    ///   :meth:`cards` to access the rest.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///     If no card with that keyword is present.
+    ///   If no card with that keyword is present.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use crate::header::CardKind;
         use pyo3::IntoPyObjectExt;
@@ -301,10 +300,10 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// key : str
-    ///     Keyword (1-8 ASCII chars, or HIERARCH form).
+    ///   Keyword (1-8 ASCII chars, or HIERARCH form).
     /// value : bool, int, float, str, None, or tuple
-    ///     A bare scalar, or a ``(value, comment)`` tuple where
-    ///     ``comment`` is a string or ``None``.
+    ///   A bare scalar, or a ``(value, comment)`` tuple where
+    ///   ``comment`` is a string or ``None``.
     ///
     /// Notes
     /// -----
@@ -315,7 +314,7 @@ impl PyHeader {
     /// Raises
     /// ------
     /// ValueError
-    ///     If the header is read-only.
+    ///   If the header is read-only.
     fn __setitem__(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         let k = norm_key(key);
@@ -338,9 +337,9 @@ impl PyHeader {
     /// Raises
     /// ------
     /// KeyError
-    ///     If no card matches.
+    ///   If no card matches.
     /// ValueError
-    ///     If the header is read-only.
+    ///   If the header is read-only.
     fn __delitem__(&mut self, key: &str) -> PyResult<()> {
         self.ensure_writable()?;
         let k = norm_key(key);
@@ -363,18 +362,18 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// kind : {'COMMENT', 'HISTORY', ''}
-    ///     Commentary kind. The empty string emits a blank-keyword
-    ///     commentary card.
+    ///   Commentary kind. The empty string emits a blank-keyword
+    ///   commentary card.
     /// text : str
-    ///     Commentary text. Long lines are split across multiple
-    ///     80-byte cards on serialization.
+    ///   Commentary text. Long lines are split across multiple
+    ///   80-byte cards on serialization.
     ///
     /// Raises
     /// ------
     /// TypeError
-    ///     If ``kind`` is not one of the recognized values.
+    ///   If ``kind`` is not one of the recognized values.
     /// ValueError
-    ///     If the header is read-only.
+    ///   If the header is read-only.
     fn add_commentary(&mut self, kind: &str, text: &str) -> PyResult<()> {
         use crate::header::CommentaryKind;
         self.ensure_writable()?;
@@ -403,29 +402,29 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// keyword : str
-    ///     Card keyword. May be a HIERARCH name.
+    ///   Card keyword. May be a HIERARCH name.
     /// value : Any, optional
-    ///     New value. If omitted (and the card already exists), only
-    ///     the comment is updated.
+    ///   New value. If omitted (and the card already exists), only
+    ///   the comment is updated.
     /// comment : str, optional
-    ///     New comment. ``None`` leaves the existing comment intact
-    ///     when updating, or emits no comment when inserting.
+    ///   New comment. ``None`` leaves the existing comment intact
+    ///   when updating, or emits no comment when inserting.
     /// before : str, optional
-    ///     Insert the new card immediately before the first card
-    ///     whose keyword equals this. Ignored if `keyword` already
-    ///     exists.
+    ///   Insert the new card immediately before the first card
+    ///   whose keyword equals this. Ignored if `keyword` already
+    ///   exists.
     /// after : str, optional
-    ///     Insert the new card immediately after the first card
-    ///     whose keyword equals this. Ignored if `keyword` already
-    ///     exists. Mutually exclusive with `before`.
+    ///   Insert the new card immediately after the first card
+    ///   whose keyword equals this. Ignored if `keyword` already
+    ///   exists. Mutually exclusive with `before`.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///     If both `before` and `after` are supplied, or if the
-    ///     header is read-only.
+    ///   If both `before` and `after` are supplied, or if the
+    ///   header is read-only.
     /// KeyError
-    ///     If the named `before`/`after` card does not exist.
+    ///   If the named `before`/`after` card does not exist.
     #[pyo3(signature = (keyword, value=None, comment=None, *, before=None, after=None))]
     fn set(
         &mut self,
@@ -490,25 +489,25 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// position : int or str
-    ///     Integer index (0 = first card), or the keyword of an
-    ///     existing card; in the latter case the new card is
-    ///     inserted before/after it depending on `after`.
+    ///   Integer index (0 = first card), or the keyword of an
+    ///   existing card; in the latter case the new card is
+    ///   inserted before/after it depending on `after`.
     /// keyword : str
-    ///     Card keyword.
+    ///   Card keyword.
     /// value : Any, optional
-    ///     Card value. ``None`` records an undefined-value card.
+    ///   Card value. ``None`` records an undefined-value card.
     /// comment : str, optional
-    ///     Optional inline comment.
+    ///   Optional inline comment.
     /// after : bool, optional
-    ///     When `position` is a keyword, set ``after=True`` to insert
-    ///     the new card just after that card rather than before it.
+    ///   When `position` is a keyword, set ``after=True`` to insert
+    ///   the new card just after that card rather than before it.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///     If `position` is a keyword that does not exist.
+    ///   If `position` is a keyword that does not exist.
     /// ValueError
-    ///     If the header is read-only.
+    ///   If the header is read-only.
     #[pyo3(signature = (position, keyword, value=None, comment=None, *, after=false))]
     fn insert(
         &mut self,
@@ -558,18 +557,18 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// oldname : str
-    ///     Existing keyword.
+    ///   Existing keyword.
     /// newname : str
-    ///     Replacement keyword. Must be a valid FITS or HIERARCH
-    ///     keyword.
+    ///   Replacement keyword. Must be a valid FITS or HIERARCH
+    ///   keyword.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///     If no card with `oldname` exists.
+    ///   If no card with `oldname` exists.
     /// ValueError
-    ///     If the header is read-only or `newname` is not a valid
-    ///     keyword.
+    ///   If the header is read-only or `newname` is not a valid
+    ///   keyword.
     fn rename_keyword(&mut self, oldname: &str, newname: &str) -> PyResult<()> {
         self.ensure_writable()?;
         let old = norm_key(oldname);
@@ -602,16 +601,16 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// other : Header or Mapping[str, Any]
-    ///     The values to merge in. ``Header`` instances copy their
-    ///     value cards; mappings are iterated in declaration order.
+    ///   The values to merge in. ``Header`` instances copy their
+    ///   value cards; mappings are iterated in declaration order.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///     If the header is read-only.
+    ///   If the header is read-only.
     /// TypeError
-    ///     If ``other`` is neither a ``Header`` nor a string-keyed
-    ///     mapping.
+    ///   If ``other`` is neither a ``Header`` nor a string-keyed
+    ///   mapping.
     fn update(&mut self, other: &Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         self.update_from(other)
@@ -641,14 +640,14 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// key : str
-    ///     Keyword to look up.
+    ///   Keyword to look up.
     /// default : object, optional
-    ///     Value to return if ``key`` is absent. Defaults to ``None``.
+    ///   Value to return if ``key`` is absent. Defaults to ``None``.
     ///
     /// Returns
     /// -------
     /// object
-    ///     The matching value, or ``default`` if absent.
+    ///   The matching value, or ``default`` if absent.
     #[pyo3(signature = (key, default=None))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> Py<PyAny> {
         let k = norm_key(key);
@@ -699,12 +698,12 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// key : str
-    ///     Keyword (case-insensitive match).
+    ///   Keyword (case-insensitive match).
     ///
     /// Returns
     /// -------
     /// str or None
-    ///     The comment text, or ``None`` if no such card exists or
+    ///   The comment text, or ``None`` if no such card exists or
     /// the matching card has no inline comment.
     fn comment(&self, key: &str) -> Option<String> {
         self.lock()
@@ -859,8 +858,8 @@ impl PyHeader {
     /// Returns
     /// -------
     /// str
-    ///     One of ``"UTC"``, ``"TAI"``, ``"TT"``, ``"TDB"``, ``"TCG"``,
-    ///     ``"TCB"``, ``"GPS"``, ``"LOCAL"``, etc. (WCS Paper IV Table 1).
+    ///   One of ``"UTC"``, ``"TAI"``, ``"TT"``, ``"TDB"``, ``"TCG"``,
+    ///   ``"TCB"``, ``"GPS"``, ``"LOCAL"``, etc. (WCS Paper IV Table 1).
     #[getter]
     fn time_sys(&self) -> String {
         self.lock().time_sys()
@@ -929,9 +928,9 @@ impl PyHeader {
     /// Returns
     /// -------
     /// float or None
-    ///     UTC MJD of the observation start, or ``None`` if the observation
-    ///     time is absent or the time scale cannot be reduced to UTC
-    ///     (e.g. ``LOCAL``, ``UT1``).
+    ///   UTC MJD of the observation start, or ``None`` if the observation
+    ///   time is absent or the time scale cannot be reduced to UTC
+    ///   (e.g. ``LOCAL``, ``UT1``).
     #[getter]
     fn mjd_obs_utc(&self) -> Option<f64> {
         self.lock().mjd_obs_utc()
@@ -988,18 +987,18 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// fix : bool, optional
-    ///     When ``True``, every suggested fix is applied to the returned
-    ///     header copy. Defaults to ``False``.
+    ///   When ``True``, every suggested fix is applied to the returned
+    ///   header copy. Defaults to ``False``.
     /// warn : bool, optional
-    ///     When ``True`` (the default), each issue is emitted as a Python
-    ///     :mod:`warnings` warning prefixed with ``[warning]`` or
-    ///     ``[error]``. Set to ``False`` to suppress all output.
+    ///   When ``True`` (the default), each issue is emitted as a Python
+    ///   :mod:`warnings` warning prefixed with ``[warning]`` or
+    ///   ``[error]``. Set to ``False`` to suppress all output.
     ///
     /// Returns
     /// -------
     /// Header
-    ///     A new independent snapshot of this header (fixed when
-    ///     ``fix=True``, otherwise an unmodified clone).
+    ///   A new independent snapshot of this header (fixed when
+    ///   ``fix=True``, otherwise an unmodified clone).
     #[pyo3(signature = (fix = false, warn = true))]
     fn validate(&self, py: Python<'_>, fix: bool, warn: bool) -> PyResult<Py<Self>> {
         let (diags, fixed_hdr) = self.lock().validate(fix);

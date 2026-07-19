@@ -63,7 +63,10 @@ pub(super) fn decompress_into(
     if n_pixels == 0 {
         return Ok(());
     }
-    if bp == 8 {
+    // cfitsio uses the 64-bit decoder (`fits_hdecompress64`) for ZBITPIX >= 32
+    // and all quantized floats: H-transform coefficients of 32-bit data can
+    // exceed the i32 range, so only 8- and 16-bit data may use the i32 path.
+    if bp >= 4 {
         decompress_typed::<i64>(payload, n_pixels, params, bp, dst)
     } else {
         decompress_typed::<i32>(payload, n_pixels, params, bp, dst)

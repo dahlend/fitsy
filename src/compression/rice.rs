@@ -181,8 +181,10 @@ fn decode_blocks(
     p: RiceParams,
     mut lastpix: u32,
 ) -> Result<()> {
-    // Pixel 0 is the verbatim lead pixel; start decoding from index 1.
-    let mut i = 1_usize;
+    // The first block encodes pixel 0 too (its difference from the verbatim
+    // seed value is always zero), so decoding starts at index 0 exactly as
+    // `cfitsio/ricecomp.c` does.
+    let mut i = 0_usize;
     while i < nx {
         // Read fsbits to obtain `fs + 1`.
         r.nbits -= p.fsbits as i32;
@@ -341,10 +343,9 @@ fn encode_inner(pixels: &[i64], bytepix: u32, nblock: usize, first_bits: i32) ->
     w.output_nbits(pixels[0] as u32, first_bits);
     let mut lastpix = pixels[0];
     let mut diffs = Vec::<u32>::with_capacity(nblock);
-    // The seed pixel is written verbatim; deltas start at index 1 so
-    // the decoder's first block sees `nblock` real deltas, matching
-    // `cfitsio/ricecomp.c`.
-    let mut i = 1_usize;
+    // The seed pixel is written verbatim AND included in the first delta
+    // block (its delta is always zero), matching `cfitsio/ricecomp.c`.
+    let mut i = 0_usize;
     while i < pixels.len() {
         let thisblock = nblock.min(pixels.len() - i);
         diffs.clear();
@@ -362,7 +363,9 @@ fn encode_inner(pixels: &[i64], bytepix: u32, nblock: usize, first_bits: i32) ->
             pixelsum += f64::from(z);
             lastpix = nextpix;
         }
-        let dpsum = ((pixelsum - (thisblock as f64) / 2.0 - 1.0) / thisblock as f64).max(0.0);
+        // `thisblock / 2` is integer division in cfitsio; keep it that way so
+        // odd-length final blocks pick the same `fs`.
+        let dpsum = ((pixelsum - ((thisblock / 2) as f64) - 1.0) / thisblock as f64).max(0.0);
         let psum_full = dpsum as u64;
         let mut psum = match bytepix {
             1 => u32::from(psum_full as u8) >> 1,

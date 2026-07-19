@@ -78,16 +78,21 @@ impl Header {
     ///
     /// A present `END` card is required in **both** modes: it is the only
     /// thing that marks the header/data boundary, so a header without it
-    /// cannot be delimited and is always an error. Block alignment is also
-    /// always enforced.
+    /// cannot be delimited and is always an error. The buffer may extend
+    /// past the header and need not be a whole number of 2880-byte blocks;
+    /// only full blocks are scanned for cards.
     pub fn parse_with(bytes: &[u8], start: u64, lenient: bool) -> Result<(Self, u64)> {
         let start_usize = start as usize;
-        if start_usize > bytes.len() || !(bytes.len() - start_usize).is_multiple_of(BLOCK_SIZE) {
+        if start_usize > bytes.len() {
             return Err(FitsError::Block {
                 offset: start,
-                msg: "header start not block-aligned".into(),
+                msg: "header start beyond end of buffer".into(),
             });
         }
+        // Note: the buffer may extend past the header (callers often hand us
+        // a whole file) and may end in a partial block; only full 2880-byte
+        // blocks are scanned, and a header whose END card is never found in
+        // them is rejected below.
 
         let mut cards = Vec::new();
         let mut continuations: Vec<usize> = Vec::new();

@@ -137,7 +137,7 @@ impl<'a> ImageHdu<'a> {
     ///     return Err(FitsError::Header("HDU 0 is not an image".into()));
     /// };
     /// let pixels = img.read_physical()?;
-    /// assert_eq!(pixels.as_slice().len() as u64, img.axes().iter().product());
+    /// assert_eq!(pixels.as_slice().len() as u64, img.axes().iter().product::<u64>());
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn read_physical(&self) -> Result<ImageData<f64>> {

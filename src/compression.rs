@@ -76,7 +76,7 @@ pub struct CompressedImageHdu<'a> {
 #[derive(Debug, Clone)]
 struct QuantizeInfo {
     dither: DitherMethod,
-    /// Per-tile seed offset (`ZDITHER0`, default 0).
+    /// Per-tile seed offset (`ZDITHER0`, default 1 as in cfitsio).
     dither_seed: u32,
     /// Integer sentinel for NaN/Inf source pixels.
     blank: i32,
@@ -201,10 +201,11 @@ impl<'a> CompressedImageHdu<'a> {
             let scale = lookup_scale_source(h, &inner, "ZSCALE")?;
             let zero = lookup_scale_source(h, &inner, "ZZERO")?;
             let blank = h.optional_int("ZBLANK").map_or(NULL_VALUE, |v| v as i32);
+            // cfitsio defaults the dither seed to 1 when ZDITHER0 is absent.
             let dither_seed = h
                 .optional_int("ZDITHER0")
                 .filter(|v| *v >= 0)
-                .map_or(0, |v| v as u32);
+                .map_or(1, |v| v as u32);
             Some(QuantizeInfo {
                 dither: method,
                 dither_seed,
@@ -403,7 +404,9 @@ impl<'a> CompressedImageHdu<'a> {
                 float_buf.resize(tile_bytes_outer, 0);
                 let scale = q.scale.fetch(&self.inner, row)?;
                 let zero = q.zero.fetch(&self.inner, row)?;
-                let dither_seed = u64::from(q.dither_seed) + (row as u64) + 1;
+                // cfitsio: seed = ZDITHER0 + (row + 1) - 1 = ZDITHER0 + row,
+                // with `row` 0-based here (DitherWalker applies the final -1).
+                let dither_seed = u64::from(q.dither_seed) + (row as u64);
                 let dither_arg = match q.dither {
                     DitherMethod::NoDither => None,
                     other => Some((other, dither_seed)),

@@ -773,9 +773,18 @@ fn decode_int(
             Ok(BinValue::Uint(out))
         }
         IntStorage::Scaled => {
+            // TNULL marks the stored (pre-scaling) undefined value
+            // (Sec.7.3.3.2); undefined cells surface as NaN. Note astropy
+            // leaves scaled TNULL cells unmasked -- we follow the standard
+            // (and cfitsio) instead.
             let mut out = Vec::with_capacity(n);
             for c in raw.chunks_exact(elem) {
-                out.push(col.tzero + col.tscal * read(c) as f64);
+                let stored = read(c);
+                out.push(if Some(stored) == col.tnull {
+                    f64::NAN
+                } else {
+                    col.tzero + col.tscal * stored as f64
+                });
             }
             Ok(BinValue::Float(out))
         }

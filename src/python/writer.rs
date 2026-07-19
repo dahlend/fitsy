@@ -54,21 +54,21 @@ pub struct PyAsciiTableBuilder {
 /// Parameters
 /// ----------
 /// data : numpy.ndarray
-///     Image pixels (any supported FITS dtype: ``u8``, ``i16``,
-///     ``i32``, ``i64``, ``f32``, ``f64``). The returned HDU's
-///     NAXIS list is the *reverse* of ``data.shape`` (numpy is
-///     row-major while FITS is fastest-axis-first).
+///   Image pixels (any supported FITS dtype: ``u8``, ``i16``,
+///   ``i32``, ``i64``, ``f32``, ``f64``). The returned HDU's
+///   NAXIS list is the *reverse* of ``data.shape`` (numpy is
+///   row-major while FITS is fastest-axis-first).
 /// header : dict, optional
-///     Extra header cards to merge in. Values may be scalars or
-///     ``(value, comment)`` tuples.
+///   Extra header cards to merge in. Values may be scalars or
+///   ``(value, comment)`` tuples.
 /// primary : bool, optional
-///     If True (default) and this is the first HDU written, mark it
-///     as the primary HDU. Subsequent calls become image extensions.
+///   If True (default) and this is the first HDU written, mark it
+///   as the primary HDU. Subsequent calls become image extensions.
 ///
 /// Returns
 /// -------
 /// ImageBuilder
-///     Pass to :func:`write`.
+///   Pass to :func:`write`.
 #[pyfunction]
 #[pyo3(signature = (data, header=None, primary=true))]
 pub fn image(
@@ -100,19 +100,19 @@ pub fn image(
 /// Parameters
 /// ----------
 /// data : numpy.ndarray
-///     Image pixels (any supported FITS dtype).
+///   Image pixels (any supported FITS dtype).
 /// header : dict, optional
-///     Extra cards merged into the synthesized image header before
-///     compression.  Structural keywords (``BITPIX``, ``NAXIS*``,
-///     etc.) are ignored.
+///   Extra cards merged into the synthesized image header before
+///   compression.  Structural keywords (``BITPIX``, ``NAXIS*``,
+///   etc.) are ignored.
 /// tile_shape : sequence[int], optional
-///     Tile shape in **FITS axis order** (`tile[0]` = `NAXIS1`
-///     direction).  Length must equal `data.ndim`.  Default is
-///     ``(NAXIS1, 1, 1, ...)`` per Pence & Seaman Sec.3 -- one row per
-///     tile, which is the convention `fpack` uses.
+///   Tile shape in **FITS axis order** (`tile[0]` = `NAXIS1`
+///   direction).  Length must equal `data.ndim`.  Default is
+///   ``(NAXIS1, 1, 1, ...)`` per Pence & Seaman Sec.3 -- one row per
+///   tile, which is the convention `fpack` uses.
 /// extname : str, optional
-///     `EXTNAME` keyword on the resulting BINTABLE.  Default
-///     ``"COMPRESSED_IMAGE"``.
+///   `EXTNAME` keyword on the resulting BINTABLE.  Default
+///   ``"COMPRESSED_IMAGE"``.
 ///
 /// Notes
 /// -----
@@ -378,25 +378,25 @@ where
 /// Parameters
 /// ----------
 /// columns : dict[str, sequence]
-///     One entry per column. All columns must share the same
-///     row count. Supported value kinds:
+///   One entry per column. All columns must share the same
+///   row count. Supported value kinds:
 ///
-///     - numpy ``bool``/``u8``/``i16``/``i32``/``i64``/``f32``/``f64``
-///       arrays (1-D, or 2-D for fixed-repeat columns)
-///     - ``list[str]`` -> ``nA`` (right-padded to the longest string)
-///     - ``list[complex]`` -> ``M`` (``C128``)
-///     - ``list[list[float]]`` -> ``1PD`` variable-length column
-///       (heap-stored, ``f64`` element type)
+///   - numpy ``bool``/``u8``/``i16``/``i32``/``i64``/``f32``/``f64``
+///     arrays (1-D, or 2-D for fixed-repeat columns)
+///   - ``list[str]`` -> ``nA`` (right-padded to the longest string)
+///   - ``list[complex]`` -> ``M`` (``C128``)
+///   - ``list[list[float]]`` -> ``1PD`` variable-length column
+///     (heap-stored, ``f64`` element type)
 /// units : dict[str, str], optional
-///     Per-column ``TUNITn`` strings. Keys must match column names
-///     in ``columns``; entries for unknown columns are ignored.
+///   Per-column ``TUNITn`` strings. Keys must match column names
+///   in ``columns``; entries for unknown columns are ignored.
 /// extname : str, optional
-///     Sets the ``EXTNAME`` keyword for this extension.
+///   Sets the ``EXTNAME`` keyword for this extension.
 ///
 /// Returns
 /// -------
 /// BinTableBuilder
-///     Pass to :func:`write`.
+///   Pass to :func:`write`.
 #[pyfunction]
 #[pyo3(signature = (columns, units=None, extname=None))]
 pub fn bintable(
@@ -692,19 +692,19 @@ fn extract_built(item: Bound<'_, PyAny>) -> PyResult<(Header, Vec<u8>)> {
 /// Parameters
 /// ----------
 /// path : str or pathlib.Path
-///     Destination path. Overwritten if it already exists.
+///   Destination path. Overwritten if it already exists.
 /// hdus : list
-///     Builders returned by :func:`image`, :func:`bintable`, or
-///     :func:`ascii_table`. The first item must be an image (it
-///     becomes the primary HDU); for table-only files pass
-///     ``fitsy.image(np.zeros((0,)))`` first.
+///   Builders returned by :func:`image`, :func:`bintable`, or
+///   :func:`ascii_table`. The first item must be an image (it
+///   becomes the primary HDU); for table-only files pass
+///   ``fitsy.image(np.zeros((0,)))`` first.
 /// overwrite : bool, optional
-///     If False (the default), raise :class:`FileExistsError`
-///     rather than truncating an existing file at ``path``.
+///   If False (the default), raise :class:`FileExistsError`
+///   rather than truncating an existing file at ``path``.
 /// checksums : bool, optional
-///     If True, compute and stamp ``CHECKSUM`` and ``DATASUM``
-///     cards on every emitted HDU (FITS Checksum Proposal).
-///     Defaults to False.
+///   If True, compute and stamp ``CHECKSUM`` and ``DATASUM``
+///   cards on every emitted HDU (FITS Checksum Proposal).
+///   Defaults to False.
 ///
 /// Examples
 /// --------
@@ -808,26 +808,26 @@ impl PyAsciiTableBuilder {
 /// Parameters
 /// ----------
 /// columns : dict[str, sequence]
-///     One entry per column. Supported value kinds:
+///   One entry per column. Supported value kinds:
 ///
-///     - ``list[int]`` or numpy int array -> ``I{w}`` (use ``None``
-///       cells for ``TNULL``; combine with ``tnulls={col: "-9999"}``)
-///     - ``list[float]`` or numpy float array -> ``E{w}.{d}`` by default
-///     - ``list[str]`` -> ``A{maxlen}``
+///   - ``list[int]`` or numpy int array -> ``I{w}`` (use ``None``
+///     cells for ``TNULL``; combine with ``tnulls={col: "-9999"}``)
+///   - ``list[float]`` or numpy float array -> ``E{w}.{d}`` by default
+///   - ``list[str]`` -> ``A{maxlen}``
 /// formats : dict[str, str], optional
-///     Per-column override for the auto-chosen ``TFORM``.
+///   Per-column override for the auto-chosen ``TFORM``.
 /// tnulls : dict[str, str], optional
-///     ``TNULL`` sentinel string for integer columns containing
-///     ``None``.
+///   ``TNULL`` sentinel string for integer columns containing
+///   ``None``.
 /// units : dict[str, str], optional
-///     Per-column ``TUNIT`` strings.
+///   Per-column ``TUNIT`` strings.
 /// extname : str, optional
-///     Sets the ``EXTNAME`` keyword.
+///   Sets the ``EXTNAME`` keyword.
 ///
 /// Returns
 /// -------
 /// AsciiTableBuilder
-///     Pass to :func:`write`.
+///   Pass to :func:`write`.
 #[pyfunction]
 #[pyo3(signature = (columns, formats=None, tnulls=None, units=None, extname=None))]
 pub fn ascii_table(

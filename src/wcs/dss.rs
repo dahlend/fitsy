@@ -1,7 +1,8 @@
 //! DSS plate-solution WCS (non-standard).
 //!
 //! The Digitized Sky Survey distributes images of POSS / SERC plates
-//! together with a 20-term astrometric plate model. The model is
+//! together with a 13-term positional plate model (AMD terms 14-20
+//! are magnitude/color terms, evaluated as zero for image astrometry). The model is
 //! signalled by the simultaneous presence of `PLTRAH`, `PLTDECD`,
 //! `PPO1..6`, `XPIXELSZ`, `YPIXELSZ`, `CNPIX1`, `CNPIX2`, and
 //! `AMDX1..20` / `AMDY1..20`. Headers usually also carry a dummy
@@ -21,14 +22,15 @@
 //!    ```
 //!
 //! 2. Plate position -> standard coordinates `(xi, eta)` in arcseconds
-//!    via the 20-term polynomial (see `amd_xi` / `amd_eta`).
+//!    via the 13 positional terms of the plate polynomial
+//!    (see `amd_xi` / `amd_eta`).
 //!
 //! 3. Standard coordinates -> celestial coordinates by inverse
 //!    gnomonic projection from the plate center
 //!    `(alpha_0, delta_0)`:
 //!
 //!    ```text
-//!    alpha = atan2(-xi, cos delta_0 - eta * sin delta_0) + alpha_0
+//!    alpha = atan2(xi, cos delta_0 - eta * sin delta_0) + alpha_0
 //!    delta = atan2(sin delta_0 + eta * cos delta_0,
 //!              sqrt((cos delta_0 - eta * sin delta_0)^2 + xi^2))
 //!    ```
@@ -153,7 +155,7 @@ impl Dss {
         let cd = dec0.cos();
         let sd = dec0.sin();
         let denom = cd - eta * sd;
-        let alpha = (-xi).atan2(denom) + ra0;
+        let alpha = xi.atan2(denom) + ra0;
         let delta = (sd + eta * cd).atan2((denom * denom + xi * xi).sqrt());
         let mut ra = alpha * DEG_PER_RAD;
         ra = ra.rem_euclid(360.0);
@@ -182,7 +184,7 @@ impl Dss {
                 "DSS: target point is behind the plate".into(),
             ));
         }
-        let xi_target_arcsec = (-cdec * sdra / denom) * ARCSEC_PER_RAD;
+        let xi_target_arcsec = (cdec * sdra / denom) * ARCSEC_PER_RAD;
         let eta_target_arcsec = ((sdec * cd - cdec * sd * cdra) / denom) * ARCSEC_PER_RAD;
         // Initial guess: invert the linear part of the polynomial
         //   xi ~= AMDX1*x + AMDX2*y + AMDX3
@@ -201,7 +203,7 @@ impl Dss {
         }
         let mut xmm = (e * (xi_target_arcsec - c) - b * (eta_target_arcsec - f)) / det;
         let mut ymm = (a * (eta_target_arcsec - f) - d * (xi_target_arcsec - c)) / det;
-        // Newton iteration on the 20-term polynomial.
+        // Newton iteration on the plate polynomial.
         for _ in 0..32 {
             let fx = amd_xi(&self.amdx, xmm, ymm) - xi_target_arcsec;
             let fy = amd_eta(&self.amdy, xmm, ymm) - eta_target_arcsec;
@@ -237,8 +239,12 @@ impl Dss {
     }
 }
 
-/// 20-term DSS plate polynomial for xi (arcsec). `x`, `y` are plate
-/// position in mm relative to the plate center.
+/// DSS plate polynomial for xi (arcsec). `x`, `y` are plate position in
+/// mm relative to the plate center. Only the 13 positional terms are
+/// evaluated: AMDX14-AMDX20 are magnitude/color terms of the GSC
+/// astrometric solution (mag, mag^2, mag^3, mag*x, mag*(x^2+y^2),
+/// mag*x*(x^2+y^2), color) which are taken as zero for image astrometry,
+/// matching wcstools `dsspos.c` and the `STScI` getimage code.
 fn amd_xi(c: &[f64; 20], x: f64, y: f64) -> f64 {
     let r2 = x * x + y * y;
     c[0] * x
@@ -254,17 +260,11 @@ fn amd_xi(c: &[f64; 20], x: f64, y: f64) -> f64 {
         + c[10] * y * y * y
         + c[11] * x * r2
         + c[12] * x * r2 * r2
-        + c[13] * x.powi(5)
-        + c[14] * x.powi(4) * y
-        + c[15] * x.powi(3) * y * y
-        + c[16] * x * x * y.powi(3)
-        + c[17] * x * y.powi(4)
-        + c[18] * y.powi(5)
-        + c[19] * x * r2 * r2 * r2
 }
 
-/// 20-term DSS plate polynomial for eta (arcsec). Same monomial set as
-/// [`amd_xi`] but with x and y swapped.
+/// DSS plate polynomial for eta (arcsec). Same 13 positional terms as
+/// [`amd_xi`] but with x and y swapped; AMDY14-AMDY20 are likewise
+/// magnitude/color terms and are not evaluated.
 fn amd_eta(c: &[f64; 20], x: f64, y: f64) -> f64 {
     let r2 = x * x + y * y;
     c[0] * y
@@ -280,13 +280,6 @@ fn amd_eta(c: &[f64; 20], x: f64, y: f64) -> f64 {
         + c[10] * x * x * x
         + c[11] * y * r2
         + c[12] * y * r2 * r2
-        + c[13] * y.powi(5)
-        + c[14] * y.powi(4) * x
-        + c[15] * y.powi(3) * x * x
-        + c[16] * y * y * x.powi(3)
-        + c[17] * y * x.powi(4)
-        + c[18] * x.powi(5)
-        + c[19] * y * r2 * r2 * r2
 }
 
 fn read_real(header: &Header, key: &str) -> Result<f64> {

@@ -419,7 +419,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "XPH inverse face-disambiguation not yet correct"]
     fn xph_round_trip_off_pole() {
         let p = Xph;
         for &phi in &[-150.0_f64, -60.0, 0.0, 60.0, 150.0] {

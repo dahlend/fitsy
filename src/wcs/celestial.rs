@@ -313,11 +313,11 @@ fn compute_native_pole(
     // alpha_p is indeterminate and the limit must be used.
     let dp_deg = delta_p * R2D;
     if (dp_deg - 90.0).abs() < 1e-6 {
-        let alpha_p = (alpha0 - phi_p_deg - 180.0).rem_euclid(360.0);
+        let alpha_p = (alpha0 + phi_p_deg - 180.0).rem_euclid(360.0);
         return Ok((alpha_p, dp_deg));
     }
     if (dp_deg + 90.0).abs() < 1e-6 {
-        let alpha_p = (alpha0 + phi_p_deg).rem_euclid(360.0);
+        let alpha_p = (alpha0 - phi_p_deg).rem_euclid(360.0);
         return Ok((alpha_p, dp_deg));
     }
 

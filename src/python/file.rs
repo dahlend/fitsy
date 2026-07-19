@@ -79,55 +79,55 @@ fn parse_mode(mode: &str) -> PyResult<bool> {
 /// Parameters
 /// ----------
 /// path : str or os.PathLike
-///     Filesystem path to the FITS file.
+///   Filesystem path to the FITS file.
 /// mode : {'readonly', 'update'}, optional
-///     ``'readonly'`` (default) opens read-only; header mutations and
-///     :meth:`FitsFile.writeto` raise :class:`ValueError`. Matches
-///     astropy's ``fits.open`` mode of the same name.
+///   ``'readonly'`` (default) opens read-only; header mutations and
+///   :meth:`FitsFile.writeto` raise :class:`ValueError`. Matches
+///   astropy's ``fits.open`` mode of the same name.
 ///
-///     ``'update'`` opens read/write. Header edits and image-pixel
-///     in-place edits (``hdu.data[...] = x``) are preserved on
-///     :meth:`FitsFile.writeto`. Table column data is read-only
-///     in this release; reconstruct the table with
-///     :func:`fitsy.bintable` to change column values.
+///   ``'update'`` opens read/write. Header edits and image-pixel
+///   in-place edits (``hdu.data[...] = x``) are preserved on
+///   :meth:`FitsFile.writeto`. Table column data is read-only
+///   in this release; reconstruct the table with
+///   :func:`fitsy.bintable` to change column values.
 /// lenient : bool, optional
-///     Tolerate common non-conforming header content so real-world files
-///     load. **Default True.** Pass ``lenient=False`` to require strict
-///     FITS conformance instead.
+///   Tolerate common non-conforming header content so real-world files
+///   load. **Default True.** Pass ``lenient=False`` to require strict
+///   FITS conformance instead.
 ///
-///     Non-conforming bytes in free-text *comments* (Latin-1, tabs, other
-///     control bytes) are always tolerated and sanitized to spaces even
-///     when ``lenient=False`` -- a stray byte in a comment never fails
-///     the load.
+///   Non-conforming bytes in free-text *comments* (Latin-1, tabs, other
+///   control bytes) are always tolerated and sanitized to spaces even
+///   when ``lenient=False`` -- a stray byte in a comment never fails
+///   the load.
 ///
-///     Leniency additionally tolerates non-conforming *values* that would
-///     otherwise abort the load:
+///   Leniency additionally tolerates non-conforming *values* that would
+///   otherwise abort the load:
 ///
-///     * ``SIMPLE = F`` primary headers written by some pipelines;
-///     * non-ASCII bytes in string *values* -- sanitized to spaces;
-///     * lower-case keywords (folded to upper case) and other stray
-///       keyword characters;
-///     * value fields that match no standard type (e.g. a malformed
-///       number or unquoted string) -- kept verbatim as a string so the
-///       rest of the header and the pixel/table data still load;
-///     * some structural defects: stray bytes trailing the ``END`` card,
-///       a lower-case ``end`` terminator, and broken ``CONTINUE``
-///       long-string chains.
+///   * ``SIMPLE = F`` primary headers written by some pipelines;
+///   * non-ASCII bytes in string *values* -- sanitized to spaces;
+///   * lower-case keywords (folded to upper case) and other stray
+///     keyword characters;
+///   * value fields that match no standard type (e.g. a malformed
+///     number or unquoted string) -- kept verbatim as a string so the
+///     rest of the header and the pixel/table data still load;
+///   * some structural defects: stray bytes trailing the ``END`` card,
+///     a lower-case ``end`` terminator, and broken ``CONTINUE``
+///     long-string chains.
 ///
-///     A present ``END`` card, block alignment, and the declared
-///     data-section size are always enforced, in every mode.
+///   A present ``END`` card, block alignment, and the declared
+///   data-section size are always enforced, in every mode.
 ///
 /// Returns
 /// -------
 /// FitsFile
-///     A read-only or read/write handle depending on ``mode``.
+///   A read-only or read/write handle depending on ``mode``.
 ///
 /// Raises
 /// ------
 /// ValueError
-///     If ``mode`` is not one of the recognized values.
+///   If ``mode`` is not one of the recognized values.
 /// FitsError
-///     On parse failures or I/O errors.
+///   On parse failures or I/O errors.
 ///
 /// Examples
 /// --------
@@ -786,15 +786,15 @@ impl PyFitsFile {
     /// Parameters
     /// ----------
     /// name : str
-    ///     Value of the ``EXTNAME`` keyword to match.
+    ///   Value of the ``EXTNAME`` keyword to match.
     /// ver : int, optional
-    ///     If given, also require matching ``EXTVER`` (default 1
-    ///     when the keyword is absent).
+    ///   If given, also require matching ``EXTVER`` (default 1
+    ///   when the keyword is absent).
     ///
     /// Raises
     /// ------
     /// IndexError
-    ///     If no HDU matches.
+    ///   If no HDU matches.
     #[pyo3(signature = (name, ver=None))]
     fn hdu_by_name(&self, py: Python<'_>, name: &str, ver: Option<i64>) -> PyResult<Py<PyAny>> {
         use pyo3::exceptions::PyKeyError;
@@ -832,10 +832,10 @@ impl PyFitsFile {
     /// Parameters
     /// ----------
     /// i : int, optional
-    ///     HDU index. Default 0 (primary HDU).
+    ///   HDU index. Default 0 (primary HDU).
     /// alt : str, optional
-    ///     Single ASCII character. ``' '`` (default) selects the
-    ///     primary WCS description.
+    ///   Single ASCII character. ``' '`` (default) selects the
+    ///   primary WCS description.
     ///
     /// Notes
     /// -----
@@ -873,20 +873,20 @@ impl PyFitsFile {
     /// Parameters
     /// ----------
     /// path : str or os.PathLike
-    ///     Destination path.
+    ///   Destination path.
     /// overwrite : bool, optional
-    ///     If False (default), raise :class:`FileExistsError` when
-    ///     ``path`` already exists. Set to True to replace it.
+    ///   If False (default), raise :class:`FileExistsError` when
+    ///   ``path`` already exists. Set to True to replace it.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///     If the file contains zero HDUs, or if ``path`` resolves
-    ///     to the source file and the handle is read-only.
+    ///   If the file contains zero HDUs, or if ``path`` resolves
+    ///   to the source file and the handle is read-only.
     /// FileExistsError
-    ///     If ``path`` exists and ``overwrite`` is False.
+    ///   If ``path`` exists and ``overwrite`` is False.
     /// FitsError
-    ///     On I/O failure.
+    ///   On I/O failure.
     #[pyo3(signature = (path, overwrite=false))]
     fn writeto(&self, py: Python<'_>, path: PathBuf, overwrite: bool) -> PyResult<()> {
         use pyo3::exceptions::PyFileExistsError;
@@ -1203,11 +1203,11 @@ impl PyFitsFile {
     /// Returns
     /// -------
     /// list[dict]
-    ///     One dict per HDU, in file order. Keys:
+    ///   One dict per HDU, in file order. Keys:
     ///
-    ///     * ``hdu`` -- 0-based HDU index (``int``).
-    ///     * ``checksum_ok`` -- ``True``/``False``/``None``.
-    ///     * ``datasum_ok`` -- ``True``/``False``/``None``.
+    ///   * ``hdu`` -- 0-based HDU index (``int``).
+    ///   * ``checksum_ok`` -- ``True``/``False``/``None``.
+    ///   * ``datasum_ok`` -- ``True``/``False``/``None``.
     ///
     /// Notes
     /// -----

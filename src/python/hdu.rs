@@ -85,7 +85,7 @@ pub struct PyImageHdu {
     /// `None` means either:
     ///   - ``NAXIS == 0`` (then `axes` is empty), or
     ///   - the data has not yet been read from disk (then `axes` is
-    ///     non-empty and `read_binding` is `Some`).
+    ///   non-empty and `read_binding` is `Some`).
     pub(crate) data: Arc<Mutex<Option<Py<PyAny>>>>,
     /// Lazy-read source. `Some` whenever the HDU was materialised
     /// from a `FitsFile` (i.e. read from disk or from a byte buffer);
@@ -462,16 +462,16 @@ impl PyImageHdu {
     /// Parameters
     /// ----------
     /// data : numpy.ndarray
-    ///     Pixel data. Dtype must be one of ``bool``, ``int8``,
-    ///     ``uint8``, ``int16``, ``uint16``, ``int32``, ``uint32``,
-    ///     ``int64``, ``uint64``, ``float32``, ``float64``. Unsigned
-    ///     integers (and ``int8``) are encoded with the standard
-    ///     ``BZERO`` convention so they round-trip via the reader.
-    ///     The array is stored by reference; in-place mutation later\n    ///     is preserved on :meth:`FitsFile.writeto`.
+    ///   Pixel data. Dtype must be one of ``bool``, ``int8``,
+    ///   ``uint8``, ``int16``, ``uint16``, ``int32``, ``uint32``,
+    ///   ``int64``, ``uint64``, ``float32``, ``float64``. Unsigned
+    ///   integers (and ``int8``) are encoded with the standard
+    ///   ``BZERO`` convention so they round-trip via the reader.
+    ///   The array is stored by reference; in-place mutation later\n    ///     is preserved on :meth:`FitsFile.writeto`.
     /// header : Header or Mapping[str, Any], optional
-    ///     Initial header. Layout cards (``BITPIX``, ``NAXIS*``)\n    ///     are recomputed from the array on write.
+    ///   Initial header. Layout cards (``BITPIX``, ``NAXIS*``)\n    ///     are recomputed from the array on write.
     /// name : str, optional
-    ///     Convenience: sets the ``EXTNAME`` card.
+    ///   Convenience: sets the ``EXTNAME`` card.
     #[new]
     #[pyo3(signature = (data, header=None, name=None))]
     fn py_new(
@@ -540,8 +540,8 @@ impl PyImageHdu {
     /// Returns
     /// -------
     /// numpy.ndarray or None
-    ///     ``None`` when the HDU has no data section
-    ///     (``NAXIS == 0``).
+    ///   ``None`` when the HDU has no data section
+    ///   (``NAXIS == 0``).
     #[getter]
     fn data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(self.ensure_data(py)?.unwrap_or_else(|| py.None()))
@@ -572,8 +572,8 @@ impl PyImageHdu {
     /// Returns
     /// -------
     /// _ImageSection
-    ///     Slicing proxy. Use ``section[i, j, k]`` exactly like
-    ///     ``data[i, j, k]``.
+    ///   Slicing proxy. Use ``section[i, j, k]`` exactly like
+    ///   ``data[i, j, k]``.
     #[getter]
     fn section(slf: PyRef<'_, Self>) -> PyImageSection {
         PyImageSection {
@@ -628,14 +628,14 @@ impl PyImageHdu {
     /// Parameters
     /// ----------
     /// alt : str, optional
-    ///     Single ASCII character. ``' '`` (default) selects the
-    ///     primary description; ``'A'`` through ``'Z'`` select
-    ///     alternate descriptions.
+    ///   Single ASCII character. ``' '`` (default) selects the
+    ///   primary description; ``'A'`` through ``'Z'`` select
+    ///   alternate descriptions.
     ///
     /// Returns
     /// -------
     /// Wcs or None
-    ///     ``None`` if the header carries no WCS for ``alt``.
+    ///   ``None`` if the header carries no WCS for ``alt``.
     ///
     /// Notes
     /// -----

@@ -43,7 +43,8 @@ warnings.filterwarnings("ignore")  # suppress wcslib / astropy deprecation noise
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# This file lives at tests/data/gen_wcs_test_data.py.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = REPO_ROOT / "tests" / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -231,6 +232,189 @@ def generate_standard(out_path: Path) -> None:
     print(
         f"\n  -> {len(rows)} test rows  ({total_skipped} skipped)  -> {out_path.name}\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Edge-case configurations
+# ---------------------------------------------------------------------------
+# The standard grid above is a narrow field (~0.06 deg) centered on CRPIX, so
+# it never reaches: the HPX polar zone (|dec| > ~41.8 deg), quad-cube faces
+# 2-4, XPH away from the reference point, a slanted SIN (PV2_1/PV2_2 != 0),
+# or a non-default LONPOLE. Historical note: bugs in every one of those
+# regions survived the standard grid because forward and inverse shared the
+# error, so pure round-trips passed. These configs pin astropy/WCSLIB values
+# in exactly those regions; each config carries its own field size, grid, and
+# optional LONPOLE.
+
+EDGE_CONFIGS: list[dict] = [
+    {
+        "label": "SIN_SLANT",
+        "code": "SIN",
+        "crval": (150.0, 30.0),
+        "cdelt": (-0.01, 0.01),
+        "pv": [(2, 1, 0.05), (2, 2, -0.07)],
+        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-40, 41, 20) for dy in range(-40, 41, 20)],
+    },
+    {
+        # No PV cards: exercises the documented H=4, K=3 defaults.
+        "label": "HPX_POLAR",
+        "code": "HPX",
+        "crval": (0.0, 0.0),
+        "cdelt": (-1.0, 1.0),
+        "pv": [],
+        "grid": [
+            (50.5 + dx, 50.5 + dy)
+            for dx in range(-40, 41, 10)
+            for dy in list(range(-88, -44, 6)) + list(range(46, 89, 6))
+        ],
+    },
+    {
+        "label": "XPH_FULL",
+        "code": "XPH",
+        "crval": (0.0, 90.0),
+        "cdelt": (-1.0, 1.0),
+        "pv": [],
+        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-80, 81, 16) for dy in range(-80, 81, 16)],
+    },
+    {
+        "label": "CAR_LONPOLE",
+        "code": "CAR",
+        "crval": (45.0, 0.0),
+        "cdelt": (-0.5, 0.5),
+        "pv": [],
+        # delta_p degenerates to +90 here; the error is invisible at the
+        # default LONPOLE (0/180), so pin a nonstandard value.
+        "lonpole": 45.0,
+        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-40, 41, 20) for dy in range(-40, 41, 20)],
+    },
+    {
+        # delta_0 != 0 so the nonstandard LONPOLE actually rotates the frame
+        # (WCSLIB rejects some LONPOLE/delta_0 combinations as having no
+        # valid LATPOLE -- this one is valid).
+        "label": "SFL_LONPOLE",
+        "code": "SFL",
+        "crval": (120.0, 20.0),
+        "cdelt": (-0.5, 0.5),
+        "pv": [],
+        "lonpole": 30.0,
+        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-40, 41, 20) for dy in range(-40, 41, 20)],
+    },
+]
+
+# Quad-cube: wide grids reaching all six faces.
+for _code in ("TSC", "CSC", "QSC"):
+    EDGE_CONFIGS.append(
+        {
+            "label": f"{_code}_FACES",
+            "code": _code,
+            "crval": (0.0, 0.0),
+            "cdelt": (-1.0, 1.0),
+            "pv": [],
+            # CSC's Chan-O'Neill polynomial pair is only self-consistent to a
+            # few arcsec; at 1 deg/px that is ~1e-3 px, far above the default
+            # discard threshold.
+            "tol_px": 0.01 if _code == "CSC" else 1e-6,
+            "grid": [
+                (50.5 + dx, 50.5 + dy)
+                for dx in range(-300, 301, 60)
+                for dy in (-80, -60, -30, 0, 30, 60, 80)
+            ],
+        }
+    )
+
+EDGE_FIELDNAMES = [
+    "label",
+    "code",
+    "crpix1",
+    "crpix2",
+    "crval1",
+    "crval2",
+    "cdelt1",
+    "cdelt2",
+    "lonpole",
+    "pv2_1",
+    "pv2_2",
+    "ra",
+    "dec",
+    "x_fits",
+    "y_fits",
+    "tol_px",
+]
+
+# A config whose points all get discarded is silently untested -- exactly how
+# the quad-cube face-layout bug survived. Require a minimum per config.
+EDGE_MIN_ROWS = 8
+
+
+def generate_edge_cases(out_path: Path) -> None:
+    rows: list[dict] = []
+    for cfg in EDGE_CONFIGS:
+        w = WCS(naxis=2)
+        w.wcs.crpix = [50.5, 50.5]
+        w.wcs.crval = list(cfg["crval"])
+        w.wcs.cdelt = list(cfg["cdelt"])
+        w.wcs.ctype = [f"RA---{cfg['code']}", f"DEC--{cfg['code']}"]
+        if cfg["pv"]:
+            w.wcs.set_pv(cfg["pv"])
+        if "lonpole" in cfg:
+            w.wcs.lonpole = cfg["lonpole"]
+        w.wcs.set()
+
+        pv_map = {(i, m): v for i, m, v in cfg["pv"]}
+        tol_px = cfg.get("tol_px", 1e-6)
+        kept = 0
+        skipped = 0
+        for x_fits, y_fits in cfg["grid"]:
+            try:
+                sky = w.all_pix2world([[x_fits, y_fits]], FITS_ORIGIN)[0]
+                ra, dec = float(sky[0]), float(sky[1])
+                if not (math.isfinite(ra) and math.isfinite(dec)):
+                    skipped += 1
+                    continue
+                pix_back = w.all_world2pix([[ra, dec]], FITS_ORIGIN, quiet=True)[0]
+                xb, yb = float(pix_back[0]), float(pix_back[1])
+                if not (math.isfinite(xb) and math.isfinite(yb)):
+                    skipped += 1
+                    continue
+                if math.hypot(xb - x_fits, yb - y_fits) > tol_px:
+                    skipped += 1
+                    continue
+            except Exception:
+                skipped += 1
+                continue
+            kept += 1
+            rows.append(
+                {
+                    "label": cfg["label"],
+                    "code": cfg["code"],
+                    "crpix1": "50.5",
+                    "crpix2": "50.5",
+                    "crval1": repr(cfg["crval"][0]),
+                    "crval2": repr(cfg["crval"][1]),
+                    "cdelt1": repr(cfg["cdelt"][0]),
+                    "cdelt2": repr(cfg["cdelt"][1]),
+                    "lonpole": repr(cfg["lonpole"]) if "lonpole" in cfg else "",
+                    "pv2_1": repr(pv_map[(2, 1)]) if (2, 1) in pv_map else "",
+                    "pv2_2": repr(pv_map[(2, 2)]) if (2, 2) in pv_map else "",
+                    "ra": f"{ra:.15g}",
+                    "dec": f"{dec:.15g}",
+                    "x_fits": f"{x_fits:.15g}",
+                    "y_fits": f"{y_fits:.15g}",
+                    "tol_px": repr(tol_px),
+                }
+            )
+        print(f"  {cfg['label']:12s} kept {kept:3d}  skipped {skipped:3d}")
+        if kept < EDGE_MIN_ROWS:
+            raise SystemExit(
+                f"config {cfg['label']} kept only {kept} points (< {EDGE_MIN_ROWS});"
+                " widen its grid instead of letting it go silently untested"
+            )
+
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=EDGE_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\n  -> {len(rows)} test rows -> {out_path.name}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +696,9 @@ if __name__ == "__main__":
 
     print("Standard projections:")
     generate_standard(DATA_DIR / "wcs_standard.csv")
+
+    print("Edge cases (polar zones, wide fields, slant, LONPOLE):")
+    generate_edge_cases(DATA_DIR / "wcs_edgecases.csv")
 
     print("SIP distortion:")
     generate_sip(DATA_DIR / "wcs_sip.csv")

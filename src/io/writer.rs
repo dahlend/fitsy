@@ -234,15 +234,17 @@ fn validate_mandatory(header: &Header, is_primary: bool) -> Result<()> {
             }
         }
         // Sec.7.1.1: every conforming extension must declare PCOUNT and
-        // GCOUNT (even when both are zero/one).
-        if !matches!(header.first("PCOUNT"), Some(Value::Integer(_))) {
+        // GCOUNT (even when both are zero/one). Accept what the lenient
+        // reader accepts (integral reals like `PCOUNT = 0.`) so every
+        // openable file is also writable.
+        if header.optional_int("PCOUNT").is_none() {
             return Err(FitsError::Header(
-                "extension HDU header is missing PCOUNT".into(),
+                "extension HDU header is missing or has non-integer PCOUNT".into(),
             ));
         }
-        if !matches!(header.first("GCOUNT"), Some(Value::Integer(_))) {
+        if header.optional_int("GCOUNT").is_none() {
             return Err(FitsError::Header(
-                "extension HDU header is missing GCOUNT".into(),
+                "extension HDU header is missing or has non-integer GCOUNT".into(),
             ));
         }
     }
@@ -293,55 +295,18 @@ fn validate_mandatory(header: &Header, is_primary: bool) -> Result<()> {
 
 /// Verify that `data_len` matches what the header declares.
 ///
-/// Reproduces the Sec.4.4.1.1/Sec.7 data-section formula:
-///   `|BITPIX|/8 * GCOUNT * (PCOUNT + Pi NAXISn)` for `NAXIS > 0`,
-///   `0` for `NAXIS = 0` or any `NAXISn = 0`. The primary HDU is
-///   treated as `PCOUNT=0, GCOUNT=1` per Sec.4.4.1.1.
+/// Uses the same Sec.4.4.1.1/Sec.6/Sec.7 formula as the reader
+/// (`data_section_size`), including the Random Groups `NAXIS1 = 0`
+/// convention -- everything the reader opens must round-trip through
+/// the writer.
 fn validate_data_size(header: &Header, data_len: usize) -> Result<()> {
-    let bitpix = match header.first("BITPIX") {
-        Some(Value::Integer(b)) => *b,
-        // Already reported by validate_mandatory.
-        _ => return Ok(()),
-    };
-    let naxis = match header.first("NAXIS") {
-        Some(Value::Integer(n)) if *n >= 0 => *n as usize,
-        _ => return Ok(()),
-    };
-    let pcount = match header.first("PCOUNT") {
-        Some(Value::Integer(p)) if *p >= 0 => *p as u64,
-        _ => 0,
-    };
-    let gcount = match header.first("GCOUNT") {
-        Some(Value::Integer(g)) if *g >= 1 => *g as u64,
-        _ => 1,
-    };
-    let mut prod: u64 = u64::from(naxis != 0);
-    for i in 1..=naxis {
-        let n = match header.first(&format!("NAXIS{i}")) {
-            Some(Value::Integer(n)) if *n >= 0 => *n as u64,
-            _ => return Ok(()),
-        };
-        if n == 0 {
-            prod = 0;
-            break;
-        }
-        prod = prod
-            .checked_mul(n)
-            .ok_or_else(|| FitsError::Header("NAXISn product overflowed u64".into()))?;
-    }
-    let bytes_per_elt = bitpix.unsigned_abs() / 8;
-    let expected = if prod == 0 {
-        0
-    } else {
-        bytes_per_elt
-            .checked_mul(gcount)
-            .and_then(|v| v.checked_mul(prod + pcount))
-            .ok_or_else(|| FitsError::Header("data size overflowed u64".into()))?
+    // Malformed BITPIX/NAXIS is already reported by validate_mandatory.
+    let Ok(expected) = crate::hdu::file::data_section_size(header) else {
+        return Ok(());
     };
     if expected != data_len as u64 {
         return Err(FitsError::Header(format!(
-            "data section is {data_len} bytes but header declares {expected} bytes \
-             (BITPIX={bitpix}, NAXIS={naxis}, PCOUNT={pcount}, GCOUNT={gcount})"
+            "data section is {data_len} bytes but header declares {expected} bytes"
         )));
     }
     Ok(())

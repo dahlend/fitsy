@@ -14,22 +14,22 @@ use crate::diff::{DiffOptions, FitsDiff};
 /// Parameters
 /// ----------
 /// a, b : str | os.PathLike
-///     Paths to the two files to compare.
+///   Paths to the two files to compare.
 /// rtol : float, optional
-///     Relative tolerance for floating-point comparisons.  Default
-///     ``0.0`` (exact equality).
+///   Relative tolerance for floating-point comparisons.  Default
+///   ``0.0`` (exact equality).
 /// max_diffs : int, optional
-///     Maximum number of differences recorded per category before
-///     truncation. Default 10.
+///   Maximum number of differences recorded per category before
+///   truncation. Default 10.
 /// ignore_keywords : list[str], optional
-///     Header keywords to ignore (case-insensitive). Defaults to
-///     ``["CHECKSUM", "DATASUM", "DATE"]``.
+///   Header keywords to ignore (case-insensitive). Defaults to
+///   ``["CHECKSUM", "DATASUM", "DATE"]``.
 ///
 /// Returns
 /// -------
 /// FitsDiff
-///     Diff object. Use ``str(diff)`` for the report; ``diff.identical``
-///     is True when the files match.
+///   Diff object. Use ``str(diff)`` for the report; ``diff.identical``
+///   is True when the files match.
 #[pyfunction]
 #[pyo3(signature = (a, b, *, rtol=0.0, max_diffs=10, ignore_keywords=None))]
 pub fn diff(

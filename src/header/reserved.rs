@@ -106,7 +106,10 @@ impl Header {
 
     /// Optional integer keyword. Returns `None` if absent. A
     /// floating-point value is accepted if and only if it is an exact
-    /// integer fitting in `i64` -- many real-world headers write\n    /// supposedly-integer reserved keywords (`BLANK`, `PCOUNT`,\n    /// `GCOUNT`, `BITPIX`, `NAXIS*`) as `1.0` or `-32768.` instead of\n    /// the spec-strict integer literal.
+    /// integer fitting in `i64` -- many real-world headers write
+    /// supposedly-integer reserved keywords (`BLANK`, `PCOUNT`,
+    /// `GCOUNT`, `BITPIX`, `NAXIS*`) as `1.0` or `-32768.` instead of
+    /// the spec-strict integer literal.
     #[must_use]
     pub fn optional_int(&self, key: &str) -> Option<i64> {
         match self.first(key)? {

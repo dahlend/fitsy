@@ -154,10 +154,17 @@ impl TnxSurface {
     /// Evaluate the surface at `(xi, eta)`.
     #[must_use]
     pub fn eval(&self, xi: f64, eta: f64) -> f64 {
-        // Normalize into [-1, 1] for Chebyshev/Legendre; for the
-        // ordinary polynomial basis IRAF uses the same normalization.
-        let xn = (2.0 * xi - (self.xi_max + self.xi_min)) / (self.xi_max - self.xi_min);
-        let yn = (2.0 * eta - (self.eta_max + self.eta_min)) / (self.eta_max - self.eta_min);
+        // Normalize into [-1, 1] for Chebyshev/Legendre only. IRAF's
+        // `wf_gseval` passes RAW coordinates to the ordinary polynomial
+        // basis (`wf_gsb1pol` takes no normalization constants at all).
+        let (xn, yn) = if matches!(self.function, TnxFunction::Polynomial) {
+            (xi, eta)
+        } else {
+            (
+                (2.0 * xi - (self.xi_max + self.xi_min)) / (self.xi_max - self.xi_min),
+                (2.0 * eta - (self.eta_max + self.eta_min)) / (self.eta_max - self.eta_min),
+            )
+        };
         let bx = basis(self.function, xn, self.ni as usize);
         let by = basis(self.function, yn, self.nj as usize);
         let mut sum = 0.0;

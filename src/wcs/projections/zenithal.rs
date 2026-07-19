@@ -106,7 +106,7 @@ impl Projection for Sin {
         90.0
     }
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
-        // Paper II eq. (17): x = R_0[costheta*sinphi - xi(1-sintheta)],
+        // Paper II eq. (30): x = R_0[costheta*sinphi + xi(1-sintheta)],
         //                    y = -R_0[costheta*cosphi - eta(1-sintheta)].
         let t = theta * D2R;
         let p = phi * D2R;
@@ -118,14 +118,14 @@ impl Projection for Sin {
             ));
         }
         let one_minus_s = 1.0 - s;
-        let x = R2D * (c * p.sin() - self.xi * one_minus_s);
+        let x = R2D * (c * p.sin() + self.xi * one_minus_s);
         let y = -R2D * (c * p.cos() - self.eta * one_minus_s);
         Ok((x, y))
     }
     fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         // Solve the quadratic in u = 1 - sintheta derived from
-        //   (X + xiu)^2 + (-Y + etau)^2 = cos^2theta = u(2-u)
-        // => (1 + xi^2 + eta^2)*u^2 + 2(Xxi - Yeta - 1)*u + (X^2 + Y^2) = 0.
+        //   (X - xiu)^2 + (-Y + etau)^2 = cos^2theta = u(2-u)
+        // => (1 + xi^2 + eta^2)*u^2 - 2(Xxi + Yeta + 1)*u + (X^2 + Y^2) = 0.
         let big_x = x / R2D;
         let big_y = y / R2D;
         if self.xi == 0.0 && self.eta == 0.0 {
@@ -138,7 +138,7 @@ impl Projection for Sin {
             return Ok((phi, theta));
         }
         let a = 1.0 + self.xi * self.xi + self.eta * self.eta;
-        let b = 2.0 * (big_x * self.xi - big_y * self.eta - 1.0);
+        let b = -2.0 * (big_x * self.xi + big_y * self.eta + 1.0);
         let c = big_x * big_x + big_y * big_y;
         let disc = b * b - 4.0 * a * c;
         if disc < -1e-12 {
@@ -160,7 +160,7 @@ impl Projection for Sin {
         let phi = if (u * (2.0 - u)).max(0.0).sqrt() < 1e-15 {
             0.0
         } else {
-            (big_x + self.xi * u).atan2(-(big_y) + self.eta * u) * R2D
+            (big_x - self.xi * u).atan2(-(big_y) + self.eta * u) * R2D
         };
         Ok((phi, theta))
     }

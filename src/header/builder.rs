@@ -381,14 +381,14 @@ fn write_string_value_with_continue(
     let first_chunk_budget = first_quote_budget.saturating_sub(1);
     let cont_chunk_budget = cont_quote_budget.saturating_sub(1);
     // First chunk.
-    let take = char_floor(remaining, first_chunk_budget);
+    let take = chunk_floor(remaining, first_chunk_budget);
     chunks.push(remaining[..take].to_string());
     remaining = &remaining[take..];
     while !remaining.is_empty() {
         // For non-last chunks reserve `&`; for the last allow full budget.
         // We don't know if this is the last yet -- split greedily and
         // strip the `&` from the final chunk afterwards.
-        let take = char_floor(remaining, cont_chunk_budget);
+        let take = chunk_floor(remaining, cont_chunk_budget);
         chunks.push(remaining[..take].to_string());
         remaining = &remaining[take..];
     }
@@ -602,6 +602,21 @@ fn escape_string(s: &str) -> String {
 }
 
 /// Largest n <= `budget` such that `&s[..n]` is a char boundary.
+/// Largest split point `<= budget` that lands on a char boundary AND does
+/// not divide an escaped `''` pair. In the escaped text quotes only occur
+/// in even-length runs, so a split is safe iff it is preceded by an even
+/// number of consecutive quotes; when the run is odd, backing off one byte
+/// (a quote, always a char boundary) makes it even.
+fn chunk_floor(s: &str, budget: usize) -> usize {
+    let n = char_floor(s, budget);
+    let quote_run = s.as_bytes()[..n]
+        .iter()
+        .rev()
+        .take_while(|&&c| c == b'\'')
+        .count();
+    if quote_run % 2 == 1 { n - 1 } else { n }
+}
+
 fn char_floor(s: &str, budget: usize) -> usize {
     if budget >= s.len() {
         return s.len();

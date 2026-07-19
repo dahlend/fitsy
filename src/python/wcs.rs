@@ -163,14 +163,14 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// header : Header
-    ///     The HDU header to parse.
+    ///   The HDU header to parse.
     /// alt : str, optional
-    ///     Alternate-WCS letter; ``' '`` for the primary description.
+    ///   Alternate-WCS letter; ``' '`` for the primary description.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///     If the header carries no WCS for ``alt``.
+    ///   If the header carries no WCS for ``alt``.
     ///
     /// Notes
     /// -----
@@ -220,8 +220,8 @@ impl PyWcs {
     /// Returns
     /// -------
     /// tuple of int or None
-    ///     ``(lon_axis, lat_axis)`` (zero-based), or ``None`` if no
-    ///     celestial pair is declared.
+    ///   ``(lon_axis, lat_axis)`` (zero-based), or ``None`` if no
+    ///   celestial pair is declared.
     fn celestial_axes(&self) -> Option<(usize, usize)> {
         self.inner.celestial_axes()
     }
@@ -231,16 +231,16 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// pix : sequence of float
-    ///     Length-``naxis`` pixel coordinate.
+    ///   Length-``naxis`` pixel coordinate.
     /// origin : int, optional
-    ///     ``0`` (default) treats ``pix`` as 0-based (numpy/C
-    ///     convention, matching ``astropy.wcs``); ``1`` treats
-    ///     it as 1-based FITS coordinates.
+    ///   ``0`` (default) treats ``pix`` as 0-based (numpy/C
+    ///   convention, matching ``astropy.wcs``); ``1`` treats
+    ///   it as 1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// list of float
-    ///     World coordinates with units given by :attr:`cunit`.
+    ///   World coordinates with units given by :attr:`cunit`.
     #[pyo3(signature = (pix, origin=0))]
     fn pixel_to_world(&self, pix: Vec<f64>, origin: u8) -> PyResult<Vec<f64>> {
         let off = pixel_offset(origin)?;
@@ -253,15 +253,15 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// world : sequence of float
-    ///     Length-``naxis`` world coordinate.
+    ///   Length-``naxis`` world coordinate.
     /// origin : int, optional
-    ///     ``0`` (default) returns 0-based pixel coordinates,
-    ///     ``1`` returns 1-based FITS coordinates.
+    ///   ``0`` (default) returns 0-based pixel coordinates,
+    ///   ``1`` returns 1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// list of float
-    ///     Pixel coordinate in the chosen origin.
+    ///   Pixel coordinate in the chosen origin.
     #[pyo3(signature = (world, origin=0))]
     fn world_to_pixel(&self, world: Vec<f64>, origin: u8) -> PyResult<Vec<f64>> {
         let off = pixel_offset(origin)?;
@@ -277,15 +277,15 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// px, py : float
-    ///     Pixel coordinates.
+    ///   Pixel coordinates.
     /// origin : int, optional
-    ///     ``0`` (default) treats inputs as 0-based; ``1`` as
-    ///     1-based FITS coordinates.
+    ///   ``0`` (default) treats inputs as 0-based; ``1`` as
+    ///   1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// tuple of float
-    ///     ``(ra, dec)`` (or ``(lon, lat)``) in degrees.
+    ///   ``(ra, dec)`` (or ``(lon, lat)``) in degrees.
     #[pyo3(signature = (px, py, origin=0))]
     fn pixel_to_celestial(&self, px: f64, py: f64, origin: u8) -> PyResult<(f64, f64)> {
         let off = pixel_offset(origin)?;
@@ -299,15 +299,15 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// ra, dec : float
-    ///     Sky coordinates in degrees.
+    ///   Sky coordinates in degrees.
     /// origin : int, optional
-    ///     ``0`` (default) returns 0-based ``(px, py)``; ``1``
-    ///     returns 1-based FITS pixel coordinates.
+    ///   ``0`` (default) returns 0-based ``(px, py)``; ``1``
+    ///   returns 1-based FITS pixel coordinates.
     ///
     /// Returns
     /// -------
     /// tuple of float
-    ///     Pixel coordinates in the chosen origin.
+    ///   Pixel coordinates in the chosen origin.
     #[pyo3(signature = (ra, dec, origin=0))]
     fn celestial_to_pixel(&self, ra: f64, dec: f64, origin: u8) -> PyResult<(f64, f64)> {
         let off = pixel_offset(origin)?;
@@ -320,16 +320,16 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// px, py : float
-    ///     Pixel coordinates.
+    ///   Pixel coordinates.
     /// origin : int, optional
-    ///     ``0`` (default) treats inputs as 0-based; ``1`` as
-    ///     1-based FITS coordinates.
+    ///   ``0`` (default) treats inputs as 0-based; ``1`` as
+    ///   1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// tuple of float
-    ///     Pixel scale in degrees per pixel along the two
-    ///     celestial axes.
+    ///   Pixel scale in degrees per pixel along the two
+    ///   celestial axes.
     #[pyo3(signature = (px, py, origin=0))]
     fn pixel_scale_at(&self, px: f64, py: f64, origin: u8) -> PyResult<(f64, f64)> {
         let off = pixel_offset(origin)?;
@@ -343,15 +343,15 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// pixels : numpy.ndarray
-    ///     Shape ``(N, 2)`` array of pixel coordinates.
+    ///   Shape ``(N, 2)`` array of pixel coordinates.
     /// origin : int, optional
-    ///     ``0`` (default) treats inputs as 0-based; ``1`` as
-    ///     1-based FITS coordinates.
+    ///   ``0`` (default) treats inputs as 0-based; ``1`` as
+    ///   1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// numpy.ndarray
-    ///     Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees.
+    ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees.
     #[pyo3(signature = (pixels, origin=0))]
     fn pixel_to_celestial_many<'py>(
         &self,
@@ -389,15 +389,15 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// sky : numpy.ndarray
-    ///     Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees.
+    ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees.
     /// origin : int, optional
-    ///     ``0`` (default) returns 0-based pixel coordinates,
-    ///     ``1`` returns 1-based FITS coordinates.
+    ///   ``0`` (default) returns 0-based pixel coordinates,
+    ///   ``1`` returns 1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// numpy.ndarray
-    ///     Shape ``(N, 2)`` array of pixel coordinates.
+    ///   Shape ``(N, 2)`` array of pixel coordinates.
     #[pyo3(signature = (sky, origin=0))]
     fn celestial_to_pixel_many<'py>(
         &self,
@@ -440,14 +440,14 @@ impl PyWcs {
     /// Parameters
     /// ----------
     /// alt : str, optional
-    ///     ``' '`` (default) for the primary description, or
-    ///     ``'A'`` through ``'Z'`` for an alternate.
+    ///   ``' '`` (default) for the primary description, or
+    ///   ``'A'`` through ``'Z'`` for an alternate.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///     For spectral, ``-TAB``, TPV, TNX or DSS WCSs (not
-    ///     supported on the write path).
+    ///   For spectral, ``-TAB``, TPV, TNX or DSS WCSs (not
+    ///   supported on the write path).
     #[pyo3(signature = (alt=' '))]
     fn to_header(&self, alt: char) -> PyResult<PyHeader> {
         let h = self.inner.to_header(alt).into_py_result()?;
@@ -462,11 +462,11 @@ impl PyWcs {
 /// Attributes
 /// ----------
 /// wcs : Wcs
-///     The fitted world coordinate system.
+///   The fitted world coordinate system.
 /// rms_arcsec : float
-///     Root-mean-square residual across all reference points (arcsec).
+///   Root-mean-square residual across all reference points (arcsec).
 /// max_arcsec : float
-///     Largest single-point residual (arcsec).
+///   Largest single-point residual (arcsec).
 #[pyclass(name = "WcsFit", module = "fitsy")]
 #[derive(Debug)]
 pub struct PyWcsFit {
@@ -488,8 +488,8 @@ impl PyWcsFit {
     /// Returns
     /// -------
     /// numpy.ndarray
-    ///     Shape ``(N, 2)`` of ``(delta_alpha * cos(delta), delta_dec)``
-    ///     in arcseconds.
+    ///   Shape ``(N, 2)`` of ``(delta_alpha * cos(delta), delta_dec)``
+    ///   in arcseconds.
     #[getter]
     fn residuals_arcsec<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         let n = self.residuals.len();
@@ -517,42 +517,42 @@ impl PyWcsFit {
 /// Parameters
 /// ----------
 /// pixels : numpy.ndarray
-///     Shape ``(N, 2)`` array of pixel coordinates.
+///   Shape ``(N, 2)`` array of pixel coordinates.
 /// sky : numpy.ndarray
-///     Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees, or more
-///     generally ``(lon, lat)`` in the chosen ``frame``.
+///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees, or more
+///   generally ``(lon, lat)`` in the chosen ``frame``.
 /// projection : str, optional
-///     Three-letter projection code (default ``"TAN"``).
+///   Three-letter projection code (default ``"TAN"``).
 /// crpix : tuple of float, optional
-///     Pin the reference pixel; otherwise solved as part of the fit.
-///     Interpreted in the same ``origin`` as ``pixels``.
+///   Pin the reference pixel; otherwise solved as part of the fit.
+///   Interpreted in the same ``origin`` as ``pixels``.
 /// crval : tuple of float, optional
-///     Pin the tangent point; otherwise defaults to the spherical
-///     centroid of the sky points.
+///   Pin the tangent point; otherwise defaults to the spherical
+///   centroid of the sky points.
 /// sip_order : int, optional
-///     Enable a SIP polynomial distortion fit of the given order
-///     (typically 2-4).
+///   Enable a SIP polynomial distortion fit of the given order
+///   (typically 2-4).
 /// fit_sip_inverse : bool, optional
-///     When ``sip_order`` is given, also fit the AP/BP inverse
-///     polynomial. Default True.
+///   When ``sip_order`` is given, also fit the AP/BP inverse
+///   polynomial. Default True.
 /// frame : {'equatorial', 'galactic', 'ecliptic', 'supergalactic', 'helioecliptic'}, optional
-///     Celestial frame for the sky coordinates. ``'equatorial'`` is
-///     the default and emits ``RA-/DEC-`` CTYPE pairs.
+///   Celestial frame for the sky coordinates. ``'equatorial'`` is
+///   the default and emits ``RA-/DEC-`` CTYPE pairs.
 /// origin : int, optional
-///     ``0`` (default, numpy/C convention) treats ``pixels`` and
-///     ``crpix`` as 0-based; ``1`` treats them as 1-based FITS
-///     coordinates. The fitted WCS itself always carries 1-based
-///     ``CRPIX`` values per the FITS standard.
+///   ``0`` (default, numpy/C convention) treats ``pixels`` and
+///   ``crpix`` as 0-based; ``1`` treats them as 1-based FITS
+///   coordinates. The fitted WCS itself always carries 1-based
+///   ``CRPIX`` values per the FITS standard.
 ///
 /// Returns
 /// -------
 /// WcsFit
-///     Fitted WCS, residuals, and summary statistics.
+///   Fitted WCS, residuals, and summary statistics.
 ///
 /// Raises
 /// ------
 /// ValueError
-///     On shape mismatches or unknown ``projection``/``frame``.
+///   On shape mismatches or unknown ``projection``/``frame``.
 ///
 /// Examples
 /// --------

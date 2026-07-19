@@ -16,9 +16,17 @@ pub struct Hpx {
 }
 impl Hpx {
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
-        let h = pv2.get(1).copied().unwrap_or(4.0);
-        let k = pv2.get(2).copied().unwrap_or(3.0);
-        if h <= 0.0 || k <= 0.0 {
+        // The parsed PV2 slice is zero-filled, so an absent card reads as
+        // 0.0; H = 0 or K = 0 is meaningless, so treat it as "use default".
+        let h = match pv2.get(1) {
+            Some(&v) if v != 0.0 => v,
+            _ => 4.0,
+        };
+        let k = match pv2.get(2) {
+            Some(&v) if v != 0.0 => v,
+            _ => 3.0,
+        };
+        if h < 0.0 || k < 0.0 {
             return Err(FitsError::Wcs("HPX: H and K must be positive".into()));
         }
         Ok(Self { h, k })
@@ -37,15 +45,18 @@ impl Projection for Hpx {
         if s.abs() <= stx {
             Ok((phi, 90.0 * self.k * s / self.h))
         } else {
+            // Polar zone, Calabretta & Roukema (2007) eqs. (35)-(37):
+            //   sigma = sqrt(K(1 - |sin theta|)),
+            //   x = phi_c + (phi - phi_c) sigma,
+            //   |y| = (90/H)(K + 1 - 2 sigma).
             let abs_s = s.abs();
-            let sigma =
-                (f64::midpoint(self.k, 1.0) - ((self.k + 1.0) * (1.0 - abs_s) / 2.0).sqrt()).abs();
+            let sigma = (self.k * (1.0 - abs_s)).sqrt();
             let h = self.h;
             let half = 360.0 / h / 2.0;
             let phi_c = ((phi + 180.0) / (360.0 / h)).floor() * (360.0 / h) - 180.0 + half;
-            let x_simple = phi_c + (phi - phi_c) * (1.0 - sigma);
-            let y_mag = 90.0 * (self.k + 1.0) / h - 90.0 * sigma / h * self.k;
-            Ok((x_simple, if s >= 0.0 { y_mag } else { -y_mag }))
+            let x = phi_c + (phi - phi_c) * sigma;
+            let y_mag = 90.0 * (self.k + 1.0 - 2.0 * sigma) / h;
+            Ok((x, if s >= 0.0 { y_mag } else { -y_mag }))
         }
     }
     fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
@@ -55,13 +66,14 @@ impl Projection for Hpx {
             let theta = s.clamp(-1.0, 1.0).asin() * R2D;
             Ok((x, theta))
         } else {
+            // Polar zone inverse: sigma = (K + 1 - H|y|/90) / 2,
+            // |sin theta| = 1 - sigma^2/K, phi = phi_c + (x - phi_c)/sigma.
             let abs_yt = yt.abs();
-            let sigma = (self.k + 1.0 - abs_yt) / self.k;
-            if !(0.0..=1.0 + 1e-9).contains(&sigma) {
+            let sigma = (self.k + 1.0 - abs_yt) / 2.0;
+            if sigma < 0.0 {
                 return Err(FitsError::Wcs("HPX: outside the projection".into()));
             }
-            let term = f64::midpoint(self.k, 1.0) - sigma;
-            let sin_abs = (1.0 - 2.0 * term * term / (self.k + 1.0)).clamp(-1.0, 1.0);
+            let sin_abs = (1.0 - sigma * sigma / self.k).clamp(-1.0, 1.0);
             let theta = if y >= 0.0 {
                 sin_abs.asin() * R2D
             } else {
@@ -69,13 +81,18 @@ impl Projection for Hpx {
             };
             let h = self.h;
             let half = 360.0 / h / 2.0;
-            let denom = 1.0 - sigma;
             let n = ((x + 180.0) / (360.0 / h)).floor();
             let phi_c = n * (360.0 / h) - 180.0 + half;
-            let phi = if denom.abs() < 1e-12 {
+            // The polar facets are diamonds: at parameter sigma the facet
+            // half-width is (180/H) sigma, so points outside that band are
+            // not part of the projection (WCSLIB returns an error there too).
+            if (x - phi_c).abs() > sigma * half + 1e-9 {
+                return Err(FitsError::Wcs("HPX: outside the projection".into()));
+            }
+            let phi = if sigma < 1e-12 {
                 phi_c
             } else {
-                phi_c + (x - phi_c) / denom
+                phi_c + (x - phi_c) / sigma
             };
             Ok((phi, theta))
         }
@@ -164,15 +181,21 @@ impl Projection for Xph {
         let xr = x / s;
         let yr = y / s;
 
-        // Quadrant detection picks the facet base phi.
+        // Quadrant detection picks the facet base phi. The forward map is
+        // x = s(xi - eta), y = s(xi + eta) (rotated per quadrant), so the
+        // inverse carries a factor 1/2: xi = (xr + yr)/2, eta = (yr - xr)/2.
+        #[allow(
+            clippy::manual_midpoint,
+            reason = "the +-(a +- b)/2 rotation pairs are clearer kept symmetric"
+        )]
         let (xi1, eta1, mut phi) = if xr <= 0.0 && yr > 0.0 {
-            (-xr - yr, xr - yr, -180.0_f64)
+            ((-xr - yr) / 2.0, (xr - yr) / 2.0, -180.0_f64)
         } else if xr < 0.0 && yr <= 0.0 {
-            (xr - yr, xr + yr, -90.0)
+            ((xr - yr) / 2.0, (xr + yr) / 2.0, -90.0)
         } else if xr >= 0.0 && yr < 0.0 {
-            (xr + yr, -xr + yr, 0.0)
+            ((xr + yr) / 2.0, (-xr + yr) / 2.0, 0.0)
         } else {
-            (-xr + yr, -xr - yr, 90.0)
+            ((-xr + yr) / 2.0, (-xr - yr) / 2.0, 90.0)
         };
 
         let xi = xi1 + 45.0;
