@@ -86,21 +86,7 @@ impl Wcs {
             }
         }
         for i in 0..n {
-            // The parser zeroes `self.crval` on the celestial axis
-            // pair (the values are absorbed into the rotation), so
-            // we have to read them back from the rotation block to
-            // get a faithful round-trip.
-            let v = if let Some(cb) = &self.celestial {
-                if i == cb.pair.lon {
-                    cb.rotation.alpha0
-                } else if i == cb.pair.lat {
-                    cb.rotation.delta0
-                } else {
-                    self.crval[i]
-                }
-            } else {
-                self.crval[i]
-            };
+            let v = self.crval[i];
             let unit = self.cunit.get(i).map_or("", String::as_str);
             let comment = if unit.is_empty() {
                 "Coordinate value at reference point".to_string()

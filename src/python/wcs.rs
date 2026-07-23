@@ -97,30 +97,7 @@ impl PyWcs {
             let _ = writeln!(out, "CUNIT : {}", quoted(&w.cunit));
         }
 
-        // CRVAL is stored zeroed-out for celestial / spectral axes
-        // (those values are absorbed into the celestial rotation /
-        // spectral helper). Reconstruct the user-facing CRVAL.
-        let mut crval = w.crval.clone();
-        if let Some(c) = w.celestial.as_ref() {
-            if c.pair.lon < crval.len() {
-                crval[c.pair.lon] = c.rotation.alpha0;
-            }
-            if c.pair.lat < crval.len() {
-                crval[c.pair.lat] = c.rotation.delta0;
-            }
-        }
-        for sx in &w.spectral {
-            if sx.axis < crval.len() {
-                // Reverse the SI conversion done at parse time.
-                let unit = if sx.unit_to_si == 0.0 {
-                    1.0
-                } else {
-                    sx.unit_to_si
-                };
-                crval[sx.axis] = sx.crval_si / unit;
-            }
-        }
-        let _ = writeln!(out, "CRVAL : {}", nums(&crval));
+        let _ = writeln!(out, "CRVAL : {}", nums(&w.crval));
         let _ = writeln!(out, "CRPIX : {}", nums(w.linear.crpix()));
 
         // Linear matrix as CD<i>_<j> rows. We don't carry the

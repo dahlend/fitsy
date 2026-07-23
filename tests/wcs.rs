@@ -77,6 +77,43 @@ fn tan_reference_pixel_maps_to_crval() {
     assert!(near(world[1], 22.0145, 1e-9), "dec = {}", world[1]);
 }
 
+/// `Wcs::crval` on the celestial pair must hold the true reference
+/// value after parsing a header, matching what `fit_celestial_wcs`
+/// produces directly. Regression test: the parser used to zero this
+/// field out (the value lived only in `celestial.rotation`), which a
+/// downstream consumer reading `wcs.crval` directly (rather than
+/// calling `pixel_to_celestial`) would silently see as `(0.0, 0.0)`.
+#[test]
+fn crval_field_matches_header_on_celestial_pair() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CRPIX1  =                 50.0".into(),
+        "CRPIX2  =                 50.0".into(),
+        "CRVAL1  =              83.6331".into(),
+        "CRVAL2  =              22.0145".into(),
+        "CDELT1  =          -2.78E-04".into(),
+        "CDELT2  =           2.78E-04".into(),
+        "CUNIT1  = 'deg'".into(),
+        "CUNIT2  = 'deg'".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert!(
+        near(wcs.crval[0], 83.6331, 1e-9),
+        "crval[0] = {} (expected 83.6331, not zeroed)",
+        wcs.crval[0]
+    );
+    assert!(
+        near(wcs.crval[1], 22.0145, 1e-9),
+        "crval[1] = {} (expected 22.0145, not zeroed)",
+        wcs.crval[1]
+    );
+    // Must also agree with the rotation block it's mirrored into.
+    let cb = wcs.celestial.as_ref().unwrap();
+    assert!(near(wcs.crval[0], cb.rotation.alpha0, 1e-12));
+    assert!(near(wcs.crval[1], cb.rotation.delta0, 1e-12));
+}
+
 #[test]
 fn tan_round_trip_far_from_pole() {
     let cards: Vec<String> = vec![
@@ -467,6 +504,50 @@ fn celestial_pair_after_spectral_axis() {
     assert!((world[0] - 1.42e9).abs() < 1e-6);
     assert!((world[1] - 100.0).abs() < 1e-9);
     assert!((world[2] - 20.0).abs() < 1e-9);
+}
+
+/// `wcs.crval` must be usable as a "hold every other axis at its
+/// reference value" filler for `world_to_pixel` -- exactly the pattern
+/// `Wcs::celestial_to_pixel` uses internally (`let mut world =
+/// self.crval.clone(); world[lon] = ra; world[lat] = dec;`), and the
+/// natural thing for any external caller to do.
+///
+/// Regression test: before the parser stopped zeroing `crval` on the
+/// celestial/spectral axes, feeding `wcs.crval` straight back into
+/// `world_to_pixel` did not merely give a wrong spectral-axis pixel --
+/// for this fixture (celestial axes zeroed to RA=0/Dec=0, nowhere near
+/// the true tangent point at RA=100/Dec=20) it made the TAN projection
+/// inverse hit the unprojected hemisphere and return `Err`.
+#[test]
+fn crval_is_a_valid_reference_point_filler_with_spectral_axis() {
+    let cards: Vec<String> = vec![
+        "WCSAXES =                    3".into(),
+        "CTYPE1  = 'FREQ    '".into(),
+        "CTYPE2  = 'RA---TAN'".into(),
+        "CTYPE3  = 'DEC--TAN'".into(),
+        "CRPIX1  =                  1.0".into(),
+        "CRPIX2  =                  1.0".into(),
+        "CRPIX3  =                  1.0".into(),
+        "CRVAL1  =              1.42E+9".into(),
+        "CRVAL2  =                100.0".into(),
+        "CRVAL3  =                 20.0".into(),
+        "CDELT1  =              1.0E+6".into(),
+        "CDELT2  =              -0.001".into(),
+        "CDELT3  =               0.001".into(),
+        "CUNIT1  = 'Hz'".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert!(near(wcs.crval[0], 1.42e9, 1.0));
+    assert!(near(wcs.crval[1], 100.0, 1e-9));
+    assert!(near(wcs.crval[2], 20.0, 1e-9));
+
+    let pix = wcs
+        .world_to_pixel(&wcs.crval.clone())
+        .expect("world_to_pixel(wcs.crval) must succeed: it's the reference point");
+    // CRPIX = 1.0 (1-based) on every axis -> 0-based reference pixel = 0.
+    for (i, &p) in pix.iter().enumerate() {
+        assert!(near(p, 0.0, 1e-6), "axis {i}: pix = {p}, expected ~0.0");
+    }
 }
 
 /// `VOPT` linear axis on the 21cm line, with CUNIT = `km/s`.

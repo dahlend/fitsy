@@ -63,7 +63,12 @@ pub struct Wcs {
     pub ctype: Vec<String>,
     /// Per-axis CUNIT values; empty string if not given.
     pub cunit: Vec<String>,
-    /// Per-axis CRVAL.
+    /// Per-axis CRVAL reference value, in `cunit[i]` units. Always the
+    /// true as-parsed/as-fit value, including on the celestial pair
+    /// (also mirrored into `celestial`'s rotation) and spectral axes
+    /// (also mirrored into the matching `SpectralAxis::crval_si`) --
+    /// the pixel<->world pipeline recomputes those axes from the
+    /// rotation/spectral algorithm rather than from this field.
     pub crval: Vec<f64>,
     /// Celestial axis pair plus everything that depends on it
     /// (projection, native<->celestial rotation, optional SIP/TPV).

@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The writer accepts integral-real `PCOUNT`/`GCOUNT` (e.g. `0.`) that the
   lenient reader already accepts.
 - `Header::parse` tolerates trailing bytes after the header block.
+- `Wcs::crval` on the celestial axis pair was zeroed out after parsing a
+  header instead of holding the true reference value.
 
 
 ## [v0.1.4]

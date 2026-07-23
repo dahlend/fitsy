@@ -157,14 +157,18 @@ impl Wcs {
             None
         };
 
-        // Zero out CRVAL on the celestial axes -- those are absorbed
-        // into the rotation; intermediate world for the celestial pair
-        // is already in degrees on the projection plane (no offset).
-        let mut crval_for_struct = crval.clone();
-        if let Some(c) = celestial.as_ref() {
-            crval_for_struct[c.pair.lon] = 0.0;
-            crval_for_struct[c.pair.lat] = 0.0;
-        }
+        // `Wcs::crval` keeps the as-parsed reference values on every
+        // axis, including the celestial pair (whose values are also
+        // mirrored into `celestial.rotation.alpha0/delta0`) and any
+        // spectral axes (also mirrored into `SpectralAxis::crval_si`).
+        // The pixel<->world pipeline overwrites those slots from the
+        // rotation/spectral algorithm unconditionally, so `crval`
+        // itself is never consulted for them there -- but it must
+        // still report the true reference value to callers (e.g.
+        // `Wcs::to_header`, or bindings that expose `crval` directly)
+        // for a WCS built via `Wcs::from_header` to match one built
+        // via `fit_celestial_wcs`, which never zeroes it.
+        let crval_for_struct = crval.clone();
 
         // Frame metadata (Paper II Sec.3.1).
         // EPOCH is a legacy alias for EQUINOX.
@@ -219,13 +223,6 @@ impl Wcs {
             spectral.push(sx);
         }
 
-        // Zero out CRVAL on spectral axes too -- the spectral module
-        // reconstructs S from the intermediate coordinate around
-        // CRVAL internally, so the linear pass must add 0.
-        for sx in &spectral {
-            crval_for_struct[sx.axis] = 0.0;
-        }
-
         // Tabular `-TAB` axes (Paper III Sec.6). Parse the metadata
         // here; the actual coordinate / index arrays live in a
         // separate BINTABLE extension and must be loaded by the
@@ -249,11 +246,13 @@ impl Wcs {
                 ));
             }
             tab_specs.push(read_tab_spec(header, &alt_suffix, i)?);
-            // Note: unlike spectral axes, we do NOT zero CRVAL for
-            // -TAB axes. Paper III Sec.6 specifies that the lookup
-            // operates on the full intermediate world coordinate
-            // `xi = CRVAL + (PC * (p - CRPIX)) * CDELT`, so CRVAL
-            // must remain in the linear pipeline output.
+            // Note: `crval` on a -TAB axis is left in `crval_for_struct`
+            // (never zeroed) because Paper III Sec.6 specifies that the
+            // lookup operates on the full intermediate world coordinate
+            // `xi = CRVAL + (PC * (p - CRPIX)) * CDELT`, so the
+            // pixel<->world pipeline actually consults it, unlike the
+            // celestial/spectral cases above where it's overwritten
+            // unconditionally and only kept in the struct for callers.
         }
 
         Ok(Some(Self {
