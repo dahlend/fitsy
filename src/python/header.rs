@@ -7,7 +7,8 @@ use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::header::{Header, Level, Value};
+use crate::header::{CARD_SIZE, Header, Level, Value};
+use crate::io::block::BLOCK_SIZE;
 
 /// Convert a fitsy `Value` to a native Python object.
 fn value_to_py(py: Python<'_>, v: &Value) -> Py<PyAny> {
@@ -128,6 +129,43 @@ impl PyHeader {
         }
     }
 
+    /// Parse a header from a buffer of concatenated 80-byte cards.
+    ///
+    /// The buffer is normalized before parsing so that both a full
+    /// 2880-byte block dump (the output of `Header::to_bytes`) and a
+    /// bare card fragment are accepted: a partial trailing card is
+    /// padded to 80 bytes, an `END` card is appended when absent (it is
+    /// the header/data delimiter the parser requires), and the whole is
+    /// padded to a 2880-byte block boundary. Backs `fromstring` /
+    /// `frombytes`.
+    fn from_card_bytes(data: &[u8], lenient: bool) -> PyResult<Self> {
+        let mut buf = data.to_vec();
+        // Pad a partial trailing card out to a full 80 bytes.
+        while !buf.len().is_multiple_of(CARD_SIZE) {
+            buf.push(b' ');
+        }
+        // The parser requires an END card to delimit the header; append
+        // one when the caller's text has none (e.g. a single-card snippet).
+        let has_end = buf
+            .chunks_exact(CARD_SIZE)
+            .any(|card| is_end_card(card, lenient));
+        if !has_end {
+            let mut end = [b' '; CARD_SIZE];
+            end[..3].copy_from_slice(b"END");
+            buf.extend_from_slice(&end);
+        }
+        // Only whole 2880-byte blocks are scanned; pad up to the boundary.
+        while !buf.len().is_multiple_of(BLOCK_SIZE) {
+            buf.push(b' ');
+        }
+        let (header, _) = Header::parse_with(&buf, 0, lenient).map_err(super::err_to_py)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(header)),
+            read_only: false,
+            dirty: None,
+        })
+    }
+
     /// Lock the inner `Header`. Panics only if a previous panic
     /// poisoned the mutex; we surface that as a normal lock since
     /// fitsy's header methods do not themselves panic.
@@ -195,6 +233,43 @@ impl PyHeader {
 
 #[pymethods]
 impl PyHeader {
+    /// Construct a new, writable header.
+    ///
+    /// Parameters
+    /// ----------
+    /// mapping : Header or mapping, optional
+    ///   Initial cards. A :class:`Header` is deep-copied (every card,
+    ///   including commentary and structural keywords). A ``dict`` --
+    ///   or any object exposing ``.items()`` -- is inserted key by key,
+    ///   with keywords folded to upper case and a ``(value, comment)``
+    ///   tuple accepted per entry (as in ``header[key] = (value, comment)``).
+    ///   Omit for an empty header.
+    ///
+    /// Notes
+    /// -----
+    /// The result is standalone and writable: attach it to an HDU
+    /// (``fitsy.ImageHdu(data, header=h)`` / ``fitsy.image(...)``) or
+    /// serialize it with :meth:`tostring`. To parse existing card text
+    /// use :meth:`fromstring` / :meth:`frombytes`.
+    ///
+    /// Examples
+    /// --------
+    /// >>> h = fitsy.Header()
+    /// >>> h = fitsy.Header({"OBJECT": "M31", "EXPTIME": (30.0, "s")})
+    #[new]
+    #[pyo3(signature = (mapping=None))]
+    fn py_new(mapping: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let Some(obj) = mapping else {
+            return Ok(Self::empty());
+        };
+        let core = header_from_py(obj)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(core)),
+            read_only: false,
+            dirty: None,
+        })
+    }
+
     /// Test whether ``key`` is present (``key in header``).
     fn __contains__(&self, key: &str) -> bool {
         self.lock().contains(&norm_key(key))
@@ -763,9 +838,10 @@ impl PyHeader {
 
     /// Serialize the header as a single string of 80-character FITS
     /// cards (no separators, terminated by ``END`` and padded to a
-    /// 2880-byte block). Mirrors ``astropy.io.fits.Header.tostring``
-    /// so this object can be fed to ``astropy.wcs.WCS`` via
-    /// ``fits.Header.fromstring(h.tostring())``.
+    /// 2880-byte block). Mirrors ``astropy.io.fits.Header.tostring``,
+    /// so the text round-trips through :meth:`fromstring` and can also
+    /// be fed to ``astropy.wcs.WCS`` via
+    /// ``astropy.io.fits.Header.fromstring(h.tostring())``.
     fn tostring(&self) -> PyResult<String> {
         let bytes = self.lock().to_bytes().map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("serialize header: {e}"))
@@ -773,6 +849,45 @@ impl PyHeader {
         String::from_utf8(bytes).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("non-ASCII header bytes: {e}"))
         })
+    }
+
+    /// Parse a header from a string of concatenated 80-character FITS
+    /// cards -- the inverse of :meth:`tostring`.
+    ///
+    /// The text is read as raw card images with no separators. It need
+    /// not be block-aligned or carry an ``END`` card: a partial final
+    /// card is space-padded and an ``END`` is appended when absent, so
+    /// both a full 2880-byte dump and a bare ``"OBJECT  = 'M31'"``
+    /// fragment parse.
+    ///
+    /// Parameters
+    /// ----------
+    /// data : str
+    ///   Header cards as ASCII text. Use :meth:`frombytes` for a raw
+    ///   ``bytes`` buffer.
+    /// lenient : bool, keyword-only, optional
+    ///   Tolerate non-conforming values and structure (default
+    ///   ``True``, matching :func:`fitsy.open`). Pass ``False`` to
+    ///   require strict Standard conformance.
+    ///
+    /// Returns
+    /// -------
+    /// Header
+    ///   A new, writable header.
+    #[staticmethod]
+    #[pyo3(signature = (data, *, lenient=true))]
+    fn fromstring(data: &str, lenient: bool) -> PyResult<Self> {
+        Self::from_card_bytes(data.as_bytes(), lenient)
+    }
+
+    /// Parse a header from raw FITS bytes -- the inverse of
+    /// ``bytes(header)``. Behaves like :meth:`fromstring` but takes a
+    /// ``bytes`` buffer (for example, header blocks read straight from
+    /// a file).
+    #[staticmethod]
+    #[pyo3(signature = (data, *, lenient=true))]
+    fn frombytes(data: &[u8], lenient: bool) -> PyResult<Self> {
+        Self::from_card_bytes(data, lenient)
     }
 
     /// Raw FITS bytes (``bytes(header)``). Same content as
@@ -1101,14 +1216,53 @@ impl PyHeaderCommentary {
 /// Build a `Header` from a Python `dict[str, value]`. Used by the
 /// writer wrappers. Comments are not supported via dict; callers
 /// who need them should use the lower-level builder.
-pub(crate) fn header_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Header> {
-    let mut h = Header::empty();
-    for (k, v) in d.iter() {
-        let key: String = k.extract()?;
-        let val = py_to_value(&v)?;
-        h.push(key, val, None).map_err(super::err_to_py)?;
+/// Convert a Python ``header=`` argument into a core [`Header`].
+///
+/// Accepts a :class:`Header` (cloned, preserving every card), a
+/// ``dict``, or any object exposing ``.items()``. Keywords are folded
+/// to upper case and a ``(value, comment)`` tuple is accepted per
+/// entry, matching ``header[key] = value`` semantics. Shared by the
+/// ``Header(...)`` constructor and the writer builders.
+pub(crate) fn header_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Header> {
+    // Another Header: clone every card (values, commentary, structural).
+    if let Ok(h) = obj.extract::<PyRef<'_, PyHeader>>() {
+        return Ok(h.lock().clone());
     }
-    Ok(h)
+    // Mapping: insert each entry as though by ``header[key] = value``.
+    let mut header = Header::empty();
+    let items = obj
+        .call_method0("items")
+        .map_err(|_| PyTypeError::new_err("header must be a Header or a mapping with .items()"))?;
+    let iter = items.try_iter()?;
+    for item in iter {
+        let pair = item?;
+        let key: String = pair.get_item(0)?.extract()?;
+        let value = pair.get_item(1)?;
+        let (val, comment) = parse_setitem_value(&value)?;
+        header
+            .set(&norm_key(&key), val, comment.as_deref())
+            .map_err(super::err_to_py)?;
+    }
+    Ok(header)
+}
+
+/// True if `card` (an 80-byte slice) is an `END` card: the keyword
+/// field is `END` followed by spaces. Case-insensitive in lenient mode,
+/// matching the card scanner's folding of a lower-case `end` terminator.
+/// Used by `from_card_bytes` to avoid appending a duplicate `END`.
+fn is_end_card(card: &[u8], lenient: bool) -> bool {
+    if card.len() < CARD_SIZE {
+        return false;
+    }
+    let head = &card[..3];
+    let is_end = if lenient {
+        head.eq_ignore_ascii_case(b"END")
+    } else {
+        head == b"END"
+    };
+    // Bytes 3..8 (the rest of the keyword field) must be spaces, so an
+    // 8-char keyword like `ENDIAN` is not mistaken for the terminator.
+    is_end && card[3..8].iter().all(|&b| b == b' ')
 }
 
 /// Parse the right-hand side of `header[key] = ...`. Accepts either

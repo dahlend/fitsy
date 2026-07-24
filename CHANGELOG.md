@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Header` can now be built from Python via `Header()`, `Header(mapping)`, and `Header.fromstring`/`frombytes`.
+- `fitsy.image`, `fitsy.compressed_image`, and `fitsy.append` now accept a `Header`, not just a `dict`.
 - `lenient` parsing now tolerates most malformed header content:
   bad values, non-standard keywords, a lower-case `end` terminator, and
   broken `CONTINUE` chains.

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple};
 
 use super::IntoPyResult;
 
@@ -190,7 +190,7 @@ pub fn append(
     py: Python<'_>,
     path: PathBuf,
     data: Bound<'_, PyAny>,
-    header: Option<Bound<'_, PyDict>>,
+    header: Option<Bound<'_, PyAny>>,
 ) -> PyResult<()> {
     // Build an extension-image HDU (primary=false ensures
     // XTENSION='IMAGE' and avoids SIMPLE=T being emitted).

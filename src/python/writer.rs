@@ -21,7 +21,7 @@ use crate::header::Header;
 use crate::{AsciiTableBuilder, BinTableBuilder, FitsWriter, ImageBuilder};
 
 use super::IntoPyResult;
-use super::header::header_from_dict;
+use super::header::header_from_py;
 
 /// Opaque image HDU spec produced by :func:`image`.
 ///
@@ -58,9 +58,9 @@ pub struct PyAsciiTableBuilder {
 ///   ``i32``, ``i64``, ``f32``, ``f64``). The returned HDU's
 ///   NAXIS list is the *reverse* of ``data.shape`` (numpy is
 ///   row-major while FITS is fastest-axis-first).
-/// header : dict, optional
-///   Extra header cards to merge in. Values may be scalars or
-///   ``(value, comment)`` tuples.
+/// header : Header or mapping, optional
+///   Extra header cards to merge in -- a :class:`Header` or a
+///   ``dict``. Values may be scalars or ``(value, comment)`` tuples.
 /// primary : bool, optional
 ///   If True (default) and this is the first HDU written, mark it
 ///   as the primary HDU. Subsequent calls become image extensions.
@@ -74,13 +74,13 @@ pub struct PyAsciiTableBuilder {
 pub fn image(
     py: Python<'_>,
     data: Bound<'_, PyAny>,
-    header: Option<Bound<'_, PyDict>>,
+    header: Option<Bound<'_, PyAny>>,
     primary: bool,
 ) -> PyResult<PyImageBuilder> {
     // numpy axes are row-major (slowest first); FITS NAXIS is
     // fastest first. Reverse before handing to ImageBuilder.
     let extra = match header.as_ref() {
-        Some(d) => header_from_dict(d)?,
+        Some(d) => header_from_py(d)?,
         None => Header::empty(),
     };
     let (h, bytes) = build_image(py, &data, primary, extra)?;
@@ -101,10 +101,10 @@ pub fn image(
 /// ----------
 /// data : numpy.ndarray
 ///   Image pixels (any supported FITS dtype).
-/// header : dict, optional
+/// header : Header or mapping, optional
 ///   Extra cards merged into the synthesized image header before
-///   compression.  Structural keywords (``BITPIX``, ``NAXIS*``,
-///   etc.) are ignored.
+///   compression -- a :class:`Header` or a ``dict``.  Structural
+///   keywords (``BITPIX``, ``NAXIS*``, etc.) are ignored.
 /// tile_shape : sequence[int], optional
 ///   Tile shape in **FITS axis order** (`tile[0]` = `NAXIS1`
 ///   direction).  Length must equal `data.ndim`.  Default is
@@ -125,14 +125,14 @@ pub fn image(
 pub fn compressed_image(
     py: Python<'_>,
     data: Bound<'_, PyAny>,
-    header: Option<Bound<'_, PyDict>>,
+    header: Option<Bound<'_, PyAny>>,
     tile_shape: Option<Vec<u64>>,
     extname: Option<String>,
 ) -> PyResult<PyBinTableBuilder> {
     use crate::Value;
     use crate::compression::compress_image_to_hdu;
     let extra = match header.as_ref() {
-        Some(d) => header_from_dict(d)?,
+        Some(d) => header_from_py(d)?,
         None => Header::empty(),
     };
     // Build the uncompressed image first so we get correct BITPIX

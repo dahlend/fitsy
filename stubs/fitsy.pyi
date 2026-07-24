@@ -56,6 +56,14 @@ class FitsError(OSError):
 class Header:
     """Dict-like view of a FITS header. See :class:`fitsy.Header` docs."""
 
+    def __init__(
+        self,
+        mapping: Optional[Union["Header", Mapping[str, Any]]] = None,
+    ) -> None: ...
+    @staticmethod
+    def fromstring(data: str, *, lenient: bool = True) -> "Header": ...
+    @staticmethod
+    def frombytes(data: bytes, *, lenient: bool = True) -> "Header": ...
     @property
     def read_only(self) -> bool: ...
     def __contains__(self, key: str) -> bool: ...
@@ -290,12 +298,12 @@ def open(
 ) -> FitsFile: ...
 def image(
     data: np.ndarray,
-    header: Optional[Mapping[str, Any]] = None,
+    header: Optional[Union[Header, Mapping[str, Any]]] = None,
     primary: bool = True,
 ) -> ImageBuilder: ...
 def compressed_image(
     data: np.ndarray,
-    header: Optional[Mapping[str, Any]] = None,
+    header: Optional[Union[Header, Mapping[str, Any]]] = None,
     algorithm: str = "RICE_1",
     tile_size: Optional[Sequence[int]] = None,
     quantize_level: Optional[float] = None,
@@ -319,7 +327,11 @@ def write(
     *,
     checksums: bool = False,
 ) -> None: ...
-def append(path: StrPath, hdu: Builder) -> None: ...
+def append(
+    path: StrPath,
+    data: np.ndarray,
+    header: Optional[Union[Header, Mapping[str, Any]]] = None,
+) -> None: ...
 def info(path: StrPath) -> str: ...
 def getdata(
     path: StrPath,
