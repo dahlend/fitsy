@@ -305,7 +305,7 @@ impl PyWcs {
     /// Returns
     /// -------
     /// tuple of float
-    ///   Pixel scale in degrees per pixel along the two
+    ///   Pixel scale in arcseconds per pixel along the two
     ///   celestial axes.
     #[pyo3(signature = (px, py, origin=0))]
     fn pixel_scale_at(&self, px: f64, py: f64, origin: u8) -> PyResult<(f64, f64)> {
