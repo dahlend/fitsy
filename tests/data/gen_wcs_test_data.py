@@ -253,7 +253,11 @@ EDGE_CONFIGS: list[dict] = [
         "crval": (150.0, 30.0),
         "cdelt": (-0.01, 0.01),
         "pv": [(2, 1, 0.05), (2, 2, -0.07)],
-        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-40, 41, 20) for dy in range(-40, 41, 20)],
+        "grid": [
+            (50.5 + dx, 50.5 + dy)
+            for dx in range(-40, 41, 20)
+            for dy in range(-40, 41, 20)
+        ],
     },
     {
         # No PV cards: exercises the documented H=4, K=3 defaults.
@@ -274,7 +278,11 @@ EDGE_CONFIGS: list[dict] = [
         "crval": (0.0, 90.0),
         "cdelt": (-1.0, 1.0),
         "pv": [],
-        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-80, 81, 16) for dy in range(-80, 81, 16)],
+        "grid": [
+            (50.5 + dx, 50.5 + dy)
+            for dx in range(-80, 81, 16)
+            for dy in range(-80, 81, 16)
+        ],
     },
     {
         "label": "CAR_LONPOLE",
@@ -285,7 +293,11 @@ EDGE_CONFIGS: list[dict] = [
         # delta_p degenerates to +90 here; the error is invisible at the
         # default LONPOLE (0/180), so pin a nonstandard value.
         "lonpole": 45.0,
-        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-40, 41, 20) for dy in range(-40, 41, 20)],
+        "grid": [
+            (50.5 + dx, 50.5 + dy)
+            for dx in range(-40, 41, 20)
+            for dy in range(-40, 41, 20)
+        ],
     },
     {
         # delta_0 != 0 so the nonstandard LONPOLE actually rotates the frame
@@ -297,7 +309,11 @@ EDGE_CONFIGS: list[dict] = [
         "cdelt": (-0.5, 0.5),
         "pv": [],
         "lonpole": 30.0,
-        "grid": [(50.5 + dx, 50.5 + dy) for dx in range(-40, 41, 20) for dy in range(-40, 41, 20)],
+        "grid": [
+            (50.5 + dx, 50.5 + dy)
+            for dx in range(-40, 41, 20)
+            for dy in range(-40, 41, 20)
+        ],
     },
 ]
 

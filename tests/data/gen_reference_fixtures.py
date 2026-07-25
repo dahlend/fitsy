@@ -90,9 +90,11 @@ def hcomp_i32() -> None:
 
 def dither_f32() -> None:
     n = 32 * 16
-    vals = (lcg(n).astype(np.float64) / (1 << 31) * 100.0 - 50.0).astype(
-        np.float32
-    ).reshape(16, 32)
+    vals = (
+        (lcg(n).astype(np.float64) / (1 << 31) * 100.0 - 50.0)
+        .astype(np.float32)
+        .reshape(16, 32)
+    )
     hdu = fits.CompImageHDU(
         data=vals,
         compression_type="GZIP_1",

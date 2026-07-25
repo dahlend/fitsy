@@ -207,9 +207,9 @@ def test_image_data_parity(path):
                 continue
             if adata is None:
                 continue
-            assert (
-                fdata.shape == adata.shape
-            ), f"HDU {i} shape mismatch: fitsy={fdata.shape} astropy={adata.shape}"
+            assert fdata.shape == adata.shape, (
+                f"HDU {i} shape mismatch: fitsy={fdata.shape} astropy={adata.shape}"
+            )
             # Compare with generous tolerance (BSCALE/BZERO float promotion).
             af = np.asarray(adata, dtype=np.float64)
             ff = np.asarray(fdata, dtype=np.float64)
