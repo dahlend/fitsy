@@ -79,6 +79,10 @@ nitpick_ignore = [
 # resolvable Python class names:
 #
 #   - ``optional`` / ``sequence`` -- NumPy modifier/type keywords
+#   - ``keyword-only`` -- NumPy keyword-only argument marker
+#   - ``mapping`` -- lowercase dict-like pseudo-type (e.g. "Header or
+#     mapping"); the capitalized ``Mapping[str, Any]`` form resolves
+#     fine via intersphinx to ``typing.Mapping`` and needs no entry
 #   - ``{'value', ...}`` -- set-literal choices parsed token-by-token;
 #     Sphinx 9 sees each space-separated fragment as a separate ref
 #
@@ -86,6 +90,8 @@ nitpick_ignore = [
 nitpick_ignore_regex = [
     ("py:class", r"optional"),  # NumPy "optional" modifier
     ("py:class", r"sequence"),  # NumPy "sequence" pseudo-type
+    ("py:class", r"keyword-only"),  # NumPy keyword-only marker
+    ("py:class", r"mapping"),  # lowercase dict-like pseudo-type
     ("py:class", r"\{.*"),  # opening fragment of a set literal
     ("py:class", r"'[^']*'\}?"),  # quoted string token (with optional "}")
     ("py:class", r"'[^']*',?"),  # quoted string followed by comma
