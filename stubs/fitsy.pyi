@@ -3,6 +3,10 @@
 These stubs mirror the runtime API exposed by ``src/python/`` and are
 maintained by hand. They are consumed by IDEs and static type
 checkers; Sphinx autodoc reads the compiled module directly.
+
+``tests/python/test_stubs_match_module.py`` checks them against the
+compiled module, so a signature change in ``src/python/`` must be
+mirrored here or CI fails.
 """
 
 from __future__ import annotations
@@ -11,8 +15,14 @@ from os import PathLike
 from typing import Any, Iterator, Mapping, Optional, Sequence, Union
 
 import numpy as np
+import numpy.typing as npt
 
 __all__ = [
+    # PyO3 derives the module's ``__all__`` from everything registered
+    # in ``src/python.rs``, which is why ``__version__`` and the
+    # private ``_ImageSection`` appear here.
+    "__version__",
+    "_ImageSection",
     "FitsError",
     "FitsFile",
     "FitsDiff",
@@ -43,6 +53,8 @@ __all__ = [
     "delval",
     "fit_wcs",
 ]
+
+__version__: str
 
 # Path-like accepted by IO functions.
 StrPath = Union[str, PathLike[str]]
@@ -117,11 +129,11 @@ class HeaderCommentary:
     def __str__(self) -> str: ...
 
 class ImageHdu:
-    """Image HDU. Construct from a numpy array, or get from :meth:`FitsFile.hdu`."""
+    """Image HDU. Construct from an array, or get from :meth:`FitsFile.hdu`."""
 
     def __init__(
         self,
-        data: np.ndarray,
+        data: npt.ArrayLike,
         header: Optional[Union[Header, Mapping[str, Any]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
@@ -134,7 +146,7 @@ class ImageHdu:
     @property
     def data(self) -> Optional[np.ndarray]: ...
     @data.setter
-    def data(self, value: Optional[np.ndarray]) -> None: ...
+    def data(self, value: Optional[npt.ArrayLike]) -> None: ...
     @property
     def section(self) -> "_ImageSection": ...
     def wcs(self, alt: str = " ") -> Optional[Wcs]: ...
@@ -198,13 +210,15 @@ class RandomGroups:
     @property
     def header(self) -> Header: ...
     @property
-    def gcount(self) -> int: ...
+    def bitpix(self) -> int: ...
     @property
-    def pcount(self) -> int: ...
+    def n_groups(self) -> int: ...
     @property
-    def parameter_names(self) -> list[str]: ...
-    def parameter(self, index_or_name: Union[int, str]) -> np.ndarray: ...
-    def data(self) -> np.ndarray: ...
+    def n_params(self) -> int: ...
+    @property
+    def data_per_group(self) -> int: ...
+    def group(self, i: int) -> tuple[np.ndarray, np.ndarray]: ...
+    def __len__(self) -> int: ...
 
 Hdu = Union[ImageHdu, BinTable, AsciiTable, RandomGroups]
 
@@ -246,7 +260,10 @@ class Wcs:
     def crval(self) -> list[float]: ...
     @property
     def is_celestial(self) -> bool: ...
+    @property
+    def pixel_shape(self) -> Optional[tuple[int, ...]]: ...
     def celestial_axes(self) -> Optional[tuple[int, int]]: ...
+    def footprint(self) -> np.ndarray: ...
     def pixel_to_world(self, pix: Sequence[float], origin: int = 0) -> list[float]: ...
     def world_to_pixel(
         self, world: Sequence[float], origin: int = 0
@@ -261,10 +278,10 @@ class Wcs:
         self, px: float, py: float, origin: int = 0
     ) -> tuple[float, float]: ...
     def pixel_to_celestial_many(
-        self, pixels: np.ndarray, origin: int = 0
+        self, pixels: npt.ArrayLike, origin: int = 0
     ) -> np.ndarray: ...
     def celestial_to_pixel_many(
-        self, sky: np.ndarray, origin: int = 0
+        self, sky: npt.ArrayLike, origin: int = 0
     ) -> np.ndarray: ...
     def to_header(self, alt: str = " ") -> Header: ...
 
@@ -297,17 +314,17 @@ def open(
     lenient: bool = True,
 ) -> FitsFile: ...
 def image(
-    data: np.ndarray,
+    data: npt.ArrayLike,
     header: Optional[Union[Header, Mapping[str, Any]]] = None,
     primary: bool = True,
 ) -> ImageBuilder: ...
 def compressed_image(
-    data: np.ndarray,
+    data: npt.ArrayLike,
     header: Optional[Union[Header, Mapping[str, Any]]] = None,
-    algorithm: str = "RICE_1",
-    tile_size: Optional[Sequence[int]] = None,
-    quantize_level: Optional[float] = None,
-) -> ImageBuilder: ...
+    *,
+    tile_shape: Optional[Sequence[int]] = None,
+    extname: Optional[str] = None,
+) -> BinTableBuilder: ...
 def bintable(
     columns: Mapping[str, Any],
     units: Optional[Mapping[str, str]] = None,
@@ -329,10 +346,10 @@ def write(
 ) -> None: ...
 def append(
     path: StrPath,
-    data: np.ndarray,
+    data: npt.ArrayLike,
     header: Optional[Union[Header, Mapping[str, Any]]] = None,
 ) -> None: ...
-def info(path: StrPath) -> str: ...
+def info(path: StrPath) -> list[tuple[int, str, int, str, Any]]: ...
 def getdata(
     path: StrPath,
     ext: Union[int, str] = 0,
@@ -345,19 +362,21 @@ def getheader(
 ) -> Header: ...
 def getval(
     path: StrPath,
-    keyword: str,
+    key: str,
     ext: Union[int, str] = 0,
 ) -> HeaderScalar: ...
 def setval(
     path: StrPath,
-    keyword: str,
+    key: str,
     value: HeaderScalar = None,
-    comment: Optional[str] = None,
+    *,
     ext: Union[int, str] = 0,
+    comment: Optional[str] = None,
 ) -> None: ...
 def delval(
     path: StrPath,
-    keyword: str,
+    key: str,
+    *,
     ext: Union[int, str] = 0,
 ) -> None: ...
 
@@ -385,8 +404,8 @@ def diff(
     ignore_keywords: Optional[Sequence[str]] = None,
 ) -> FitsDiff: ...
 def fit_wcs(
-    pixels: np.ndarray,
-    sky: np.ndarray,
+    pixels: npt.ArrayLike,
+    sky: npt.ArrayLike,
     projection: str = "TAN",
     crpix: Optional[tuple[float, float]] = None,
     crval: Optional[tuple[float, float]] = None,

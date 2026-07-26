@@ -194,9 +194,9 @@ pub fn append(
 ) -> PyResult<()> {
     // Build an extension-image HDU (primary=false ensures
     // XTENSION='IMAGE' and avoids SIMPLE=T being emitted).
-    let builder = super::writer::image(py, data, header, false).map_err(|e| {
+    let builder = super::writer::image(data, header, false).map_err(|e| {
         PyTypeError::new_err(format!(
-            "fitsy.append: data must be a numpy image array ({e})"
+            "fitsy.append: data must be an image array or array-like ({e})"
         ))
     })?;
 

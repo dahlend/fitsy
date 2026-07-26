@@ -20,8 +20,13 @@ px, py = wcs.celestial_to_pixel(ra, dec)
 print(f"round-trip: ({px:.2f}, {py:.2f})")
 
 # Batch transform: corners + center -> sky.
+# Accepts any array-like (numpy array, list of lists, etc.).
 sky = wcs.pixel_to_celestial_many(
     np.array([[0.0, 0.0], [1447.0, 2171.0], [724.0, 1086.0]])
 )
 print("corners + center sky:")
 print(sky)
+
+# Plain Python lists work too (no numpy import required at call site).
+sky2 = wcs.pixel_to_celestial_many([[0.0, 0.0], [724.0, 1086.0]])
+print("list-of-lists input:", sky2)

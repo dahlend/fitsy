@@ -9,6 +9,14 @@ Three builder functions convert numpy / Python data into HDU specs:
 
 Hand the resulting list to :func:`fitsy.write`.
 
+Anywhere pixel data or a numeric column is expected, any array-like
+works -- a numpy array, a nested list, a tuple, or an object
+implementing ``__array__``. Non-arrays are converted once via
+:func:`numpy.asarray`, which is also what decides the resulting
+``BITPIX`` / ``TFORMn``; pass a numpy array with an explicit dtype
+when you care about the on-disk type. A numpy array already in the
+platform's byte order is used as-is, with no copy and no conversion.
+
 .. literalinclude:: ../../examples/python/writing_files.py
    :language: python
 

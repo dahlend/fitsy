@@ -3,7 +3,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use numpy::{IntoPyArray, PyArrayMethods};
+use numpy::{
+    IntoPyArray, PyArrayDescrMethods, PyArrayMethods, PyUntypedArray, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
@@ -170,8 +172,8 @@ impl PyImageHdu {
             .file
             .read_data_owned(binding.hdu_idx)
             .into_py_result()?;
-        let user_header = self.header.lock().clone();
-        let img = ImageHdu::new(user_header, &bytes).into_py_result()?;
+        let header = header_with_layout(&self.header.lock(), &self.axes, self.bitpix);
+        let img = ImageHdu::new(header, &bytes).into_py_result()?;
         let arr = read_pixels(py, &img, self.bitpix, &self.axes)?;
         if self.read_only {
             freeze_array(py, &arr)?;
@@ -253,7 +255,7 @@ impl PyImageHdu {
         use crate::python::writer::build_image;
         let user_header = self.header.lock().clone();
         match self.ensure_data(py)? {
-            Some(arr) => build_image(py, arr.bind(py), is_primary, user_header),
+            Some(arr) => build_image(arr.bind(py), is_primary, user_header),
             None => Ok((empty_image_header(is_primary, user_header), Vec::new())),
         }
     }
@@ -281,6 +283,39 @@ impl PyImageHdu {
             }
         }
     }
+}
+
+/// Clone `header`, overwriting its layout cards with the geometry the
+/// HDU actually has.
+///
+/// Layout cards on an attached header are advisory: the write path
+/// ignores whatever they say and re-stamps `BITPIX`/`NAXIS*` from the
+/// HDU's own `axes`/`bitpix` (see `apply_extra_header` in
+/// `python::writer` and [`PyImageHdu::restamp_layout`]). That is what
+/// makes `ImageHdu(new_data, header=other_hdu.header)` work at all --
+/// the donor header describes a different image and is expected to
+/// disagree.
+///
+/// The read path has to follow the same rule, because it decodes
+/// through [`crate::ImageHdu`], which derives its geometry entirely
+/// from the header it is handed. Passing the user's header verbatim
+/// makes any stale or edited `NAXISn` abort the read of bytes that
+/// are perfectly fine. Everything else -- `BZERO`, `BSCALE`, `BLANK`
+/// -- is left as the user set it, since those cards *are* theirs.
+fn header_with_layout(header: &crate::Header, axes: &[u64], bitpix: Bitpix) -> crate::Header {
+    use crate::Value;
+    let mut h = header.clone();
+    let _ = h.set("BITPIX", Value::Integer(bitpix.as_i64()), None);
+    let _ = h.set("NAXIS", Value::Integer(axes.len() as i64), None);
+    for (i, n) in axes.iter().enumerate() {
+        let _ = h.set(&format!("NAXIS{}", i + 1), Value::Integer(*n as i64), None);
+    }
+    let mut k = axes.len() + 1;
+    while h.first(&format!("NAXIS{k}")).is_some() {
+        h.remove(&format!("NAXIS{k}"));
+        k += 1;
+    }
+    h
 }
 
 /// Mark a numpy array as read-only by clearing its `WRITEABLE` flag.
@@ -457,39 +492,45 @@ fn read_raw_to_array(
 
 #[pymethods]
 impl PyImageHdu {
-    /// Construct a new image HDU from a numpy array.
+    /// Construct a new image HDU from an array.
     ///
     /// Parameters
     /// ----------
-    /// data : numpy.ndarray
+    /// data : array-like
     ///   Pixel data. Dtype must be one of ``bool``, ``int8``,
     ///   ``uint8``, ``int16``, ``uint16``, ``int32``, ``uint32``,
     ///   ``int64``, ``uint64``, ``float32``, ``float64``. Unsigned
     ///   integers (and ``int8``) are encoded with the standard
     ///   ``BZERO`` convention so they round-trip via the reader.
-    ///   The array is stored by reference; in-place mutation later\n    ///     is preserved on :meth:`FitsFile.writeto`.
+    ///   A numpy array in the platform's byte order is stored by
+    ///   reference, so in-place mutation is preserved on
+    ///   :meth:`FitsFile.writeto`. Anything else (a nested list, a
+    ///   byte-swapped array) is converted once via
+    ///   :func:`numpy.asarray` and the HDU holds that conversion --
+    ///   later edits to the original object are not seen.
     /// header : Header or Mapping[str, Any], optional
-    ///   Initial header. Layout cards (``BITPIX``, ``NAXIS*``)\n    ///     are recomputed from the array on write.
+    ///   Initial header. Layout cards (``BITPIX``, ``NAXIS*``)
+    ///   are recomputed from the array on write.
     /// name : str, optional
     ///   Convenience: sets the ``EXTNAME`` card.
     #[new]
     #[pyo3(signature = (data, header=None, name=None))]
     fn py_new(
         py: Python<'_>,
-        data: Py<PyAny>,
+        data: Bound<'_, PyAny>,
         header: Option<Py<PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
-        let bitpix = bitpix_from_array(py, &data)?;
+        let data = crate::python::as_native_ndarray(&data, "ImageHdu")?;
+        let bitpix = bitpix_from_array(&data)?;
         let header = build_header(py, header, name)?;
-        let shape: Vec<usize> = data.bind(py).getattr("shape")?.extract()?;
-        let axes: Vec<u64> = shape.into_iter().rev().map(|n| n as u64).collect();
+        let axes: Vec<u64> = data.shape().iter().rev().map(|&n| n as u64).collect();
         Ok(Self {
             header,
             bitpix,
             axes,
             read_only: false,
-            data: Arc::new(Mutex::new(Some(data))),
+            data: Arc::new(Mutex::new(Some(data.into_any().unbind()))),
             read_binding: None,
             update_binding: None,
             dirty: None,
@@ -588,11 +629,12 @@ impl PyImageHdu {
         }
     }
 
-    /// Replace the pixel array. Dtype must be a supported FITS
-    /// type. The header's ``BITPIX`` and ``NAXIS*`` cards are
-    /// updated immediately to match the new array.
+    /// Replace the pixel array. Accepts any array-like; dtype must
+    /// resolve to a supported FITS type. The header's ``BITPIX``
+    /// and ``NAXIS*`` cards are updated immediately to match the
+    /// new array.
     #[setter]
-    fn set_data(&mut self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+    fn set_data(&mut self, value: Bound<'_, PyAny>) -> PyResult<()> {
         if let Some(flag) = &self.dirty {
             flag.store(true, Ordering::Release);
         }
@@ -608,17 +650,17 @@ impl PyImageHdu {
         // image. Drop the read binding so subsequent accesses
         // never silently re-read stale on-disk bytes.
         self.read_binding = None;
-        if value.is_none(py) {
+        if value.is_none() {
             self.store_data(None);
             self.axes.clear();
             self.restamp_layout(&[]);
             return Ok(());
         }
-        self.bitpix = bitpix_from_array(py, &value)?;
-        let shape: Vec<usize> = value.bind(py).getattr("shape")?.extract()?;
-        let axes: Vec<u64> = shape.iter().rev().map(|&n| n as u64).collect();
+        let value = crate::python::as_native_ndarray(&value, "ImageHdu.data")?;
+        self.bitpix = bitpix_from_array(&value)?;
+        let axes: Vec<u64> = value.shape().iter().rev().map(|&n| n as u64).collect();
         self.axes.clone_from(&axes);
-        self.store_data(Some(value));
+        self.store_data(Some(value.into_any().unbind()));
         self.restamp_layout(&axes);
         Ok(())
     }
@@ -684,28 +726,24 @@ impl PyImageHdu {
     }
 }
 
-/// Infer `BITPIX` from a numpy array's dtype.
-fn bitpix_from_array(py: Python<'_>, arr: &Py<PyAny>) -> PyResult<Bitpix> {
-    let bound = arr.bind(py);
-    let dtype = bound.getattr("dtype")?;
-    let kind: char = dtype
-        .getattr("kind")?
-        .extract::<String>()?
-        .chars()
-        .next()
-        .unwrap_or('?');
-    let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+/// Infer `BITPIX` from an array's dtype. `kind`/`itemsize` come
+/// straight off the descriptor struct, so no Python attribute
+/// lookups are involved.
+fn bitpix_from_array(arr: &Bound<'_, PyUntypedArray>) -> PyResult<Bitpix> {
+    let dtype = arr.dtype();
+    let kind = dtype.kind();
+    let itemsize = dtype.itemsize();
     Ok(match (kind, itemsize) {
         // 'b' (numpy bool) and 1-byte int/uint all map to BITPIX=8.
         // BZERO offsets map signed/unsigned to the same BITPIX storage.
-        ('b', _) | ('u' | 'i', 1) => Bitpix::U8,
-        ('i' | 'u', 2) => Bitpix::I16,
-        ('i' | 'u', 4) => Bitpix::I32,
-        ('i' | 'u', 8) => Bitpix::I64,
-        ('f', 4) => Bitpix::F32,
-        ('f', 8) => Bitpix::F64,
+        (b'b', _) | (b'u' | b'i', 1) => Bitpix::U8,
+        (b'i' | b'u', 2) => Bitpix::I16,
+        (b'i' | b'u', 4) => Bitpix::I32,
+        (b'i' | b'u', 8) => Bitpix::I64,
+        (b'f', 4) => Bitpix::F32,
+        (b'f', 8) => Bitpix::F64,
         _ => {
-            let name: String = dtype.str()?.extract()?;
+            let name: String = dtype.as_any().str()?.extract()?;
             return Err(PyTypeError::new_err(format!(
                 "ImageHdu: unsupported numpy dtype {name:?}; expected one of \
                  bool, int8, uint8, int16, uint16, int32, uint32, \
@@ -950,8 +988,8 @@ impl PyImageSection {
             .file
             .read_data_owned(binding.hdu_idx)
             .into_py_result()?;
-        let user_header = self.header.lock().clone();
-        let img = ImageHdu::new(user_header, &bytes).into_py_result()?;
+        let header = header_with_layout(&self.header.lock(), &self.axes, self.bitpix);
+        let img = ImageHdu::new(header, &bytes).into_py_result()?;
         let arr = read_pixels(py, &img, self.bitpix, &self.axes)?;
         if self.read_only {
             freeze_array(py, &arr)?;

@@ -50,6 +50,27 @@ Use :meth:`~fitsy.Wcs.pixel_to_celestial_many` and
 :meth:`~fitsy.Wcs.celestial_to_pixel_many` for ``(N, 2)`` numpy inputs.
 The Rust equivalents take ``&[(f64, f64)]`` slices.
 
+Image extent and footprint
+--------------------------
+
+A WCS parsed from an image header also records that image's size as
+:attr:`~fitsy.Wcs.pixel_shape` (FITS axis order, ``NAXIS1`` first),
+which :meth:`~fitsy.Wcs.footprint` uses to return the sky positions of
+the four corner pixels.
+
+.. code-block:: python
+
+   with fitsy.open("image.fits") as f:
+       wcs = f[0].wcs()
+       print(wcs.pixel_shape)   # e.g. (1448, 2172)
+       print(wcs.footprint())   # (4, 2) array of (ra, dec)
+
+``pixel_shape`` is a snapshot of the ``NAXISn`` cards, not part of the
+coordinate description. It is ``None`` for a WCS from
+:func:`fitsy.fit_wcs`, since no image exists; no transform consults
+it; and nothing revalidates it, so after cropping or rebinning it
+still describes the original image.
+
 Fitting a WCS
 -------------
 

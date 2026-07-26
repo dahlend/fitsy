@@ -1718,3 +1718,73 @@ fn zea_round_trip_across_dateline() {
 fn ait_round_trip_across_dateline() {
     dateline_round_trip_for_projection("AIT");
 }
+
+// ---------------------------------------------------------------------
+// pixel_shape / footprint
+// ---------------------------------------------------------------------
+
+fn tan_cards() -> Vec<String> {
+    [
+        "CTYPE1  = 'RA---TAN'",
+        "CTYPE2  = 'DEC--TAN'",
+        "CRPIX1  =                 50.0",
+        "CRPIX2  =                 50.0",
+        "CRVAL1  =                 10.0",
+        "CRVAL2  =                 -5.0",
+        "CDELT1  =              -0.0010",
+        "CDELT2  =               0.0010",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+#[test]
+fn pixel_shape_snapshots_naxisn() {
+    let wcs = open_image(&tan_cards());
+    assert_eq!(wcs.pixel_shape.as_deref(), Some([100_u64, 100].as_slice()));
+}
+
+#[test]
+fn pixel_shape_is_absent_for_a_fitted_wcs() {
+    use fitsy::wcs::WcsFitOptions;
+    let pixels = [(10.0, 10.0), (90.0, 10.0), (10.0, 90.0), (90.0, 90.0)];
+    let sky = [(10.00, -5.00), (9.92, -5.00), (10.00, -4.92), (9.92, -4.92)];
+    let fit = fitsy::wcs::fit_celestial_wcs(&pixels, &sky, &WcsFitOptions::default()).unwrap();
+    assert!(fit.wcs.pixel_shape.is_none());
+    assert!(fit.wcs.footprint().is_err());
+}
+
+#[test]
+fn footprint_returns_corner_pixel_centers() {
+    let wcs = open_image(&tan_cards());
+    let fp = wcs.footprint().unwrap();
+    // Counter-clockwise from the origin: (0,0), (99,0), (99,99), (0,99).
+    for (got, (px, py)) in fp
+        .iter()
+        .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
+    {
+        let want = wcs.pixel_to_celestial(px, py).unwrap();
+        assert!(near(got.0, want.0, 1e-12) && near(got.1, want.1, 1e-12));
+    }
+}
+
+#[test]
+fn footprint_needs_a_celestial_pair() {
+    let cards: Vec<String> = [
+        "CTYPE1  = 'WAVE'",
+        "CTYPE2  = 'TIME'",
+        "CUNIT1  = 'm'",
+        "CUNIT2  = 's'",
+        "CRPIX1  =                  1.0",
+        "CRPIX2  =                  1.0",
+        "CRVAL1  =                  0.0",
+        "CRVAL2  =                  0.0",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image(&cards);
+    assert!(!wcs.is_celestial());
+    assert!(wcs.footprint().is_err());
+}

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The image, table, and WCS entry points accept any array-like, not just `numpy.ndarray`.
+- `Wcs.pixel_shape` (the parsed image's size) and `Wcs.footprint()` (its corner sky positions).
+
+### Changed
+
+- Image writes skip the Python round trip for native byte-order arrays.
+- Unsupported image data raises `TypeError` rather than `AttributeError`.
+
+### Fixed
+
+- Images whose header layout cards disagreed with the HDU failed to read.
+- Type stubs did not match the module; a test now checks them.
+- `maturin develop` failed on the stripping option in `pyproject.toml`.
+
+
 ## [v0.2.0]
 
 ### Added

@@ -56,7 +56,9 @@ target-version = ["py310"]
 [tool.maturin]
 features = ["python"]
 module-name = "fitsy"
-strip = true
+# Symbols are stripped via `[profile.release] strip` in Cargo.toml, not
+# here: maturin's own `strip` conflicts with the debuginfo flag that
+# `maturin develop` passes, which breaks the documented dev workflow.
 include = [
     { path = "stubs/fitsy.pyi", format = "wheel" },
     { path = "stubs/py.typed", format = "wheel" },

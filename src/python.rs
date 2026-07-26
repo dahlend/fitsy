@@ -66,9 +66,11 @@
     reason = "Python subscript syntax in docstring examples is not a doc link"
 )]
 
+use numpy::{PyArrayDescrMethods, PyUntypedArray, PyUntypedArrayMethods};
 use pyo3::create_exception;
-use pyo3::exceptions::PyOSError;
+use pyo3::exceptions::{PyOSError, PyTypeError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::error::FitsError as RustFitsError;
 
@@ -106,6 +108,69 @@ impl<T> IntoPyResult<T> for Result<T, RustFitsError> {
     fn into_py_result(self) -> PyResult<T> {
         self.map_err(err_to_py)
     }
+}
+
+/// Coerce a Python object into a numpy array whose dtype is in the
+/// platform's native byte order.
+///
+/// Both properties are preconditions for the typed
+/// `PyReadonlyArrayDyn<T>` extraction the writer paths rely on:
+/// that extraction only matches real arrays, and only when the
+/// dtype already carries the native endian mark, so a `>f4` from
+/// another FITS tool or a plain ``[[1.0, 2.0], ...]`` would
+/// otherwise fall through every dtype arm.
+///
+/// The common case -- an ndarray already in native order -- costs
+/// two C-level checks (`PyArray_Check` and `PyArray_ISNBO`) and no
+/// interpreter round trip, and returns *the same object*, so the
+/// "array is stored by reference" contract of
+/// :class:`ImageHdu` still holds. Only byte-swapped arrays and
+/// non-array sequences pay for `astype`/`asarray`.
+///
+/// `context` prefixes any error message; pass the user-facing
+/// function name (`"image"`, `"ImageHdu"`, ...).
+pub(crate) fn as_native_ndarray<'py>(
+    obj: &Bound<'py, PyAny>,
+    context: &str,
+) -> PyResult<Bound<'py, PyUntypedArray>> {
+    let py = obj.py();
+    // `is_native_byteorder()` is `None` for dtypes where byte order
+    // does not apply (`u8`, `i8`, `bool`), which needs no rewrite
+    // either -- only an explicit `Some(false)` does.
+    let arr: Bound<'py, PyAny> = match obj.cast::<PyUntypedArray>() {
+        Ok(arr) if !matches!(arr.dtype().is_native_byteorder(), Some(false)) => {
+            return Ok(arr.clone());
+        }
+        Ok(_) => obj.clone(),
+        // Not an array: a list of lists, a tuple, or anything
+        // exposing `__array__` / the buffer protocol.
+        Err(_) => py
+            .import("numpy")?
+            .call_method1("asarray", (obj,))
+            .map_err(|e| {
+                PyTypeError::new_err(format!(
+                    "{context}: expected a numpy array or an array-like sequence ({e})"
+                ))
+            })?,
+    };
+    let arr = arr.cast_into::<PyUntypedArray>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "{context}: expected a numpy array or an array-like sequence"
+        ))
+    })?;
+    if !matches!(arr.dtype().is_native_byteorder(), Some(false)) {
+        return Ok(arr);
+    }
+    // `dtype.newbyteorder('=')` yields the same kind/itemsize in the
+    // platform's order; `astype(..., copy=False)` returns the array
+    // untouched when it already matches and a swapped copy otherwise.
+    let native_dtype = arr.dtype().as_any().call_method1("newbyteorder", ("=",))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", false)?;
+    arr.as_any()
+        .call_method("astype", (native_dtype,), Some(&kwargs))?
+        .cast_into::<PyUntypedArray>()
+        .map_err(|_| PyTypeError::new_err(format!("{context}: byte-order conversion failed")))
 }
 
 /// The native module entry point. `maturin` builds this as

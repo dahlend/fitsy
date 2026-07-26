@@ -13,8 +13,10 @@ import numpy as np
 
 img = np.random.default_rng(0).normal(size=(64, 64)).astype("f4")
 tbl = {
+    # Numeric columns take any array-like: an array pins the dtype
+    # (and so TFORMn), a plain list lets numpy infer it.
     "RA": np.array([10.0, 11.0, 12.0]),
-    "DEC": np.array([-5.0, -5.5, -6.0]),
+    "DEC": [-5.0, -5.5, -6.0],
     "NAME": ["a", "bb", "ccc"],
 }
 

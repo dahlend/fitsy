@@ -1,8 +1,9 @@
 //! `PyWcs` -- Python wrapper around `crate::wcs::Wcs`.
 
-use numpy::{IntoPyArray, PyArray2, PyArrayMethods, PyReadonlyArray2};
+use numpy::{AllowTypeChange, IntoPyArray, PyArray2, PyArrayLike2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 use crate::wcs::Wcs;
 
@@ -203,6 +204,61 @@ impl PyWcs {
         self.inner.celestial_axes()
     }
 
+    /// Size of the image this WCS came from, in FITS axis order
+    /// (``NAXIS1`` first).
+    ///
+    /// This is a **snapshot of the ``NAXISn`` cards** taken when the
+    /// WCS was parsed, not part of the coordinate description. It is
+    /// ``None`` for a WCS from :func:`fit_wcs` (no image exists) or
+    /// from a header without ``NAXISn``. Nothing in the transform
+    /// pipeline reads it and nothing validates against it, so if the
+    /// image has since been cropped or rebinned this still describes
+    /// the original.
+    ///
+    /// Returns
+    /// -------
+    /// tuple of int or None
+    ///   Axis lengths, or ``None`` when unknown.
+    #[getter]
+    fn pixel_shape<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.inner
+            .pixel_shape
+            .as_ref()
+            .map(|s| PyTuple::new(py, s))
+            .transpose()
+    }
+
+    /// Sky positions of the image's four corner pixels.
+    ///
+    /// Corners are the *centers* of the corner pixels -- ``(0, 0)``,
+    /// ``(nx-1, 0)``, ``(nx-1, ny-1)``, ``(0, ny-1)`` -- matching the
+    /// default of astropy's ``WCS.calc_footprint()``, and are
+    /// returned counter-clockwise in pixel space starting at the
+    /// origin. For the outer edge of the grid instead, call
+    /// :meth:`pixel_to_celestial` with ``-0.5`` and ``n - 0.5``.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///   Shape ``(4, 2)`` array of ``(ra, dec)`` in degrees.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If the WCS has no celestial axis pair, or if
+    ///   :attr:`pixel_shape` is unknown -- a fitted WCS has no image
+    ///   to take corners from.
+    fn footprint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let corners = self.inner.footprint().into_py_result()?;
+        let mut flat = Vec::with_capacity(8);
+        for (a, b) in corners {
+            flat.push(a);
+            flat.push(b);
+        }
+        let arr = flat.into_pyarray(py);
+        Ok(arr.reshape([4, 2]).expect("reshape (4,2)"))
+    }
+
     /// Forward transform a single pixel coordinate.
     ///
     /// Parameters
@@ -319,8 +375,9 @@ impl PyWcs {
     ///
     /// Parameters
     /// ----------
-    /// pixels : numpy.ndarray
-    ///   Shape ``(N, 2)`` array of pixel coordinates.
+    /// pixels : array-like
+    ///   Shape ``(N, 2)`` array-like of pixel coordinates (numpy
+    ///   array, list of lists, tuple of tuples, etc.).
     /// origin : int, optional
     ///   ``0`` (default) treats inputs as 0-based; ``1`` as
     ///   1-based FITS coordinates.
@@ -333,7 +390,7 @@ impl PyWcs {
     fn pixel_to_celestial_many<'py>(
         &self,
         py: Python<'py>,
-        pixels: PyReadonlyArray2<'_, f64>,
+        pixels: PyArrayLike2<'py, f64, AllowTypeChange>,
         origin: u8,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let off = pixel_offset(origin)?;
@@ -365,8 +422,9 @@ impl PyWcs {
     ///
     /// Parameters
     /// ----------
-    /// sky : numpy.ndarray
-    ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees.
+    /// sky : array-like
+    ///   Shape ``(N, 2)`` array-like of ``(ra, dec)`` in degrees
+    ///   (numpy array, list of lists, tuple of tuples, etc.).
     /// origin : int, optional
     ///   ``0`` (default) returns 0-based pixel coordinates,
     ///   ``1`` returns 1-based FITS coordinates.
@@ -379,7 +437,7 @@ impl PyWcs {
     fn celestial_to_pixel_many<'py>(
         &self,
         py: Python<'py>,
-        sky: PyReadonlyArray2<'_, f64>,
+        sky: PyArrayLike2<'py, f64, AllowTypeChange>,
         origin: u8,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let off = pixel_offset(origin)?;
@@ -493,11 +551,13 @@ impl PyWcsFit {
 ///
 /// Parameters
 /// ----------
-/// pixels : numpy.ndarray
-///   Shape ``(N, 2)`` array of pixel coordinates.
-/// sky : numpy.ndarray
-///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees, or more
-///   generally ``(lon, lat)`` in the chosen ``frame``.
+/// pixels : array-like
+///   Shape ``(N, 2)`` array-like of pixel coordinates (numpy
+///   array, list of lists, tuple of tuples, etc.).
+/// sky : array-like
+///   Shape ``(N, 2)`` array-like of ``(ra, dec)`` in degrees, or
+///   more generally ``(lon, lat)`` in the chosen ``frame``
+///   (numpy array, list of lists, tuple of tuples, etc.).
 /// projection : str, optional
 ///   Three-letter projection code (default ``"TAN"``).
 /// crpix : tuple of float, optional
@@ -555,10 +615,10 @@ impl PyWcsFit {
     clippy::too_many_arguments,
     reason = "WCS fitting requires many distinct input parameters; grouping into a struct would worsen Python ergonomics"
 )]
-pub fn fit_wcs(
-    py: Python<'_>,
-    pixels: PyReadonlyArray2<'_, f64>,
-    sky: PyReadonlyArray2<'_, f64>,
+pub fn fit_wcs<'py>(
+    py: Python<'py>,
+    pixels: PyArrayLike2<'py, f64, AllowTypeChange>,
+    sky: PyArrayLike2<'py, f64, AllowTypeChange>,
     projection: &str,
     crpix: Option<(f64, f64)>,
     crval: Option<(f64, f64)>,

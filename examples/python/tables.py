@@ -15,8 +15,9 @@ with tempfile.TemporaryDirectory() as td:
     path = os.path.join(td, "catalog.fits")
     fitsy.write(
         path,
+        # A table-only file needs no placeholder image: `write` adds an
+        # empty primary HDU when the first builder is not an image.
         [
-            fitsy.image(np.zeros((1, 1), dtype="i2")),  # required primary
             fitsy.bintable(
                 {
                     "RA": np.array([10.0, 20.0, 30.0]),

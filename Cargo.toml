@@ -31,6 +31,11 @@ faer = ["dep:faer"]
 # Optional Python bindings (PyO3 + numpy) built via maturin.
 python = ["dep:pyo3", "dep:numpy", "compression"]
 
+[profile.release]
+# Keeps published wheels small. Set here rather than under
+# `[tool.maturin]`, whose `strip` flag conflicts with `maturin develop`.
+strip = true
+
 [dependencies]
 flate2 = { version = "1.1.9", optional = true }
 nalgebra = { version = "0.35.0", optional = true, default-features = false, features = ["std"] }

@@ -49,15 +49,17 @@ pub struct PyAsciiTableBuilder {
     pub(crate) data: Vec<u8>,
 }
 
-/// Build an image HDU from a numpy array.
+/// Build an image HDU from an array.
 ///
 /// Parameters
 /// ----------
-/// data : numpy.ndarray
-///   Image pixels (any supported FITS dtype: ``u8``, ``i16``,
-///   ``i32``, ``i64``, ``f32``, ``f64``). The returned HDU's
-///   NAXIS list is the *reverse* of ``data.shape`` (numpy is
-///   row-major while FITS is fastest-axis-first).
+/// data : array-like
+///   Image pixels -- a numpy array of any supported FITS dtype
+///   (``u8``, ``i16``, ``i32``, ``i64``, ``f32``, ``f64``), or
+///   anything :func:`numpy.asarray` accepts (nested lists,
+///   tuples, objects implementing ``__array__``). The returned
+///   HDU's NAXIS list is the *reverse* of ``data.shape`` (numpy
+///   is row-major while FITS is fastest-axis-first).
 /// header : Header or mapping, optional
 ///   Extra header cards to merge in -- a :class:`Header` or a
 ///   ``dict``. Values may be scalars or ``(value, comment)`` tuples.
@@ -72,7 +74,6 @@ pub struct PyAsciiTableBuilder {
 #[pyfunction]
 #[pyo3(signature = (data, header=None, primary=true))]
 pub fn image(
-    py: Python<'_>,
     data: Bound<'_, PyAny>,
     header: Option<Bound<'_, PyAny>>,
     primary: bool,
@@ -83,7 +84,7 @@ pub fn image(
         Some(d) => header_from_py(d)?,
         None => Header::empty(),
     };
-    let (h, bytes) = build_image(py, &data, primary, extra)?;
+    let (h, bytes) = build_image(&data, primary, extra)?;
     Ok(PyImageBuilder {
         header: h,
         data: bytes,
@@ -99,8 +100,9 @@ pub fn image(
 ///
 /// Parameters
 /// ----------
-/// data : numpy.ndarray
-///   Image pixels (any supported FITS dtype).
+/// data : array-like
+///   Image pixels (any supported FITS dtype), or anything
+///   :func:`numpy.asarray` accepts.
 /// header : Header or mapping, optional
 ///   Extra cards merged into the synthesized image header before
 ///   compression -- a :class:`Header` or a ``dict``.  Structural
@@ -123,7 +125,6 @@ pub fn image(
 #[pyfunction]
 #[pyo3(signature = (data, header=None, *, tile_shape=None, extname=None))]
 pub fn compressed_image(
-    py: Python<'_>,
     data: Bound<'_, PyAny>,
     header: Option<Bound<'_, PyAny>>,
     tile_shape: Option<Vec<u64>>,
@@ -137,7 +138,7 @@ pub fn compressed_image(
     };
     // Build the uncompressed image first so we get correct BITPIX
     // and big-endian raw bytes; then hand off to the Rust compressor.
-    let (img_header, raw) = build_image(py, &data, false, extra)?;
+    let (img_header, raw) = build_image(&data, false, extra)?;
     let bitpix = match img_header.first("BITPIX") {
         Some(Value::Integer(i)) => *i,
         _ => {
@@ -208,30 +209,16 @@ pub fn compressed_image(
 }
 
 pub(crate) fn build_image(
-    py: Python<'_>,
     arr: &Bound<'_, PyAny>,
     primary: bool,
     extra: Header,
 ) -> PyResult<(Header, Vec<u8>)> {
-    // Normalize to native byte order before type dispatch. PyO3/numpy's
-    // `extract::<PyReadonlyArrayDyn<T>>()` only matches arrays whose
-    // dtype already carries the native endian mark, so a `>f4` or `>i2`
-    // passed in from an external FITS tool would otherwise fall through
-    // all arms and raise an "unsupported dtype" error.
-    //
-    // `arr.dtype.newbyteorder('=')` gives the same kind/itemsize dtype
-    // but with the platform's native byte order. `astype(..., copy=False)`
-    // returns `arr` unchanged when it is already native-endian (no alloc)
-    // and a byte-swapped copy otherwise.
-    let native_dtype = arr.getattr("dtype")?.call_method1("newbyteorder", ("=",))?;
-    let arr_owned;
-    let arr: &Bound<'_, PyAny> = {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", false)?;
-        let native = arr.call_method("astype", (native_dtype,), Some(&kwargs))?;
-        arr_owned = native;
-        &arr_owned
-    };
+    // Normalize to a native-byte-order ndarray before type dispatch.
+    // `extract::<PyReadonlyArrayDyn<T>>()` below matches neither a
+    // non-array sequence nor a byte-swapped dtype, so both would
+    // otherwise fall through every arm below. Arrays that are already
+    // native pass through untouched and without an interpreter call.
+    let arr = &super::as_native_ndarray(arr, "image")?.into_any();
 
     // Try every supported numpy dtype in turn. PyO3/numpy 0.22 has
     // no single dynamic dispatch helper, so we fan out manually.
@@ -386,7 +373,12 @@ where
 ///   - ``list[str]`` -> ``nA`` (right-padded to the longest string)
 ///   - ``list[complex]`` -> ``M`` (``C128``)
 ///   - ``list[list[float]]`` -> ``1PD`` variable-length column
-///     (heap-stored, ``f64`` element type)
+///     (heap-stored, ``f64`` element type). This applies to *any*
+///     nested numeric list, ragged or not; pass a 2-D numpy array
+///     to get a fixed-repeat column instead.
+///   - a flat sequence of numbers (``[1, 2, 3]``, a tuple, a
+///     ``range``) -- converted with :func:`numpy.asarray` and
+///     encoded as the dtype numpy infers
 /// units : dict[str, str], optional
 ///   Per-column ``TUNITn`` strings. Keys must match column names
 ///   in ``columns``; entries for unknown columns are ignored.
@@ -400,7 +392,6 @@ where
 #[pyfunction]
 #[pyo3(signature = (columns, units=None, extname=None))]
 pub fn bintable(
-    py: Python<'_>,
     columns: Bound<'_, PyDict>,
     units: Option<Bound<'_, PyDict>>,
     extname: Option<&str>,
@@ -413,7 +404,7 @@ pub fn bintable(
     let mut encs: Vec<(String, ColumnEncoding)> = Vec::new();
     for (k, v) in columns.iter() {
         let name: String = k.extract()?;
-        let enc = encode_column(py, &v)
+        let enc = encode_column(&v)
             .map_err(|e| PyValueError::new_err(format!("bintable column {name:?}: {e}")))?;
         let rows = enc.n_rows();
         if let Some(prev) = n_rows {
@@ -550,8 +541,10 @@ impl ColumnEncoding {
     }
 }
 
-/// Encode one Python column to FITS bytes.
-fn encode_column(_py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<ColumnEncoding> {
+/// Encode one numpy array column. Returns `Ok(None)` when `arr` is
+/// not an array of a directly supported dtype, so the caller can try
+/// the sequence-shaped encodings (VLA, string, complex) instead.
+fn encode_array_column(arr: &Bound<'_, PyAny>) -> PyResult<Option<ColumnEncoding>> {
     macro_rules! try_scalar {
         ($t:ty, $kind:expr, $to_be:expr) => {
             if let Ok(view) = arr.extract::<PyReadonlyArrayDyn<'_, $t>>() {
@@ -565,12 +558,12 @@ fn encode_column(_py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<ColumnEnco
                 for v in view.as_array().iter() {
                     bytes.extend_from_slice(&($to_be(*v)));
                 }
-                return Ok(ColumnEncoding::Fixed {
+                return Ok(Some(ColumnEncoding::Fixed {
                     kind: $kind,
                     repeat,
                     row_bytes: bytes,
                     n_rows: n,
-                });
+                }));
             }
         };
     }
@@ -591,12 +584,20 @@ fn encode_column(_py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<ColumnEnco
         for v in &view.as_array() {
             bytes.push(if *v { b'T' } else { b'F' });
         }
-        return Ok(ColumnEncoding::Fixed {
+        return Ok(Some(ColumnEncoding::Fixed {
             kind: BinFieldKind::Logical,
             repeat,
             row_bytes: bytes,
             n_rows: n,
-        });
+        }));
+    }
+    Ok(None)
+}
+
+/// Encode one Python column to FITS bytes.
+fn encode_column(arr: &Bound<'_, PyAny>) -> PyResult<ColumnEncoding> {
+    if let Some(enc) = encode_array_column(arr)? {
+        return Ok(enc);
     }
 
     // Variable-length f64 column: list[list[float]] / list[ndarray].
@@ -665,8 +666,22 @@ fn encode_column(_py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<ColumnEnco
         }
     }
 
+    // Last resort: a flat sequence of numbers (`[1, 2, 3]`, a tuple,
+    // a `range`). This runs *after* every arm above, so the
+    // established meanings of nested numeric lists (VLA), `list[str]`
+    // and `list[complex]` are untouched -- only input that used to
+    // raise reaches here, and only that input pays for the
+    // conversion. `ascii_table` has always accepted plain sequences;
+    // this closes the gap between the two.
+    if let Ok(coerced) = super::as_native_ndarray(arr, "bintable")
+        && let Some(enc) = encode_array_column(coerced.as_any())?
+    {
+        return Ok(enc);
+    }
+
     Err(PyTypeError::new_err(
-        "bintable: unsupported column type (use bool/u8/i16/i32/i64/f32/f64 numpy arrays, list[str], list[complex], or list[list[float]] for VLA)",
+        "bintable: unsupported column type (use bool/u8/i16/i32/i64/f32/f64 numpy arrays \
+         or sequences of numbers, list[str], list[complex], or list[list[float]] for VLA)",
     ))
 }
 
@@ -695,9 +710,9 @@ fn extract_built(item: Bound<'_, PyAny>) -> PyResult<(Header, Vec<u8>)> {
 ///   Destination path. Overwritten if it already exists.
 /// hdus : list
 ///   Builders returned by :func:`image`, :func:`bintable`, or
-///   :func:`ascii_table`. The first item must be an image (it
-///   becomes the primary HDU); for table-only files pass
-///   ``fitsy.image(np.zeros((0,)))`` first.
+///   :func:`ascii_table`. If the first item is an image it becomes
+///   the primary HDU; otherwise an empty primary is written for
+///   you, so a table-only file needs no placeholder image.
 /// overwrite : bool, optional
 ///   If False (the default), raise :class:`FileExistsError`
 ///   rather than truncating an existing file at ``path``.

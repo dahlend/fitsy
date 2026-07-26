@@ -522,6 +522,8 @@ fn build_wcs(
         dss: None,
         tab_specs: Vec::new(),
         tab: Vec::new(),
+        // A fit has pixel/sky pairs, not an image.
+        pixel_shape: None,
     })
 }
 

@@ -117,6 +117,25 @@ pub struct Wcs {
     /// but unresolved, `pixel_to_world` / `world_to_pixel` return a
     /// clear error rather than silently dropping the lookup.
     pub tab: Vec<TabAxis>,
+    /// Size of the image this WCS was read from, in FITS axis order
+    /// (`NAXIS1` first) -- a **snapshot of the `NAXISn` cards**, not
+    /// part of the coordinate description.
+    ///
+    /// `None` when there was no image to read it from, which
+    /// includes every WCS produced by
+    /// [`fit_celestial_wcs`] and any
+    /// header without `NAXISn` cards. Its length is the image's
+    /// `NAXIS`, which can differ from [`Self::naxis`] when `WCSAXES`
+    /// declares a different number of coordinate axes.
+    ///
+    /// Nothing in the pixel<->world pipeline reads this field, and
+    /// nothing validates against it: the image it describes may have
+    /// been cropped or rebinned since. It exists so callers that do
+    /// need the extent -- [`Self::footprint`] and the like -- can get
+    /// it without threading the shape through every call. Treat a
+    /// stale value as the caller's problem, the same way the writer
+    /// treats layout cards on a user-supplied header.
+    pub pixel_shape: Option<Vec<u64>>,
 }
 
 impl Wcs {
@@ -334,6 +353,59 @@ impl Wcs {
     #[must_use]
     pub fn is_celestial(&self) -> bool {
         self.celestial.is_some()
+    }
+
+    /// Sky positions of the image's four corner pixels, as
+    /// `(lon, lat)` in degrees.
+    ///
+    /// Corners are the **centers of the corner pixels** -- `(0, 0)`,
+    /// `(nx-1, 0)`, `(nx-1, ny-1)`, `(0, ny-1)` in this crate's
+    /// 0-based convention -- matching the default of astropy's
+    /// `WCS.calc_footprint()`. For the outer edge of the pixel grid
+    /// instead, call [`Self::pixel_to_celestial`] with `-0.5` and
+    /// `n - 0.5` directly.
+    ///
+    /// Returns the corners counter-clockwise in pixel space, starting
+    /// at the origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FitsError::Wcs`] if the WCS has no celestial axis
+    /// pair, or if [`Self::pixel_shape`] is absent (a fitted WCS, or
+    /// a header without `NAXISn`) or does not cover both celestial
+    /// axes. Note that the shape is a snapshot taken at parse time:
+    /// if the image has since been cropped or rebinned, the corners
+    /// describe the original.
+    pub fn footprint(&self) -> Result<[(f64, f64); 4]> {
+        let (lon, lat) = self
+            .celestial_axes()
+            .ok_or_else(|| FitsError::Wcs("footprint: WCS has no celestial axis pair".into()))?;
+        let shape = self.pixel_shape.as_ref().ok_or_else(|| {
+            FitsError::Wcs(
+                "footprint: this WCS carries no image shape (fitted, or a header \
+                 without NAXISn cards)"
+                    .into(),
+            )
+        })?;
+        let (Some(&nx), Some(&ny)) = (shape.get(lon), shape.get(lat)) else {
+            return Err(FitsError::Wcs(format!(
+                "footprint: image shape has {} axes, which does not cover the \
+                 celestial pair (axes {lon} and {lat})",
+                shape.len()
+            )));
+        };
+        if nx == 0 || ny == 0 {
+            return Err(FitsError::Wcs(
+                "footprint: image has a zero-length celestial axis".into(),
+            ));
+        }
+        let (x1, y1) = ((nx - 1) as f64, (ny - 1) as f64);
+        Ok([
+            self.pixel_to_celestial(0.0, 0.0)?,
+            self.pixel_to_celestial(x1, 0.0)?,
+            self.pixel_to_celestial(x1, y1)?,
+            self.pixel_to_celestial(0.0, y1)?,
+        ])
     }
 
     /// Batch pixel -> (RA, Dec). Same semantics as

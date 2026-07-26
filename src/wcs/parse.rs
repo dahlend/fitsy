@@ -273,6 +273,11 @@ impl Wcs {
             dss,
             tab_specs,
             tab: Vec::new(),
+            // Snapshot of the image extent, purely for callers; the
+            // pipeline above never consults it. `axes()` yields the
+            // NAXISn cards, so this is `None` only for a header that
+            // has none (NAXIS = 0 is rejected earlier).
+            pixel_shape: header.axes().ok().filter(|a| !a.is_empty()),
         }))
     }
 }
