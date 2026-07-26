@@ -301,7 +301,7 @@ impl IntStorage {
 }
 
 /// One BINTABLE HDU.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BinTableHdu<'a> {
     header: Header,
     /// Bytes covering the row table (and its heap).

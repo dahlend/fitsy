@@ -113,7 +113,7 @@ impl AsciiFormat {
 }
 
 /// One ASCII table HDU.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AsciiTableHdu<'a> {
     header: Header,
     data: &'a [u8],

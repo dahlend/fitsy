@@ -54,12 +54,12 @@ pub(crate) const D2R: f64 = std::f64::consts::PI / 180.0;
 pub(crate) const R2D: f64 = 180.0 / std::f64::consts::PI;
 
 /// A parsed WCS for a single alternate (`' '`, `'A'`, ..., `'Z'`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Wcs {
     pub naxis: usize,
     pub linear: LinearTransform,
-    /// Per-axis CTYPE values (8 chars, uppercase).
+    /// Per-axis CTYPE values, uppercase.
     pub ctype: Vec<String>,
     /// Per-axis CUNIT values; empty string if not given.
     pub cunit: Vec<String>,

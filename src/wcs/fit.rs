@@ -17,6 +17,8 @@
 //! dependency); it handles the small dense systems (<= ~120 unknowns
 //! for an order-9 SIP fit) we encounter in practice.
 
+use std::sync::Arc;
+
 use crate::error::{FitsError, Result};
 use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation, RadeSys};
@@ -68,7 +70,7 @@ impl Default for WcsFitOptions {
 }
 
 /// Result of [`fit_celestial_wcs`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WcsFit {
     /// Fitted WCS, ready for `pixel_to_celestial` / `celestial_to_pixel`.
     pub wcs: Wcs,
@@ -467,7 +469,7 @@ fn build_wcs(
     delta0: f64,
     sip: Option<Sip>,
     rotation: CelestialRotation,
-    projection: Box<dyn Projection>,
+    projection: Arc<dyn Projection>,
 ) -> Result<Wcs> {
     let proj_code = proj_kind.code();
     let suffix = if sip.is_some() { "-SIP" } else { "" };

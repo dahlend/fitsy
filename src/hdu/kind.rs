@@ -13,7 +13,7 @@ use super::random_groups::RandomGroupsHdu;
 /// Unknown / future `XTENSION` types are not silent errors: they are
 /// surfaced as [`Hdu::Conforming`] so that callers can still inspect
 /// the header and the raw data bytes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Hdu<'a> {
     /// Primary array or `IMAGE` extension (Standard Sec.7.1).
@@ -39,7 +39,7 @@ pub enum Hdu<'a> {
 ///
 /// Construct via [`ConformingHdu::new`]. Inspect via [`header`](Self::header),
 /// [`data_bytes`](Self::data_bytes), and [`xtension`](Self::xtension).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ConformingHdu<'a> {
     header: Header,

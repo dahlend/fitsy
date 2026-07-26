@@ -915,7 +915,7 @@ impl FitsFile {
 /// Output of [`FitsFile::image`]: either a borrowed plain `ImageHdu`
 /// or an owned decompressed image.
 #[cfg(feature = "compression")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ImageOrOwned<'a> {
     Borrowed(ImageHdu<'a>),
@@ -935,7 +935,7 @@ pub struct ChecksumReport {
 
 /// Output element of [`FitsFile::iter_decompressed`].
 #[cfg(feature = "compression")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Decompressed<'a> {
     /// A regular HDU, returned untouched.

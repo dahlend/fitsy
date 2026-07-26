@@ -1788,3 +1788,43 @@ fn footprint_needs_a_celestial_pair() {
     assert!(!wcs.is_celestial());
     assert!(wcs.footprint().is_err());
 }
+
+#[test]
+fn wcs_is_cloneable_and_the_clone_is_independent() {
+    // Downstream crates need to hold a `Wcs` by value. The projection
+    // is shared via `Arc` (it is immutable after parse), so a clone
+    // costs a refcount bump rather than a re-parse.
+    let wcs = open_image(&tan_cards());
+    let mut copy = wcs.clone();
+    let a = wcs.pixel_to_celestial(10.0, 20.0).unwrap();
+    let b = copy.pixel_to_celestial(10.0, 20.0).unwrap();
+    assert!(near(a.0, b.0, 1e-12) && near(a.1, b.1, 1e-12));
+
+    // Mutating the clone must not disturb the original.
+    copy.pixel_shape = Some(vec![7, 9]);
+    copy.wcsname = Some("copy".into());
+    assert_eq!(wcs.pixel_shape.as_deref(), Some([100_u64, 100].as_slice()));
+    assert!(wcs.wcsname.is_none());
+    assert_eq!(copy.footprint().unwrap().len(), 4);
+}
+
+#[test]
+fn cloning_a_sip_wcs_preserves_distortion() {
+    let mut cards = tan_cards();
+    cards[0] = "CTYPE1  = 'RA---TAN-SIP'".to_string();
+    cards[1] = "CTYPE2  = 'DEC--TAN-SIP'".to_string();
+    for c in [
+        "A_ORDER =                    2",
+        "B_ORDER =                    2",
+        "A_2_0   =              1.0E-05",
+        "B_0_2   =              2.0E-05",
+    ] {
+        cards.push(c.to_string());
+    }
+    let wcs = open_image(&cards);
+    assert!(wcs.celestial.as_ref().unwrap().sip.is_some());
+    let copy = wcs.clone();
+    let a = wcs.pixel_to_celestial(80.0, 15.0).unwrap();
+    let b = copy.pixel_to_celestial(80.0, 15.0).unwrap();
+    assert!(near(a.0, b.0, 1e-12) && near(a.1, b.1, 1e-12));
+}

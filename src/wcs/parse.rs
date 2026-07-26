@@ -2,6 +2,8 @@
 //! code (Standard Sec.8.2.6: `' '` is the primary description, `'A'`
 //! through `'Z'` are alternates).
 
+use std::sync::Arc;
+
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
@@ -319,7 +321,7 @@ fn build_celestial_block(
     // only consume PV2_0..PV2_19.
     let pv_count = if is_tpv { 40 } else { 20 };
     let pv2 = collect_pv(header, pair.lat + 1, alt_suffix, pv_count);
-    let projection: Box<dyn Projection> = if is_tpv || is_tnx {
+    let projection: Arc<dyn Projection> = if is_tpv || is_tnx {
         // TAN takes no PV parameters.
         projection::build(kind, &[])?
     } else {

@@ -9,6 +9,8 @@
 //! which the math paths silently treated as "no celestial axes". The
 //! grouping makes that state unrepresentable.
 
+use std::sync::Arc;
+
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation};
 use crate::wcs::projection::Projection;
 use crate::wcs::sip::Sip;
@@ -27,13 +29,13 @@ pub struct CelestialPair {
 
 /// Everything that exists if and only if a WCS has a celestial axis
 /// pair (Paper II Sec.2). Constructed atomically by the parser.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CelestialBlock {
     /// Indices of the celestial axis pair.
     pub pair: CelestialPair,
     /// Projection on the tangent plane (TAN, SIN, ZPN, ...).
-    pub projection: Box<dyn Projection>,
+    pub projection: Arc<dyn Projection>,
     /// Native <-> celestial rotation (LONPOLE/LATPOLE machinery).
     pub rotation: CelestialRotation,
     /// Optional SIP pixel-space distortion (CTYPE suffix `-SIP`).

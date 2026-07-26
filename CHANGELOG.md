@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The image, table, and WCS entry points accept any array-like, not just `numpy.ndarray`.
 - `Wcs.pixel_shape` (the parsed image's size) and `Wcs.footprint()` (its corner sky positions).
+- `Clone` on the public value types that lacked it: `Wcs`,
+  `CelestialBlock`, `WcsFit`, the HDU views, and the builders.
 
 ### Changed
 

@@ -26,7 +26,7 @@ use crate::header::{CommentaryKind, Header, Value};
 /// constructors [`from_u16`](Self::from_u16), [`from_u32`](Self::from_u32),
 /// and [`from_u64`](Self::from_u64) -- they encode the offset and
 /// emit the required `BSCALE`/`BZERO` cards automatically.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageBuilder<T: Pixel> {
     axes: Vec<u64>,
     pixels: Vec<T>,
@@ -220,7 +220,7 @@ impl ImageBuilder<i64> {
 /// the columns were declared. The builder generates `XTENSION`,
 /// `BITPIX`, `NAXIS{,1,2}`, `PCOUNT`, `GCOUNT`, `TFIELDS`, plus
 /// `TTYPEn`, `TFORMn`, and (optionally) `TUNITn`/`TDIMn`.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BinTableBuilder {
     columns: Vec<ColSpec>,
     extras: Vec<(String, Value, Option<String>)>,
@@ -228,7 +228,7 @@ pub struct BinTableBuilder {
     extname: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ColSpec {
     name: String,
     kind: BinFieldKind,
@@ -541,7 +541,7 @@ impl AsciiColumnData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AsciiColSpec {
     name: String,
     format: crate::hdu::ascii_table::AsciiFormat,
@@ -564,7 +564,7 @@ struct AsciiColSpec {
 /// All columns must report the same row count. Use
 /// [`AsciiFormat`](crate::AsciiFormat) variants matching the data
 /// kind: `I` for integers, `F`/`E`/`D` for floats, `A` for strings.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AsciiTableBuilder {
     columns: Vec<AsciiColSpec>,
     extras: Vec<(String, Value, Option<String>)>,

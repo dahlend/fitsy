@@ -12,11 +12,13 @@
 //! `HEALPix`). XPH inverse currently has a known face-disambiguation
 //! limitation that is exercised by an `#[ignore]`d test.
 
+use std::sync::Arc;
+
 use crate::error::{FitsError, Result};
 
 use crate::wcs::projections::{
-    Air, Ait, Arc, Azp, Bon, Car, Cea, Cod, Coe, Coo, Cop, Csc, Cyp, Hpx, Mer, Mol, Par, Pco, Qsc,
-    Sfl, Sin, Stg, Szp, Tan, Tsc, Xph, Zea, Zpn,
+    Air, Ait, Arc as ArcProj, Azp, Bon, Car, Cea, Cod, Coe, Coo, Cop, Csc, Cyp, Hpx, Mer, Mol, Par,
+    Pco, Qsc, Sfl, Sin, Stg, Szp, Tan, Tsc, Xph, Zea, Zpn,
 };
 
 /// Three-letter projection code (Paper II Table 13).
@@ -144,37 +146,37 @@ pub trait Projection: std::fmt::Debug + Send + Sync {
 
 /// Construct a projection. `pv2` is the table of `PV2_m` keyword
 /// values (`m = 0..`) for the latitude axis. Missing entries are 0.
-pub fn build(kind: ProjectionKind, pv2: &[f64]) -> Result<Box<dyn Projection>> {
+pub fn build(kind: ProjectionKind, pv2: &[f64]) -> Result<Arc<dyn Projection>> {
     use ProjectionKind as K;
     Ok(match kind {
-        K::Azp => Box::new(Azp::from_pv(pv2)?),
-        K::Szp => Box::new(Szp::from_pv(pv2)?),
-        K::Tan => Box::new(Tan),
-        K::Stg => Box::new(Stg),
-        K::Sin => Box::new(Sin::from_pv(pv2)?),
-        K::Arc => Box::new(Arc),
-        K::Zpn => Box::new(Zpn::from_pv(pv2)?),
-        K::Zea => Box::new(Zea),
-        K::Air => Box::new(Air::from_pv(pv2)?),
-        K::Cyp => Box::new(Cyp::from_pv(pv2)?),
-        K::Cea => Box::new(Cea::from_pv(pv2)?),
-        K::Car => Box::new(Car),
-        K::Mer => Box::new(Mer),
-        K::Sfl => Box::new(Sfl),
-        K::Par => Box::new(Par),
-        K::Mol => Box::new(Mol),
-        K::Ait => Box::new(Ait),
-        K::Cop => Box::new(Cop::from_pv(pv2)?),
-        K::Coe => Box::new(Coe::from_pv(pv2)?),
-        K::Cod => Box::new(Cod::from_pv(pv2)?),
-        K::Coo => Box::new(Coo::from_pv(pv2)?),
-        K::Bon => Box::new(Bon::from_pv(pv2)?),
-        K::Pco => Box::new(Pco),
-        K::Tsc => Box::new(Tsc),
-        K::Csc => Box::new(Csc),
-        K::Qsc => Box::new(Qsc),
-        K::Hpx => Box::new(Hpx::from_pv(pv2)?),
-        K::Xph => Box::new(Xph),
+        K::Azp => Arc::new(Azp::from_pv(pv2)?),
+        K::Szp => Arc::new(Szp::from_pv(pv2)?),
+        K::Tan => Arc::new(Tan),
+        K::Stg => Arc::new(Stg),
+        K::Sin => Arc::new(Sin::from_pv(pv2)?),
+        K::Arc => Arc::new(ArcProj),
+        K::Zpn => Arc::new(Zpn::from_pv(pv2)?),
+        K::Zea => Arc::new(Zea),
+        K::Air => Arc::new(Air::from_pv(pv2)?),
+        K::Cyp => Arc::new(Cyp::from_pv(pv2)?),
+        K::Cea => Arc::new(Cea::from_pv(pv2)?),
+        K::Car => Arc::new(Car),
+        K::Mer => Arc::new(Mer),
+        K::Sfl => Arc::new(Sfl),
+        K::Par => Arc::new(Par),
+        K::Mol => Arc::new(Mol),
+        K::Ait => Arc::new(Ait),
+        K::Cop => Arc::new(Cop::from_pv(pv2)?),
+        K::Coe => Arc::new(Coe::from_pv(pv2)?),
+        K::Cod => Arc::new(Cod::from_pv(pv2)?),
+        K::Coo => Arc::new(Coo::from_pv(pv2)?),
+        K::Bon => Arc::new(Bon::from_pv(pv2)?),
+        K::Pco => Arc::new(Pco),
+        K::Tsc => Arc::new(Tsc),
+        K::Csc => Arc::new(Csc),
+        K::Qsc => Arc::new(Qsc),
+        K::Hpx => Arc::new(Hpx::from_pv(pv2)?),
+        K::Xph => Arc::new(Xph),
     })
 }
 

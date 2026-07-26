@@ -12,7 +12,7 @@ use crate::header::Header;
 use crate::io::block::pad_to_block;
 
 /// An image HDU.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageHdu<'a> {
     header: Header,
     data: &'a [u8],

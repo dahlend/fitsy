@@ -16,7 +16,7 @@ use crate::error::{FitsError, Result};
 use crate::header::Header;
 
 /// A Random Groups primary HDU.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RandomGroupsHdu<'a> {
     header: Header,
     data: &'a [u8],

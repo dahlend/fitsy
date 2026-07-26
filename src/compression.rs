@@ -55,7 +55,7 @@ pub fn maybe_gunzip(buf: Vec<u8>) -> Result<Vec<u8>> {
 }
 
 /// View over a tile-compressed image HDU.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompressedImageHdu<'a> {
     inner: BinTableHdu<'a>,
     /// Original (uncompressed) image `BITPIX`.
@@ -445,7 +445,7 @@ impl<'a> CompressedImageHdu<'a> {
 
 /// A decompressed image returned from
 /// [`CompressedImageHdu::as_image`]. Owns its byte buffer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OwnedImage {
     header: Header,
     bytes: Vec<u8>,
