@@ -445,7 +445,14 @@ fn read_pixels(
         }
     }
     // General case: apply BSCALE/BZERO/BLANK and return floats.
-    if matches!(bitpix, Bitpix::F32) {
+    //
+    // Width follows astropy's `_dtype_for_bitpix`: BITPIX above 16
+    // scales to float64, 8 and 16 scale to float32, and data that is
+    // already floating point keeps its own width. float32 represents
+    // every u8/i16 exactly, so the narrow path costs no fidelity on
+    // the raw values while halving the array -- and scaled int16 is
+    // one of the most common layouts in instrument data.
+    if matches!(bitpix, Bitpix::F32 | Bitpix::U8 | Bitpix::I16) {
         let arr = img.read_physical_f32().into_py_result()?.into_vec();
         Ok(to_array(py, arr, &shape))
     } else {

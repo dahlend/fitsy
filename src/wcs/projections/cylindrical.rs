@@ -12,6 +12,10 @@ use crate::wcs::{D2R, R2D};
 #[derive(Debug, Clone, Copy)]
 pub struct Car;
 impl Projection for Car {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -43,6 +47,10 @@ impl Cea {
     }
 }
 impl Projection for Cea {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.lambda)]
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -64,6 +72,10 @@ impl Projection for Cea {
 #[derive(Debug, Clone, Copy)]
 pub struct Mer;
 impl Projection for Mer {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -101,6 +113,10 @@ impl Cyp {
     }
 }
 impl Projection for Cyp {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.mu), (2, self.lambda)]
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }

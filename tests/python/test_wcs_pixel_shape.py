@@ -84,20 +84,28 @@ def test_footprint_corners():
         np.testing.assert_allclose(got, w.pixel_to_celestial(float(px), float(py)))
 
 
-def test_footprint_matches_astropy():
-    astropy_wcs = pytest.importorskip("astropy.wcs")
-    from astropy.io import fits
+# `WCS(hdu.header).calc_footprint()` for `ngc2403.fits.gz`, from
+# wcslib 8.6 via astropy 8.0.1, sorted by (RA, Dec). Frozen rather
+# than recomputed live: a live comparison only tested anything where
+# astropy happened to be installed, which was not CI.
+NGC2403_FOOTPRINT_REFERENCE = [
+    (113.72543867991, 65.3032667940129),
+    (113.7254815018997, 65.88553801158601),
+    (114.65468345081484, 65.29352665515752),
+    (114.68831331817123, 65.88469749172714),
+]
 
+
+def test_footprint_matches_wcslib_reference():
     with fitsy.open(NGC2403) as f:
         ours = f[0].wcs().footprint()
-    with fits.open(NGC2403) as f:
-        theirs = astropy_wcs.WCS(f[0].header).calc_footprint()
 
     # Same four corners; astropy starts at the same pixel but we do not
     # promise its ordering, so compare as sets of positions.
     ours_sorted = ours[np.lexsort((ours[:, 1], ours[:, 0]))]
-    theirs_sorted = theirs[np.lexsort((theirs[:, 1], theirs[:, 0]))]
-    np.testing.assert_allclose(ours_sorted, theirs_sorted, atol=1e-9)
+    np.testing.assert_allclose(
+        ours_sorted, np.array(NGC2403_FOOTPRINT_REFERENCE), atol=1e-9
+    )
 
 
 def test_footprint_requires_celestial_axes():

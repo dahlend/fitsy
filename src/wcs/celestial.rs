@@ -140,13 +140,24 @@ pub struct CelestialRotation {
     pub delta0: f64,
     /// Native longitude of the celestial pole, degrees (LONPOLE).
     pub phi_p: f64,
-    /// Native latitude of the celestial pole, degrees (LATPOLE,
-    /// resolved per Sec.2.4).
+    /// `LATPOLE`, degrees, with the Sec.8.2 branch resolved.
+    ///
+    /// The Standard defines this keyword as the "latitude in the
+    /// native coordinate system of the celestial system's north pole,
+    /// **or equivalently, the latitude in the celestial coordinate
+    /// system of the native system's north pole**" (Sec.8.2). Those
+    /// two readings are the same number -- both are 90 degrees minus
+    /// the angle between the two poles -- so this single field is
+    /// `theta_p` and `delta_p` at once, and is what
+    /// [`Wcs::to_header`](crate::Wcs::to_header) writes back.
+    ///
+    /// `LATPOLE` in a header is only a *hint*: it selects between the
+    /// two roots of Paper II eq. (9) when both are valid. This field
+    /// holds the root actually chosen, which is why serializing it
+    /// re-selects itself.
     pub theta_p: f64,
     /// Celestial longitude of the native pole.
     alpha_p: f64,
-    /// Celestial latitude of the native pole.
-    delta_p: f64,
 }
 
 impl CelestialRotation {
@@ -184,10 +195,15 @@ impl CelestialRotation {
             alpha0,
             delta0,
             phi_p,
-            theta_p: 90.0,
+            theta_p: delta_p,
             alpha_p,
-            delta_p,
         })
+    }
+
+    /// Celestial longitude of the native pole, degrees.
+    #[must_use]
+    pub fn alpha_p(&self) -> f64 {
+        self.alpha_p
     }
 
     /// Native (phi, theta) -> celestial (alpha, delta). All in degrees.
@@ -196,7 +212,7 @@ impl CelestialRotation {
         let phi = phi_deg * D2R;
         let theta = theta_deg * D2R;
         let phi_p = self.phi_p * D2R;
-        let dp = self.delta_p * D2R;
+        let dp = self.theta_p * D2R;
 
         let dphi = phi - phi_p;
         let cos_theta = theta.cos();
@@ -222,7 +238,7 @@ impl CelestialRotation {
         let delta = delta_deg * D2R;
         let phi_p = self.phi_p * D2R;
         let ap = self.alpha_p * D2R;
-        let dp = self.delta_p * D2R;
+        let dp = self.theta_p * D2R;
 
         let dalpha = alpha - ap;
         let cos_delta = delta.cos();
@@ -282,8 +298,29 @@ fn compute_native_pole(
     }
     let ratio = (d0.sin() / denom).clamp(-1.0, 1.0);
     let acos = ratio.acos();
-    let cand1 = arg + acos;
-    let cand2 = arg - acos;
+
+    // `atan2` yields (-pi, pi] and `acos` yields [0, pi], so the raw
+    // sum/difference can leave (-pi, pi] -- with LONPOLE = 180deg,
+    // `arg` is pi and `arg + acos` comes out near 2pi. Wrap before
+    // the validity test below: 345deg *is* the -15deg solution, and
+    // rejecting it as "out of [-90, 90]" drops a legal root, leaving
+    // the wrong one and mirroring the sky by several degrees.
+    // A single +/-2pi correction is enough (`arg` is in (-pi, pi] and
+    // `acos` in [0, pi]), and it must be a *no-op* for candidates
+    // already in range: `rem_euclid` round-trips perturb them by an
+    // ulp, which silently breaks the exact `+x`/`-x` symmetry the
+    // tie-break below depends on.
+    let wrap = |c: f64| {
+        if c > std::f64::consts::PI {
+            c - std::f64::consts::TAU
+        } else if c <= -std::f64::consts::PI {
+            c + std::f64::consts::TAU
+        } else {
+            c
+        }
+    };
+    let cand1 = wrap(arg + acos);
+    let cand2 = wrap(arg - acos);
 
     // Per Paper II Sec.2.4 only candidates in [-pi/2, pi/2] are valid
     // delta_p; LATPOLE (default 90deg) selects between valid candidates.
@@ -292,11 +329,31 @@ fn compute_native_pole(
     let target = latpole.map_or(half_pi, |lp| lp * D2R);
     let chosen = match (in_range(cand1), in_range(cand2)) {
         (true, true) => {
-            if (cand1 - target).abs() <= (cand2 - target).abs() {
-                cand1
-            } else {
-                cand2
-            }
+            // Closest to LATPOLE wins; an exact tie falls to
+            // `arg - acos`.
+            //
+            // The tie needs a tolerance rather than a bare `<`:
+            // when exactly one candidate required a 2pi wrap its
+            // magnitude shifts by an ulp, which would otherwise
+            // decide a mathematical tie on rounding noise. 1e-12 rad
+            // is ~6e-11 degrees -- far below any meaningful LATPOLE,
+            // far above the noise.
+            //
+            // Which root a tie *should* take is genuinely
+            // unspecified: the Standard defers to Paper II, and
+            // `wcslib` is not self-consistent there. Nudging CRVAL2
+            // by 1e-13 degrees flips its answer between the two
+            // roots for `delta_0 = -30, LONPOLE = 180`, so its
+            // choice is its own rounding, not a rule. We match it
+            // wherever the comparison is actually decided, and pick
+            // deterministically here. Note the two roots describe
+            // mirrored skies, so any header landing on an exact tie
+            // is itself ambiguous -- which is why `to_header` always
+            // writes the resolved LATPOLE.
+            let d1 = (cand1 - target).abs();
+            let d2 = (cand2 - target).abs();
+            let tied = (d1 - d2).abs() <= 1e-12 * (1.0 + d1 + d2);
+            if !tied && d1 < d2 { cand1 } else { cand2 }
         }
         (true, false) => cand1,
         (false, true) => cand2,
@@ -339,6 +396,47 @@ fn compute_native_pole(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Standard (Sec.8.2) defines `LATPOLE` two ways and asserts
+    /// they are equivalent: "the latitude in the native coordinate
+    /// system of the celestial system's north pole, or equivalently,
+    /// the latitude in the celestial coordinate system of the native
+    /// system's north pole."
+    ///
+    /// `theta_p` is stored as the second reading (it is what the
+    /// rotation math needs). This checks the first reading agrees, by
+    /// asking the rotation where the celestial north pole lands in
+    /// native coordinates. Regression: the field used to be a
+    /// hardcoded `90.0`, which satisfies neither reading.
+    #[test]
+    fn theta_p_is_latpole_under_both_readings() {
+        let mut worst: f64 = 0.0;
+        let mut checked = 0;
+        for &t0 in &[90.0_f64, 0.0, 30.0, -45.0] {
+            for &a0 in &[0.0_f64, 45.0, 200.0, 359.0] {
+                for &d0 in &[0.0_f64, 30.0, -60.0, 89.0, -89.0] {
+                    for lonpole in [None, Some(0.0), Some(90.0), Some(150.0), Some(180.0)] {
+                        for latpole in [None, Some(-30.0), Some(90.0)] {
+                            let Ok(r) = CelestialRotation::new(a0, d0, lonpole, latpole, t0) else {
+                                // Not a legal pole configuration.
+                                continue;
+                            };
+                            // Native latitude of the celestial north
+                            // pole. Longitude is irrelevant at a pole.
+                            let (_, theta_at_celestial_pole) = r.celestial_to_native(a0, 90.0);
+                            worst = worst.max((theta_at_celestial_pole - r.theta_p).abs());
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 500, "only {checked} configurations exercised");
+        assert!(
+            worst < 1e-9,
+            "the two readings of LATPOLE disagree by up to {worst} deg"
+        );
+    }
 
     /// Zenithal: native pole at (alpha0, delta0); the fiducial point
     /// must round-trip.

@@ -79,6 +79,8 @@ nitpick_ignore = [
 # resolvable Python class names:
 #
 #   - ``optional`` / ``sequence`` -- NumPy modifier/type keywords
+#   - ``array-like`` -- NumPy's name for "anything np.asarray accepts";
+#     a documentation convention, not a class
 #   - ``keyword-only`` -- NumPy keyword-only argument marker
 #   - ``mapping`` -- lowercase dict-like pseudo-type (e.g. "Header or
 #     mapping"); the capitalized ``Mapping[str, Any]`` form resolves
@@ -90,6 +92,7 @@ nitpick_ignore = [
 nitpick_ignore_regex = [
     ("py:class", r"optional"),  # NumPy "optional" modifier
     ("py:class", r"sequence"),  # NumPy "sequence" pseudo-type
+    ("py:class", r"array-like"),  # NumPy "anything asarray accepts"
     ("py:class", r"keyword-only"),  # NumPy keyword-only marker
     ("py:class", r"mapping"),  # lowercase dict-like pseudo-type
     ("py:class", r"\{.*"),  # opening fragment of a set literal

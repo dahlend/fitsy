@@ -6,3 +6,17 @@
 *_build
 *__pycache__*
 target
+# `maturin develop` drops the compiled extension into the source
+# package next to the stubs; it is a build output, not source.
+*.so
+*.pyd
+
+# Scratch data at the repo root. Sample FITS files land here while
+# chasing a bug, and the FITS standard / WCS papers get downloaded
+# here to check a citation -- those are third-party copyrighted
+# documents and must not be committed. Test fixtures live under
+# `tests/data/`, which these patterns do not reach.
+/*.fits
+/*.fits.fz
+/*.fits.gz
+/*.tex

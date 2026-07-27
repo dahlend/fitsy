@@ -80,6 +80,10 @@ impl Tsc {
     }
 }
 impl Projection for Tsc {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -263,6 +267,10 @@ impl Csc {
     }
 }
 impl Projection for Csc {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -337,6 +345,10 @@ impl Qsc {
     }
 }
 impl Projection for Qsc {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }

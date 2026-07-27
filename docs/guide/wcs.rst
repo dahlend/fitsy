@@ -8,7 +8,15 @@ Every :class:`fitsy.ImageHdu` exposes a :meth:`~fitsy.ImageHdu.wcs`
 helper that returns a :class:`fitsy.Wcs` instance (or ``None`` if the
 header carries no WCS). The same parser is reachable from
 :meth:`fitsy.FitsFile.wcs`, which additionally resolves ``-TAB``
-look-up axes.
+look-up axes -- their coordinate array lives in a separate BINTABLE,
+which a header alone cannot reach, so ``ImageHdu.wcs()`` leaves such
+an axis unresolved and using it raises.
+
+A ``-TAB`` axis is defined over its table plus half a sample step at
+each end (FITS Paper III Sec.6.1.2, covering the outer halves of the
+boundary pixels). Pixels beyond that have no coordinate: single-point
+calls raise and the batch methods return ``nan``, matching
+``astropy.wcs``.
 
 .. literalinclude:: ../../examples/python/wcs.py
    :language: python
@@ -50,6 +58,24 @@ Use :meth:`~fitsy.Wcs.pixel_to_celestial_many` and
 :meth:`~fitsy.Wcs.celestial_to_pixel_many` for ``(N, 2)`` numpy inputs.
 The Rust equivalents take ``&[(f64, f64)]`` slices.
 
+Most projections cover only part of the plane -- SIN's unit circle,
+ZPN below ``PV2_0``, AZP beyond the horizon -- so a wide field
+routinely mixes valid and invalid pixels. The batch methods put
+``nan`` in those slots and return everything else, matching
+``astropy.wcs``; mask with ``numpy.isfinite`` if you care:
+
+.. code-block:: python
+
+   sky = wcs.pixel_to_celestial_many(pixels)
+   good = numpy.isfinite(sky).all(axis=1)
+
+They raise only when the *whole* WCS cannot transform: no celestial
+axis pair, or unresolved ``-TAB`` axes. The single-point
+:meth:`~fitsy.Wcs.pixel_to_celestial` and
+:meth:`~fitsy.Wcs.celestial_to_pixel` still raise for an
+out-of-domain coordinate, which is where to go for a diagnostic
+message explaining *why* a point failed.
+
 Image extent and footprint
 --------------------------
 
@@ -76,6 +102,18 @@ Fitting a WCS
 
 :func:`fitsy.fit_wcs` (Python) and ``fitsy::wcs::fit_celestial_wcs``
 (Rust) solve for a celestial WCS given pixel <-> sky correspondences.
+
+Use :meth:`~fitsy.Wcs.to_header` to turn the result -- or any parsed
+WCS -- back into a :class:`fitsy.Header` you can merge into an HDU.
+It writes everything the reader understands, so parsing the output
+reproduces the original transform: the linear pipeline, ``LONPOLE`` /
+``LATPOLE`` and the projection's ``PVi_m`` parameters, SIP, TPV,
+TNX/ZPX, DSS plate solutions, spectral rest quantities, and ``-TAB``
+pointer cards.
+
+Two things a bare header cannot carry: ``NAXISn`` (emitted as zero
+placeholders, since a WCS has no image attached) and the BINTABLE a
+``-TAB`` axis points at, which must be written as its own extension.
 
 .. literalinclude:: ../../examples/python/fit_wcs.py
    :language: python

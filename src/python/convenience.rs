@@ -7,11 +7,17 @@
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyKeyError, PyTypeError};
+use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
 use super::IntoPyResult;
+
+/// An HDU's data, falling back to its dict form for the kinds that
+/// expose no `data` attribute.
+fn data_of<'py>(hdu: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    hdu.getattr("data").or_else(|_| hdu.call_method0("to_dict"))
+}
 
 /// Open `path` and return one HDU resolved by `ext` (int or `EXTNAME` str).
 fn open_and_get<'py>(
@@ -31,6 +37,26 @@ fn open_and_get<'py>(
 }
 
 /// Read one HDU's data (and optionally its header) from `path`.
+///
+/// Parameters
+/// ----------
+/// path : str | os.PathLike
+///   File to read.
+/// ext : int | str, optional
+///   HDU index or ``EXTNAME``. When omitted, HDU 0 is read; if the
+///   primary HDU carries no data the first extension is used
+///   instead, matching ``astropy.io.fits.getdata``. The overwhelmingly
+///   common layout -- an empty primary followed by the real data in
+///   HDU 1 -- therefore works without naming an extension.
+/// header : bool, keyword-only
+///   When True, return ``(data, header)`` for whichever HDU the
+///   data actually came from.
+///
+/// Raises
+/// ------
+/// IndexError
+///   If the selected HDU has no data (and, when `ext` was omitted,
+///   neither does the first extension).
 #[pyfunction]
 #[pyo3(signature = (path, ext=None, *, header=false))]
 pub fn getdata(
@@ -39,10 +65,35 @@ pub fn getdata(
     ext: Option<Bound<'_, PyAny>>,
     header: bool,
 ) -> PyResult<Py<PyAny>> {
-    let (_file, hdu) = open_and_get(py, path, ext, "readonly")?;
-    let data = hdu
-        .getattr("data")
-        .or_else(|_| hdu.call_method0("to_dict"))?;
+    // Whether the caller pinned an HDU decides if the fallback below
+    // is allowed: naming an empty HDU is an error, landing on one by
+    // default is not. Captured before `ext` is consumed, because the
+    // error below names the HDU the caller asked for -- which is the
+    // only part of that message worth reading.
+    let ext_given = match ext.as_ref() {
+        Some(e) => Some(e.str()?.to_string()),
+        None => None,
+    };
+    let (file, mut hdu) = open_and_get(py, path, ext, "readonly")?;
+    let mut data = data_of(&hdu)?;
+    if data.is_none() {
+        if let Some(label) = ext_given {
+            return Err(PyIndexError::new_err(format!("No data in HDU #{label}.")));
+        }
+        let bound = file.bind(py);
+        if bound.len()? == 1 {
+            return Err(PyIndexError::new_err(
+                "No data in Primary HDU and no extension HDU found.",
+            ));
+        }
+        hdu = bound.get_item(1_i64.into_pyobject(py)?.into_any())?;
+        data = data_of(&hdu)?;
+        if data.is_none() {
+            return Err(PyIndexError::new_err(
+                "No data in either Primary or first extension HDUs.",
+            ));
+        }
+    }
     if header {
         let hdr = hdu.getattr("header")?;
         Ok(PyTuple::new(py, [data.unbind(), hdr.unbind()])?
@@ -85,33 +136,44 @@ pub fn getval(
 }
 
 /// Set one header keyword in `path` (rewrites the file).
+///
+/// `value` defaults to `None`, which writes a card with an undefined
+/// value -- the same default `astropy.io.fits.setval` uses.
 #[pyfunction]
-#[pyo3(signature = (path, key, value, *, ext=None, comment=None))]
+#[pyo3(signature = (path, key, value=None, *, ext=None, comment=None))]
 pub fn setval(
     py: Python<'_>,
     path: PathBuf,
     key: &str,
-    value: Bound<'_, PyAny>,
+    value: Option<Bound<'_, PyAny>>,
     ext: Option<Bound<'_, PyAny>>,
     comment: Option<&str>,
 ) -> PyResult<()> {
     let (file, hdu) = open_and_get(py, path.clone(), ext, "update")?;
     let header = hdu.getattr("header")?;
+    let value: Py<PyAny> = match value {
+        Some(v) => v.unbind(),
+        None => py.None(),
+    };
     let assign: Py<PyAny> = if let Some(c) = comment {
-        PyTuple::new(
-            py,
-            [value.unbind(), c.into_pyobject(py)?.into_any().unbind()],
-        )?
-        .into_any()
-        .unbind()
+        PyTuple::new(py, [value, c.into_pyobject(py)?.into_any().unbind()])?
+            .into_any()
+            .unbind()
     } else {
-        value.unbind()
+        value
     };
     header.set_item(key, assign)?;
     file.bind(py).call_method0("flush").map(|_| ())
 }
 
 /// Remove one header keyword from `path` (rewrites the file).
+///
+/// Raises
+/// ------
+/// KeyError
+///   If the keyword is absent, matching `astropy.io.fits.delval`
+///   and `fitsy.getval`. Guard with `getval` (or open the file and
+///   test `key in header`) when the card is optional.
 #[pyfunction]
 #[pyo3(signature = (path, key, *, ext=None))]
 pub fn delval(
@@ -122,9 +184,10 @@ pub fn delval(
 ) -> PyResult<()> {
     let (file, hdu) = open_and_get(py, path.clone(), ext, "update")?;
     let header = hdu.getattr("header")?;
-    if header.contains(key)? {
-        header.del_item(key)?;
-    }
+    // Deliberately unguarded: `__delitem__` raises KeyError for a
+    // missing card, which is the behaviour callers expect. Silently
+    // succeeding hid typo'd keywords.
+    header.del_item(key)?;
     file.bind(py).call_method0("flush").map(|_| ())
 }
 

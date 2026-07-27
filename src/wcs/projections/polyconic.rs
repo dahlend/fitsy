@@ -40,6 +40,10 @@ impl Bon {
     }
 }
 impl Projection for Bon {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.theta_1)]
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -72,6 +76,10 @@ impl Projection for Bon {
 #[derive(Debug, Clone, Copy)]
 pub struct Pco;
 impl Projection for Pco {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }

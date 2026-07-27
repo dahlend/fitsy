@@ -188,35 +188,54 @@ def test_bintable_column_str_still_works(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_random_groups_open_ldji():
-    """``ldji01giq_corrtag_a.fits`` is a normal file but the data dir
-    has no random-groups sample. We instead synthesize one."""
-    pytest.importorskip("astropy")
-    from astropy.io import fits as af
+def _write_random_groups(path, n_groups=2, n_params=1, data_per_group=4):
+    """Write a minimal random-groups primary HDU (Standard Sec.6).
 
-    # Build a tiny random-groups primary HDU via astropy and save it.
+    Hand-assembled rather than produced with ``astropy.io.fits``:
+    astropy was only being used as a writer here, so depending on it
+    made this test skip wherever it was absent, which included CI. The
+    layout is a handful of fixed cards, and spelling them out also
+    documents what the reader is expected to pick up:
+    ``NAXIS1 = 0`` is the marker that the first axis is the group
+    axis, ``PCOUNT`` counts parameters per group and ``GCOUNT`` counts
+    groups.
+    """
+    cards = [
+        "SIMPLE  =                    T",
+        "BITPIX  =                  -32",
+        "NAXIS   =                    2",
+        "NAXIS1  =                    0",
+        f"NAXIS2  = {data_per_group:>20}",
+        "GROUPS  =                    T",
+        f"PCOUNT  = {n_params:>20}",
+        f"GCOUNT  = {n_groups:>20}",
+        "PTYPE1  = 'PARM    '",
+        "END",
+    ]
+    block = "".join(f"{c:<80}" for c in cards).encode("ascii")
+    block += b" " * (-len(block) % 2880)
+    # Group g is [parameters..., data...], big-endian f32 throughout.
+    values = np.arange(n_groups * (n_params + data_per_group), dtype=">f4")
+    payload = values.tobytes()
+    payload += b"\x00" * (-len(payload) % 2880)
+    with open(path, "wb") as fh:
+        fh.write(block + payload)
+    return path
+
+
+def test_random_groups_open():
+    """The data dir has no random-groups sample, so synthesize one."""
     with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "rg.fits")
-        # 2 groups, 1 parameter, 4-pixel data array.
-        data = np.arange(2 * (1 + 4), dtype=np.float32)
-        gdata = np.recarray(
-            (2,),
-            dtype=[("PARM", "f4"), ("DATA", "f4", (4,))],
-        )
-        gdata["PARM"] = data[0::5]
-        gdata["DATA"] = data.reshape(2, 5)[:, 1:]
-        hdu = af.GroupsHDU(
-            af.GroupData(
-                gdata["DATA"],
-                parnames=["PARM"],
-                pardata=[gdata["PARM"]],
-            )
-        )
-        hdu.writeto(path, overwrite=True)
-        # Now open with fitsy and verify wrapper works.
+        path = _write_random_groups(os.path.join(td, "rg.fits"))
         f = fitsy.open(path)
         rg = f[0]
         assert type(rg).__name__ == "RandomGroups"
         assert rg.n_groups == 2
         assert rg.n_params == 1
         assert rg.data_per_group == 4
+        # And the payload actually decodes: group g holds parameter
+        # 5g and data 5g+1 .. 5g+4.
+        for g in range(2):
+            params, data = rg.group(g)
+            np.testing.assert_allclose(params, [5.0 * g])
+            np.testing.assert_allclose(data, np.arange(5 * g + 1, 5 * g + 5))

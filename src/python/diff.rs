@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -18,6 +17,16 @@ use crate::diff::{DiffOptions, FitsDiff};
 /// rtol : float, optional
 ///   Relative tolerance for floating-point comparisons.  Default
 ///   ``0.0`` (exact equality).
+/// atol : float, optional
+///   Absolute tolerance for floating-point comparisons. Default
+///   ``0.0``. Combined with ``rtol`` as
+///   ``|a - b| <= atol + rtol * |b|``, matching ``numpy.isclose``.
+///   ``rtol`` alone cannot reconcile values straddling zero.
+///
+///   Both tolerances apply to header card values, image pixels, and
+///   table cells alike. Image pixels are compared in physical units
+///   (BZERO/BSCALE applied), and reported indices are pixel numbers;
+///   table differences are reported as ``COLUMN[row]``.
 /// max_diffs : int, optional
 ///   Maximum number of differences recorded per category before
 ///   truncation. Default 10.
@@ -31,16 +40,18 @@ use crate::diff::{DiffOptions, FitsDiff};
 ///   Diff object. Use ``str(diff)`` for the report; ``diff.identical``
 ///   is True when the files match.
 #[pyfunction]
-#[pyo3(signature = (a, b, *, rtol=0.0, max_diffs=10, ignore_keywords=None))]
+#[pyo3(signature = (a, b, *, rtol=0.0, atol=0.0, max_diffs=10, ignore_keywords=None))]
 pub fn diff(
     a: PathBuf,
     b: PathBuf,
     rtol: f64,
+    atol: f64,
     max_diffs: usize,
     ignore_keywords: Option<Vec<String>>,
 ) -> PyResult<PyFitsDiff> {
     let mut opts = DiffOptions {
         relative_tolerance: rtol,
+        absolute_tolerance: atol,
         max_diffs,
         ..Default::default()
     };
@@ -111,11 +122,4 @@ impl PyFitsDiff {
         // Truthy when non-identical (i.e. diff exists).
         !self.inner.is_identical()
     }
-}
-
-/// Internal stub so ValueError gets re-exported.
-#[pyfunction]
-#[pyo3(signature = ())]
-pub fn _diff_module_marker() {
-    let _ = PyValueError::new_err("");
 }

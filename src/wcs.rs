@@ -217,7 +217,11 @@ impl Wcs {
             return Err(FitsError::Wcs(format!(
                 "WCS has {} unresolved -TAB axis spec(s); \
                  call FitsFile::wcs() or Wcs::resolve_tab() to load them",
-                self.tab_specs.len() - self.tab.len(),
+                // `saturating_sub`: `resolve_tab` never leaves `tab`
+                // longer than `tab_specs`, but both are public fields
+                // and a caller that pushed into `tab` directly should
+                // land on this error, not an overflow panic.
+                self.tab_specs.len().saturating_sub(self.tab.len()),
             )));
         }
         if let Some(c) = self.celestial.as_ref() {
@@ -287,7 +291,11 @@ impl Wcs {
             return Err(FitsError::Wcs(format!(
                 "WCS has {} unresolved -TAB axis spec(s); \
                  call FitsFile::wcs() or Wcs::resolve_tab() to load them",
-                self.tab_specs.len() - self.tab.len(),
+                // `saturating_sub`: `resolve_tab` never leaves `tab`
+                // longer than `tab_specs`, but both are public fields
+                // and a caller that pushed into `tab` directly should
+                // land on this error, not an overflow panic.
+                self.tab_specs.len().saturating_sub(self.tab.len()),
             )));
         }
         if let Some(c) = self.celestial.as_ref() {
@@ -408,27 +416,76 @@ impl Wcs {
         ])
     }
 
-    /// Batch pixel -> (RA, Dec). Same semantics as
+    /// Validate the preconditions that apply to a whole batch rather
+    /// than to one point, so the batch helpers can distinguish
+    /// "this WCS cannot transform anything" (an `Err`) from "this
+    /// particular point is outside the projection" (a `NaN` slot).
+    ///
+    /// These two are the only structural failures reachable from the
+    /// celestial helpers: the linear matrix is inverted once at parse
+    /// time, and the coordinate vectors are built here with the right
+    /// length, so every remaining error is per-point.
+    fn batch_precheck(&self) -> Result<()> {
+        if self.celestial.is_none() {
+            return Err(FitsError::Wcs("WCS has no celestial axis pair".into()));
+        }
+        if self.tab_specs.len() != self.tab.len() {
+            return Err(FitsError::Wcs(format!(
+                "WCS has {} unresolved -TAB axis spec(s); \
+                 call FitsFile::wcs() or Wcs::resolve_tab() to load them",
+                // `saturating_sub`: `resolve_tab` never leaves `tab`
+                // longer than `tab_specs`, but both are public fields
+                // and a caller that pushed into `tab` directly should
+                // land on this error, not an overflow panic.
+                self.tab_specs.len().saturating_sub(self.tab.len()),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Batch pixel -> (RA, Dec). Same transform as
     /// [`Self::pixel_to_celestial`] but amortises the per-call setup
     /// across `pixels.len()` points and writes into a caller-owned
     /// `Vec` so a tight catalog-projection loop pays no per-point
     /// allocation cost.
+    ///
+    /// # Out-of-domain points
+    ///
+    /// Points that fall outside the projection's valid domain yield
+    /// `(f64::NAN, f64::NAN)` in their slot instead of aborting the
+    /// call, matching `wcslib` and `astropy.wcs`. Most all-sky
+    /// projections cover only part of the plane (SIN's unit circle,
+    /// ZPN below `PV2_0`, AZP beyond the horizon), so a wide field
+    /// routinely mixes valid and invalid pixels; failing the batch
+    /// would throw away every good result for one bad point. Use
+    /// [`Self::pixel_to_celestial`] on a single point when you want
+    /// the diagnostic message instead.
+    ///
+    /// An `Err` here means the *whole* WCS cannot transform: no
+    /// celestial axis pair, or unresolved `-TAB` axes.
     pub fn pixel_to_celestial_many(&self, pixels: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
-        let mut out = Vec::with_capacity(pixels.len());
-        for &(px, py) in pixels {
-            out.push(self.pixel_to_celestial(px, py)?);
-        }
-        Ok(out)
+        self.batch_precheck()?;
+        Ok(pixels
+            .iter()
+            .map(|&(px, py)| {
+                self.pixel_to_celestial(px, py)
+                    .unwrap_or((f64::NAN, f64::NAN))
+            })
+            .collect())
     }
 
     /// Batch (RA, Dec) -> pixel. Mirror of
-    /// [`Self::pixel_to_celestial_many`].
+    /// [`Self::pixel_to_celestial_many`], including the `NaN`
+    /// treatment of out-of-domain points.
     pub fn celestial_to_pixel_many(&self, sky: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
-        let mut out = Vec::with_capacity(sky.len());
-        for &(ra, dec) in sky {
-            out.push(self.celestial_to_pixel(ra, dec)?);
-        }
-        Ok(out)
+        self.batch_precheck()?;
+        Ok(sky
+            .iter()
+            .map(|&(ra, dec)| {
+                self.celestial_to_pixel(ra, dec)
+                    .unwrap_or((f64::NAN, f64::NAN))
+            })
+            .collect())
     }
 
     /// 2D celestial pixel -> (RA, Dec) in degrees. Convenience for the

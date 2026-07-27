@@ -79,8 +79,10 @@ pub struct FitsUpdater {
 impl FitsUpdater {
     /// Open `path` for in-place updates.
     ///
-    /// Parses the file once to discover HDU layouts, then memory-maps
-    /// it read/write. Headers are parsed leniently by default (matching
+    /// Parses the file once to discover HDU layouts, then keeps a
+    /// plain read/write handle -- patches go through positional
+    /// `pwrite`, not a mapping, as described in the module docs.
+    /// Headers are parsed leniently by default (matching
     /// [`FitsFile::open`](crate::FitsFile::open)); use
     /// [`Self::open_with`] with `lenient = false` for strict parsing.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {

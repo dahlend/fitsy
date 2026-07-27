@@ -50,5 +50,6 @@ with tempfile.TemporaryDirectory() as td:
         header={"EXTNAME": "MASK"},
     )
 
-    # `info` returns the human-readable HDU summary as a string.
-    print(fitsy.info(path))
+    # `info` returns a list of (index, name, ver, kind, dims) tuples.
+    for index, name, ver, kind, dims in fitsy.info(path):
+        print(f"{index}: {name or '(primary)'} v{ver} {kind} {dims}")

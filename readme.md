@@ -14,7 +14,10 @@ Read and write astronomical FITS files with WCS coordinates.
 - Support for fitting WCS as well.
 - Hierarchy/History support.
 
-Available as a Python package and a Rust crate with minimal dependencies.
+Available as a Python package, a Rust crate with minimal dependencies, and a
+command-line tool.
+
+Full documentation: <https://dahlend.github.io/fitsy/>
 
 I have tried my best to make this fully compliant with modern fits requirements, if
 something is missing please let me know.
@@ -92,6 +95,21 @@ write("out.fits", &[hdu], /* overwrite = */ false)?;
 
 Optional features: `compression` (default), `nalgebra`, `faer`, `python`.
 
+## Command line
+
+The crate also installs a `fitsy` binary:
+
+```bash
+cargo install fitsy
+```
+
+```
+fitsy info <file>                        # one line per HDU, with WCS details
+fitsy header <file> [--hdu N] [filter]   # dump parsed header cards
+fitsy checksum <file>                    # verify CHECKSUM / DATASUM
+fitsy stats <file> [--hdu N]             # pixel statistics for image HDUs
+fitsy funpack <input> [-o out]           # write a tile-decompressed copy
+```
 
 ## License
 

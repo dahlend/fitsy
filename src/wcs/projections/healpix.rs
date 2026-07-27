@@ -36,6 +36,10 @@ impl Hpx {
     }
 }
 impl Projection for Hpx {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.h), (2, self.k)]
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -114,6 +118,10 @@ impl Xph {
     const POLE_TOL: f64 = 1.0e-4;
 }
 impl Projection for Xph {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         90.0
     }

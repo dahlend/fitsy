@@ -4,9 +4,14 @@ These stubs mirror the runtime API exposed by ``src/python/`` and are
 maintained by hand. They are consumed by IDEs and static type
 checkers; Sphinx autodoc reads the compiled module directly.
 
-``tests/python/test_stubs_match_module.py`` checks them against the
-compiled module, so a signature change in ``src/python/`` must be
-mirrored here or CI fails.
+They ship *inside* the package, next to the ``py.typed`` marker, which
+is the only place a PEP 561 type checker looks for them.
+
+``tests/python/test_stubs_match_module.py`` checks parameter names,
+kinds, **and default values** against the compiled module, so a
+signature change in ``src/python/`` must be mirrored here or CI fails.
+A stub that disagrees with the runtime is worse than no stub: the call
+type-checks and then raises.
 """
 
 from __future__ import annotations
@@ -350,34 +355,37 @@ def append(
     header: Optional[Union[Header, Mapping[str, Any]]] = None,
 ) -> None: ...
 def info(path: StrPath) -> list[tuple[int, str, int, str, Any]]: ...
+
+# `ext=None` means "HDU 0", except in `getdata`, which falls back to
+# the first extension when the primary carries no data.
 def getdata(
     path: StrPath,
-    ext: Union[int, str] = 0,
+    ext: Optional[Union[int, str]] = None,
     *,
     header: bool = False,
 ) -> Any: ...
 def getheader(
     path: StrPath,
-    ext: Union[int, str] = 0,
+    ext: Optional[Union[int, str]] = None,
 ) -> Header: ...
 def getval(
     path: StrPath,
     key: str,
-    ext: Union[int, str] = 0,
+    ext: Optional[Union[int, str]] = None,
 ) -> HeaderScalar: ...
 def setval(
     path: StrPath,
     key: str,
     value: HeaderScalar = None,
     *,
-    ext: Union[int, str] = 0,
+    ext: Optional[Union[int, str]] = None,
     comment: Optional[str] = None,
 ) -> None: ...
 def delval(
     path: StrPath,
     key: str,
     *,
-    ext: Union[int, str] = 0,
+    ext: Optional[Union[int, str]] = None,
 ) -> None: ...
 
 class FitsDiff:
@@ -400,6 +408,7 @@ def diff(
     b: StrPath,
     *,
     rtol: float = 0.0,
+    atol: float = 0.0,
     max_diffs: int = 10,
     ignore_keywords: Optional[Sequence[str]] = None,
 ) -> FitsDiff: ...

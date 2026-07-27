@@ -39,7 +39,7 @@ fn decompress(name: &str) -> Vec<u8> {
 }
 
 #[test]
-fn astropy_rice_i16() {
+fn rice_i16_matches_reference() {
     let raw = decompress("ref_rice_i16.fits");
     let expected: Vec<i16> = lcg(33 * 17)
         .iter()
@@ -50,11 +50,14 @@ fn astropy_rice_i16() {
         .chunks_exact(2)
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
-    assert_eq!(decoded, expected, "RICE_1 i16 decode differs from astropy");
+    assert_eq!(
+        decoded, expected,
+        "RICE_1 i16 decode differs from the reference fixture"
+    );
 }
 
 #[test]
-fn astropy_rice_i32() {
+fn rice_i32_matches_reference() {
     let raw = decompress("ref_rice_i32.fits");
     let expected: Vec<i32> = lcg(40 * 12)
         .iter()
@@ -65,11 +68,14 @@ fn astropy_rice_i32() {
         .chunks_exact(4)
         .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    assert_eq!(decoded, expected, "RICE_1 i32 decode differs from astropy");
+    assert_eq!(
+        decoded, expected,
+        "RICE_1 i32 decode differs from the reference fixture"
+    );
 }
 
 #[test]
-fn astropy_hcompress_i32_large_values() {
+fn hcompress_i32_large_values_matches_reference() {
     // Values near +-2^30: the H-transform coefficients exceed i32, so this
     // exercises the 64-bit coefficient path (cfitsio `fits_hdecompress64`).
     let raw = decompress("ref_hcomp_i32.fits");
@@ -84,12 +90,12 @@ fn astropy_hcompress_i32_large_values() {
         .collect();
     assert_eq!(
         decoded, expected,
-        "HCOMPRESS_1 i32 decode differs from astropy"
+        "HCOMPRESS_1 i32 decode differs from the reference fixture"
     );
 }
 
 #[test]
-fn astropy_subtractive_dither_f32() {
+fn subtractive_dither_f32_matches_reference() {
     // Quantized float tile with SUBTRACTIVE_DITHER_1 and ZDITHER0 = 42.
     // The de-dithered floats must match astropy's own decode bit-for-bit
     // (HDU "EXPECTED" stores astropy's output); GZIP_1 payload isolates
@@ -118,6 +124,6 @@ fn astropy_subtractive_dither_f32() {
     // quantization-level noise that a tolerance compare could miss.
     assert_eq!(
         decoded, expected,
-        "de-dithered floats differ from astropy's decode"
+        "de-dithered floats differ from the reference decode"
     );
 }

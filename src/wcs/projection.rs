@@ -142,6 +142,18 @@ pub trait Projection: std::fmt::Debug + Send + Sync {
 
     /// Inverse: plane (x, y) -> native (phi, theta) in degrees.
     fn x2s(&self, x_deg: f64, y_deg: f64) -> Result<(f64, f64)>;
+
+    /// The `(m, value)` pairs that [`build`] would need to reconstruct
+    /// this projection, i.e. the `PV2_m` cards it was parsed from.
+    /// Parameterless projections return an empty vector.
+    ///
+    /// Deliberately a required method rather than one defaulting to
+    /// `Vec::new()`: a new parameterised projection that forgot to
+    /// implement it would otherwise serialize to a header that
+    /// silently re-parses with different parameters. Making the
+    /// compiler ask the question is the same reasoning as the
+    /// exhaustive matches on [`ProjectionKind`].
+    fn pv2(&self) -> Vec<(u32, f64)>;
 }
 
 /// Construct a projection. `pv2` is the table of `PV2_m` keyword

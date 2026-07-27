@@ -29,8 +29,18 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # `--all-targets` covers lib/bins/tests/examples but the
+      # nalgebra and faer integration tests are `#![cfg(feature)]`d
+      # out unless their features are on, so enable them here.
+      # `python` stays off: `extension-module` leaves the CPython
+      # symbols unresolved, which fails to link a test binary.
       - name: cargo test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --features nalgebra,faer
+      # Separate step on purpose: `--all-targets` silently EXCLUDES
+      # doctests, so without this the examples in our rustdoc are
+      # never compiled.
+      - name: cargo test --doc
+        run: cargo test --doc --features nalgebra,faer
       - name: cargo doc
         run: cargo doc --no-deps --all-features
         env:

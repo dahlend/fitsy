@@ -9,8 +9,13 @@ FITS lists axes fastest-first).
 .. literalinclude:: ../../examples/python/reading_images.py
    :language: python
 
-``data`` is always returned in physical units with an appropriate
-numpy dtype, matching the behavior of ``astropy.io.fits``.
+``data`` is always returned in physical units with the same numpy
+dtype ``astropy.io.fits`` would choose, except that fitsy always
+hands back native byte order (see below). For scaled integer data
+that means ``BITPIX`` 8 and 16 decode to ``float32`` and 32 and 64 to
+``float64``; unscaled data keeps its own type, and the
+``BZERO``-offset unsigned conventions decode to ``uint16`` /
+``uint32`` / ``uint64`` rather than promoting to float.
 
 .. _reading-large-images:
 
@@ -83,10 +88,12 @@ materialise their data section in full on first access:
 * **Tile-compressed images** (BINTABLE with ``ZIMAGE = T``,
   unwrapped via the Rust ``FitsFile::image`` accessor) are decompressed
   tile-by-tile into one contiguous numpy array on the first
-  ``.data`` access. Section reads and in-place writes are not
-  supported for compressed HDUs -- the underlying tiles must be
-  re-encoded as a unit, so ``hdu.section[...] = patch`` falls
-  through to a full-image rewrite on the next ``flush()``.
+  ``.data`` access. ``section`` still works on them, but it buys you
+  nothing: reads slice the fully materialised array, and
+  ``hdu.section[...] = patch`` mutates that array and falls through
+  to a full-image rewrite on the next ``flush()`` -- the underlying
+  tiles have to be re-encoded as a unit. There is no ``O(patch)``
+  path for compressed HDUs.
 * **Random-groups HDUs** hold the entire data section in a single
   numpy structured array; there is no streaming accessor.
 * **ASCII tables** and **BINTABLE** HDUs read all rows eagerly

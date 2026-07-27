@@ -23,9 +23,9 @@
     unsafe_op_in_unsafe_fn,
     reason = "PyO3 macros generate unsafe blocks inside their own unsafe fns"
 )]
-// pyo3 0.22 emits cfg(gil-refs) probes that the compiler doesn't
-// recognize; harmless, silence them.
-#![allow(unexpected_cfgs, reason = "pyo3 0.22 probes cfg(gil-refs)")]
+// Some pyo3 releases emit cfg probes (e.g. `gil-refs`) that the
+// compiler doesn't recognize; harmless, silence them.
+#![allow(unexpected_cfgs, reason = "pyo3 emits cfg probes cargo cannot know")]
 // PyO3 macros expand argument extraction through `From`/`Into` even
 // when the source and target types coincide, which clippy flags as
 // `useless_conversion`. There is nothing the user can do about it.
@@ -174,8 +174,11 @@ pub(crate) fn as_native_ndarray<'py>(
 }
 
 /// The native module entry point. `maturin` builds this as
-/// `fitsy._fitsy`; the pure-Python `fitsy/__init__.py` re-exports
-/// the symbols listed below into the top-level `fitsy` namespace.
+/// `fitsy.fitsy` (see `module-name` in `pyproject.toml`); the shim
+/// `python/fitsy/__init__.py` re-exports the symbols registered below
+/// into the top-level `fitsy` namespace. That shim exists so the
+/// package is a real directory, which is what lets the type stubs and
+/// the `py.typed` marker ship inside it.
 #[pymodule]
 fn fitsy(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

@@ -77,6 +77,10 @@ impl Cop {
     }
 }
 impl Projection for Cop {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.0.theta_a), (2, self.0.eta)]
+    }
+
     fn theta0(&self) -> f64 {
         self.0.theta_a
     }
@@ -124,6 +128,10 @@ impl Coe {
     }
 }
 impl Projection for Coe {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.0.theta_a), (2, self.0.eta)]
+    }
+
     fn theta0(&self) -> f64 {
         self.0.theta_a
     }
@@ -183,6 +191,10 @@ impl Cod {
     }
 }
 impl Projection for Cod {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.0.theta_a), (2, self.0.eta)]
+    }
+
     fn theta0(&self) -> f64 {
         self.0.theta_a
     }
@@ -236,6 +248,10 @@ impl Coo {
     }
 }
 impl Projection for Coo {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.0.theta_a), (2, self.0.eta)]
+    }
+
     fn theta0(&self) -> f64 {
         self.0.theta_a
     }

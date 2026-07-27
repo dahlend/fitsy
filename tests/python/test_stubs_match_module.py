@@ -1,9 +1,14 @@
-"""``stubs/fitsy.pyi`` is hand-written; this checks it against reality.
+"""``python/fitsy/__init__.pyi`` is hand-written; this checks it
+against reality.
 
 A stub that disagrees with the module is worse than no stub: the call
 type-checks and then fails at runtime. These tests compare the names,
-parameter lists, and parameter kinds declared in the stub against the
-compiled extension.
+parameter lists, parameter kinds, **and default values** declared in
+the stub against the compiled extension.
+
+Defaults matter as much as names: a stub that claims a required
+argument is optional makes the type checker bless a call that raises
+``TypeError``.
 """
 
 from __future__ import annotations
@@ -15,8 +20,12 @@ import pathlib
 import fitsy
 import pytest
 
-STUB_PATH = pathlib.Path(__file__).parents[2] / "stubs" / "fitsy.pyi"
+STUB_PATH = pathlib.Path(__file__).parents[2] / "python" / "fitsy" / "__init__.pyi"
 STUB = ast.parse(STUB_PATH.read_text())
+
+# Sentinel for "this parameter has no default", distinct from a
+# declared default of `None`.
+REQUIRED = "<required>"
 
 
 def _stub_all() -> set[str]:
@@ -26,7 +35,7 @@ def _stub_all() -> set[str]:
             and getattr(node.targets[0], "id", "") == "__all__"
         ):
             return {elt.value for elt in node.value.elts}
-    raise AssertionError("stubs/fitsy.pyi declares no __all__")
+    raise AssertionError(f"{STUB_PATH.name} declares no __all__")
 
 
 def _stub_functions() -> dict[str, ast.FunctionDef]:
@@ -37,14 +46,52 @@ def _stub_classes() -> dict[str, ast.ClassDef]:
     return {n.name: n for n in STUB.body if isinstance(n, ast.ClassDef)}
 
 
-def _declared_params(node: ast.FunctionDef) -> list[tuple[str, str]]:
-    """(name, kind) pairs, where kind is 'positional' or 'keyword-only'."""
-    return [(a.arg, "positional") for a in node.args.args] + [
-        (a.arg, "keyword-only") for a in node.args.kwonlyargs
+def _normalize_default(text: str) -> str:
+    """Compare defaults by value, not by source spelling.
+
+    The stub says ``"readonly"`` while ``repr()`` of the runtime
+    default says ``'readonly'``; both denote the same string. Ints and
+    floats are unified too, so a stub ``0`` matches a runtime ``0.0``
+    only if they really are equal.
+    """
+    if text == REQUIRED:
+        return REQUIRED
+    try:
+        value = ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return text
+    if isinstance(value, float) and value.is_integer():
+        return repr(int(value))
+    return repr(value)
+
+
+def _declared_params(node: ast.FunctionDef) -> list[tuple[str, str, str]]:
+    """(name, kind, default) triples; kind is 'positional'/'keyword-only'."""
+    args = node.args
+    # `defaults` right-aligns against `args`; `kw_defaults` is
+    # positionally aligned with `kwonlyargs` and holds None for
+    # "no default".
+    padding = [None] * (len(args.args) - len(args.defaults))
+    out = [
+        (
+            a.arg,
+            "positional",
+            REQUIRED if d is None else _normalize_default(ast.unparse(d)),
+        )
+        for a, d in zip(args.args, padding + list(args.defaults))
     ]
+    out += [
+        (
+            a.arg,
+            "keyword-only",
+            REQUIRED if d is None else _normalize_default(ast.unparse(d)),
+        )
+        for a, d in zip(args.kwonlyargs, args.kw_defaults)
+    ]
+    return out
 
 
-def _runtime_params(obj) -> list[tuple[str, str]] | None:
+def _runtime_params(obj) -> list[tuple[str, str, str]] | None:
     """Same shape as `_declared_params`, or None if not introspectable."""
     try:
         params = inspect.signature(obj).parameters.values()
@@ -55,7 +102,19 @@ def _runtime_params(obj) -> list[tuple[str, str]] | None:
         inspect.Parameter.POSITIONAL_OR_KEYWORD: "positional",
         inspect.Parameter.POSITIONAL_ONLY: "positional",
     }
-    return [(p.name, kinds[p.kind]) for p in params if p.kind in kinds]
+    return [
+        (
+            p.name,
+            kinds[p.kind],
+            (
+                REQUIRED
+                if p.default is inspect.Parameter.empty
+                else _normalize_default(repr(p.default))
+            ),
+        )
+        for p in params
+        if p.kind in kinds
+    ]
 
 
 def test_all_matches_runtime():

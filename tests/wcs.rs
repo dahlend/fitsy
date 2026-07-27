@@ -42,12 +42,53 @@ fn build_minimal_image_with_wcs(cards: &[String]) -> Vec<u8> {
 }
 
 fn open_image(cards: &[String]) -> fitsy::Wcs {
+    try_open_image(cards).expect("header should describe a valid WCS")
+}
+
+/// `open_image` for a 4x4x16 cube, so tests can exercise a third
+/// (e.g. spectral) axis.
+fn open_image_3d(cards: &[String]) -> fitsy::Wcs {
+    let mut buf = Vec::new();
+    for c in [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    3",
+        "NAXIS1  =                    4",
+        "NAXIS2  =                    4",
+        "NAXIS3  =                   16",
+    ] {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    for c in cards {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    buf.extend_from_slice(&pad_card("END"));
+    while buf.len() % BLOCK != 0 {
+        buf.push(b' ');
+    }
+    let data_start = buf.len();
+    buf.extend(std::iter::repeat_n(0_u8, 4 * 4 * 16));
+    while (buf.len() - data_start) % BLOCK != 0 {
+        buf.push(0);
+    }
+    let file = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::Image(img) = file.hdu(0).unwrap() else {
+        panic!("not image");
+    };
+    img.wcs(' ').unwrap().expect("wcs present")
+}
+
+/// `open_image` for callers sweeping parameter combinations, some of
+/// which are not valid inputs for a given projection (e.g. a LATPOLE
+/// with no native-pole solution). `None` means "this fixture is not a
+/// WCS", which such callers skip rather than fail on.
+fn try_open_image(cards: &[String]) -> Option<fitsy::Wcs> {
     let bytes = build_minimal_image_with_wcs(cards);
     let file = FitsFile::from_bytes(bytes).unwrap();
     let Hdu::Image(img) = file.hdu(0).unwrap() else {
         panic!("not image");
     };
-    img.wcs(' ').unwrap().expect("wcs present")
+    img.wcs(' ').ok().flatten()
 }
 
 fn near(a: f64, b: f64, tol: f64) -> bool {
@@ -715,7 +756,7 @@ fn wcs_for_standard_row(row: &HashMap<String, String>) -> fitsy::Wcs {
 ///   - The reference pixel (CRPIX) maps to CRVAL via `pixel_to_world`.
 ///   - `world_to_pixel(ra, dec)` recovers the stored pixel within 1e-8 px.
 #[test]
-fn standard_projections_match_astropy() {
+fn standard_projections_match_reference() {
     let path = test_data_dir().join("wcs_standard.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "CSV is empty");
@@ -789,7 +830,7 @@ fn standard_projections_match_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in standard_projections_match_astropy:\n  {}",
+        "{} failure(s) in standard_projections_match_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -801,7 +842,7 @@ fn standard_projections_match_astropy() {
 ///   - The reference pixel maps to CRVAL.
 ///   - `world_to_pixel(ra, dec)` recovers the stored pixel within 1e-8 px.
 #[test]
-fn sip_matches_astropy() {
+fn sip_matches_reference() {
     let path = test_data_dir().join("wcs_sip.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "SIP CSV is empty");
@@ -880,7 +921,7 @@ fn sip_matches_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in sip_matches_astropy:\n  {}",
+        "{} failure(s) in sip_matches_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -894,7 +935,7 @@ fn sip_matches_astropy() {
 ///     (iterative Newton inverse; astropy's wcslib solver also uses 30
 ///     iterations and accepts up to 1e-10 px residual so 1e-5 is generous).
 #[test]
-fn tpv_matches_astropy() {
+fn tpv_matches_reference() {
     let path = test_data_dir().join("wcs_tpv.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "TPV CSV is empty");
@@ -964,7 +1005,7 @@ fn tpv_matches_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in tpv_matches_astropy:\n  {}",
+        "{} failure(s) in tpv_matches_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -1516,6 +1557,27 @@ fn wave_tab_axis_resolved_from_bintable() {
     let pix = wcs.world_to_pixel(&[0.0, 0.0, 6000.0]).unwrap();
     let back = wcs.pixel_to_world(&[pix[0], pix[1], pix[2]]).unwrap();
     assert!((back[2] - 6000.0).abs() < 1e-9, "got {}", back[2]);
+
+    // `to_header` must reproduce the PSi_/PVi_ pointer cards so the
+    // serialized header still finds the same lookup table. The table
+    // lives in its own HDU and cannot travel inside a `Header`, so we
+    // re-resolve against the original file.
+    let serialized = wcs.to_header(' ').unwrap();
+    let mut reparsed = fitsy::Wcs::from_header(&serialized, ' ')
+        .unwrap()
+        .expect("serialized -TAB header still describes a WCS");
+    assert_eq!(reparsed.tab_specs.len(), 1, "PSi_/PVi_ cards were dropped");
+    assert_eq!(reparsed.resolve_tab(&file).unwrap(), 1);
+    for pz in [0.0, 1.5, 2.0, 4.0] {
+        let a = wcs.pixel_to_world(&[0.0, 0.0, pz]).unwrap();
+        let b = reparsed.pixel_to_world(&[0.0, 0.0, pz]).unwrap();
+        assert!(
+            (a[2] - b[2]).abs() < 1e-12,
+            "-TAB round-trip drifted at pixel {pz}: {} vs {}",
+            a[2],
+            b[2]
+        );
+    }
 }
 
 /// Header that declares a `-TAB` axis but is opened via the
@@ -1827,4 +1889,531 @@ fn cloning_a_sip_wcs_preserves_distortion() {
     let a = wcs.pixel_to_celestial(80.0, 15.0).unwrap();
     let b = copy.pixel_to_celestial(80.0, 15.0).unwrap();
     assert!(near(a.0, b.0, 1e-12) && near(a.1, b.1, 1e-12));
+}
+
+/// A single out-of-domain point must not discard the rest of a batch.
+///
+/// SIN projects only the hemisphere facing the observer, so a
+/// wide-CDELT frame mixes valid and invalid pixels. The established
+/// convention is to mark the invalid ones NaN and return the rest;
+/// fitsy used to propagate the first error and throw the batch away.
+#[test]
+fn batch_transforms_nan_fill_out_of_domain_points() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---SIN'".into(),
+        "CTYPE2  = 'DEC--SIN'".into(),
+        "CRPIX1  =                 50.0".into(),
+        "CRPIX2  =                 50.0".into(),
+        "CRVAL1  =                 45.0".into(),
+        "CRVAL2  =                 30.0".into(),
+        // 2 deg/pixel over 100 pixels: the corners sit ~140 deg from
+        // the reference, well outside the hemisphere SIN can project.
+        "CDELT1  =                 -2.0".into(),
+        "CDELT2  =                  2.0".into(),
+        "CUNIT1  = 'deg'".into(),
+        "CUNIT2  = 'deg'".into(),
+    ];
+    let wcs = open_image(&cards);
+
+    // Reference pixel is valid; (0,0) is far outside the domain.
+    assert!(wcs.pixel_to_celestial(49.0, 49.0).is_ok());
+    assert!(
+        wcs.pixel_to_celestial(0.0, 0.0).is_err(),
+        "single-point calls keep reporting the diagnostic"
+    );
+
+    let pts = [(49.0, 49.0), (0.0, 0.0), (50.0, 49.0)];
+    let out = wcs
+        .pixel_to_celestial_many(&pts)
+        .expect("one bad point must not fail the batch");
+    assert_eq!(out.len(), 3);
+    assert!(out[0].0.is_finite() && out[0].1.is_finite());
+    assert!(out[1].0.is_nan() && out[1].1.is_nan());
+    assert!(out[2].0.is_finite() && out[2].1.is_finite());
+
+    // Same on the inverse: a sky position in the far hemisphere.
+    let sky = [(45.0, 30.0), (225.0, -30.0), (45.5, 30.0)];
+    let back = wcs
+        .celestial_to_pixel_many(&sky)
+        .expect("one bad point must not fail the batch");
+    assert_eq!(back.len(), 3);
+    assert!(back[0].0.is_finite() && back[0].1.is_finite());
+    assert!(back[1].0.is_nan() && back[1].1.is_nan());
+    assert!(back[2].0.is_finite() && back[2].1.is_finite());
+}
+
+/// A WCS with no celestial pair is a whole-batch failure, not a
+/// row of NaNs -- the batch helpers must still return `Err` there.
+#[test]
+fn batch_transforms_still_error_without_a_celestial_pair() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'WAVE'".into(),
+        "CTYPE2  = 'TIME'".into(),
+        "CRPIX1  =                  1.0".into(),
+        "CRPIX2  =                  1.0".into(),
+        "CRVAL1  =                  0.0".into(),
+        "CRVAL2  =                  0.0".into(),
+        "CDELT1  =                  1.0".into(),
+        "CDELT2  =                  1.0".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert!(wcs.pixel_to_celestial_many(&[(0.0, 0.0)]).is_err());
+    assert!(wcs.celestial_to_pixel_many(&[(0.0, 0.0)]).is_err());
+}
+
+/// Every projection, with its parameters and both pole conventions,
+/// must survive `to_header` -> re-parse unchanged.
+///
+/// Regression: `to_header` used to drop the projection's `PVi_m`
+/// table and LONPOLE/LATPOLE entirely. Parameterless projections
+/// looked fine, which is why it went unnoticed; the parameterised
+/// ones either drifted by degrees or failed to re-parse at all.
+#[test]
+fn to_header_round_trips_every_projection() {
+    /// `(code, extra PV2 cards)` -- the parameters each projection
+    /// needs to be well-defined.
+    const CASES: &[(&str, &[(&str, f64)])] = &[
+        ("AZP", &[("PV2_1", 2.0), ("PV2_2", 30.0)]),
+        ("SZP", &[("PV2_1", 2.0), ("PV2_2", 180.0), ("PV2_3", 60.0)]),
+        ("TAN", &[]),
+        ("STG", &[]),
+        ("SIN", &[("PV2_1", 0.3), ("PV2_2", -0.2)]),
+        ("ARC", &[]),
+        ("ZPN", &[("PV2_1", 1.0), ("PV2_3", 220.0)]),
+        ("ZEA", &[]),
+        ("AIR", &[("PV2_1", 45.0)]),
+        // CYP with mu = 1, lambda = 1/sqrt(2) is the Gall
+        // stereographic case from Paper II Sec.5.2.1.
+        (
+            "CYP",
+            &[("PV2_1", 1.0), ("PV2_2", std::f64::consts::FRAC_1_SQRT_2)],
+        ),
+        ("CEA", &[("PV2_1", 0.75)]),
+        ("CAR", &[]),
+        ("MER", &[]),
+        ("SFL", &[]),
+        ("PAR", &[]),
+        ("MOL", &[]),
+        ("AIT", &[]),
+        ("COP", &[("PV2_1", 45.0), ("PV2_2", 25.0)]),
+        ("COE", &[("PV2_1", 45.0), ("PV2_2", 25.0)]),
+        ("COD", &[("PV2_1", 45.0), ("PV2_2", 25.0)]),
+        ("COO", &[("PV2_1", 45.0), ("PV2_2", 25.0)]),
+        ("BON", &[("PV2_1", 45.0)]),
+        ("PCO", &[]),
+        ("TSC", &[]),
+        ("CSC", &[]),
+        ("QSC", &[]),
+        ("HPX", &[("PV2_1", 4.0), ("PV2_2", 3.0)]),
+        ("XPH", &[]),
+    ];
+    // `None` exercises the Paper II defaults; the explicit values
+    // exercise the branch-selection LATPOLE controls, which matters
+    // for every theta0 = 0 projection.
+    const POLES: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(150.0), None),
+        (None, Some(-30.0)),
+        (Some(150.0), Some(-30.0)),
+    ];
+
+    let probes = [
+        (0.0, 0.0),
+        (25.0, 60.0),
+        (99.0, 99.0),
+        (150.0, 30.0),
+        (199.0, 199.0),
+    ];
+    let mut checked = 0;
+    for (code, pvs) in CASES {
+        for (lonpole, latpole) in POLES {
+            let mut cards: Vec<String> = vec![
+                format!("CTYPE1  = 'RA---{code}'"),
+                format!("CTYPE2  = 'DEC--{code}'"),
+                "CRPIX1  =                 50.5".into(),
+                "CRPIX2  =                 40.25".into(),
+                "CRVAL1  =                 45.0".into(),
+                "CRVAL2  =                 30.0".into(),
+                "CDELT1  =                -0.05".into(),
+                "CDELT2  =                 0.05".into(),
+                "CUNIT1  = 'deg'".into(),
+                "CUNIT2  = 'deg'".into(),
+            ];
+            for (k, v) in *pvs {
+                cards.push(format!("{k:<8}= {v:>20}"));
+            }
+            if let Some(lp) = lonpole {
+                cards.push(format!("LONPOLE = {lp:>20}"));
+            }
+            if let Some(tp) = latpole {
+                cards.push(format!("LATPOLE = {tp:>20}"));
+            }
+
+            // Not every (projection, pole) pair is a legal WCS --
+            // some have no native-pole solution at all. Those are
+            // invalid *inputs*, not serialization failures.
+            let Some(truth) = try_open_image(&cards) else {
+                continue;
+            };
+            let header = truth
+                .to_header(' ')
+                .unwrap_or_else(|e| panic!("{code} lonpole={lonpole:?} latpole={latpole:?}: {e}"));
+            let round = fitsy::Wcs::from_header(&header, ' ')
+                .unwrap_or_else(|e| {
+                    panic!("{code} lonpole={lonpole:?} latpole={latpole:?} re-parse: {e}")
+                })
+                .expect("serialized header still describes a WCS");
+
+            let mut compared = 0;
+            for (px, py) in probes {
+                let (Ok((ra1, de1)), Ok((ra2, de2))) = (
+                    truth.pixel_to_celestial(px, py),
+                    round.pixel_to_celestial(px, py),
+                ) else {
+                    // Both must agree on being out of domain.
+                    assert_eq!(
+                        truth.pixel_to_celestial(px, py).is_ok(),
+                        round.pixel_to_celestial(px, py).is_ok(),
+                        "{code} lonpole={lonpole:?} latpole={latpole:?}: domain differs at ({px},{py})"
+                    );
+                    continue;
+                };
+                assert!(
+                    (ra1 - ra2).abs() < 1e-11 && (de1 - de2).abs() < 1e-11,
+                    "{code} lonpole={lonpole:?} latpole={latpole:?} drifted at ({px},{py}): \
+                     ({ra1},{de1}) vs ({ra2},{de2})"
+                );
+                compared += 1;
+            }
+            assert!(
+                compared > 0,
+                "{code} lonpole={lonpole:?} latpole={latpole:?}: every probe was out of \
+                 domain, so the comparison proved nothing"
+            );
+            checked += 1;
+        }
+    }
+    // Guard against the skip above quietly hollowing the test out.
+    assert!(
+        checked >= CASES.len() * 2,
+        "only {checked} configurations were actually round-tripped"
+    );
+}
+
+/// Paper II eq. (9) has two `delta_p` roots and `LATPOLE` picks
+/// between them. Getting that choice wrong mirrors the sky by several
+/// degrees while still round-tripping perfectly through our own
+/// serializer, so it needs pinning explicitly.
+///
+/// Two regressions are pinned here:
+///
+/// 1. The candidates were not wrapped into `(-pi, pi]`, so with
+///    `LONPOLE = 180` one root came out near `345deg` and was
+///    discarded as "outside [-90, 90]" -- it is the `-15deg`
+///    solution. The surviving root mirrors the sky: 21000 arcsec of
+///    error on the `CYP` header this was found with.
+/// 2. An exact tie (`LATPOLE` equidistant from both roots, e.g. 0
+///    with roots at `+/-60`) went to `arg + acos`; the established
+///    convention takes `arg - acos`.
+#[test]
+fn native_pole_root_selection_resolves_the_documented_root() {
+    // (crval2, lonpole, latpole, expected LATPOLE that `to_header`
+    // should emit). Each is the root Paper II eq. (9) selects for
+    // that LATPOLE, cross-checked against a reference implementation.
+    const CASES: &[(f64, f64, Option<f64>, f64)] = &[
+        // Wrapping: LONPOLE = 180 puts `arg + acos` past pi.
+        (-75.0, 180.0, Some(-90.0), -15.0),
+        (-75.0, 180.0, Some(-30.0), -15.0),
+        // Exact tie, roots at +/-60. Only ties with a stable answer
+        // are pinned: the standard leaves the equidistant case to
+        // Paper II, and reference implementations decide it on their
+        // own rounding (nudging CRVAL2 by 1e-13 deg flips the answer
+        // for `crval2 = -30, LONPOLE = 180`), so there is no rule to
+        // match there.
+        (30.0, 0.0, Some(0.0), -60.0),
+        (-45.0, 180.0, Some(0.0), 45.0),
+        // Just off the tie, either side.
+        (30.0, 0.0, Some(1.0), 60.0),
+        (30.0, 0.0, Some(-1.0), -60.0),
+        // Absent LATPOLE defaults to +90, so the northerly root wins.
+        (30.0, 0.0, None, 60.0),
+        (-30.0, 180.0, None, 60.0),
+    ];
+    for &(crval2, lonpole, latpole, want) in CASES {
+        let mut cards: Vec<String> = vec![
+            "CTYPE1  = 'RA---CAR'".into(),
+            "CTYPE2  = 'DEC--CAR'".into(),
+            "CRPIX1  =                  4.0".into(),
+            "CRPIX2  =                  4.0".into(),
+            "CRVAL1  =                 45.0".into(),
+            format!("CRVAL2  = {crval2:>20}"),
+            "CDELT1  =                -0.05".into(),
+            "CDELT2  =                 0.05".into(),
+            "CUNIT1  = 'deg'".into(),
+            "CUNIT2  = 'deg'".into(),
+            format!("LONPOLE = {lonpole:>20}"),
+        ];
+        if let Some(lp) = latpole {
+            cards.push(format!("LATPOLE = {lp:>20}"));
+        }
+        let wcs = open_image(&cards);
+        let got = wcs.to_header(' ').unwrap();
+        let Some(fitsy::Value::Real(got)) = got.first("LATPOLE") else {
+            panic!("to_header emitted no LATPOLE");
+        };
+        assert!(
+            (got - want).abs() < 1e-9,
+            "crval2={crval2} lonpole={lonpole} latpole={latpole:?}: \
+             resolved LATPOLE {got}, expected {want}"
+        );
+    }
+}
+
+/// A spectral axis may specify its rest quantity as `RESTWAV`
+/// *or* `RESTFRQ`; `SpectralAxis::new` accepts either. The transform
+/// code then demanded `RESTFRQ` specifically in two places.
+///
+/// Regression: `WAVE-V2W` with only `RESTWAV` **panicked** (an
+/// `.expect("validated in new()")` on `restfrq`), and the inverse
+/// returned a spurious "RESTFRQ required" error. Both now derive the
+/// rest frequency from whichever quantity was supplied.
+#[test]
+fn spectral_accepts_restwav_alone() {
+    for ctype in ["WAVE-V2W", "FREQ-V2F"] {
+        let cards: Vec<String> = vec![
+            "CTYPE1  = 'RA---TAN'".into(),
+            "CTYPE2  = 'DEC--TAN'".into(),
+            format!("CTYPE3  = '{ctype}'"),
+            "CRPIX1  =                  2.0".into(),
+            "CRPIX2  =                  2.0".into(),
+            "CRPIX3  =                  8.0".into(),
+            "CRVAL1  =                 45.0".into(),
+            "CRVAL2  =                 30.0".into(),
+            if ctype.starts_with("WAVE") {
+                "CRVAL3  =                 0.21".into()
+            } else {
+                "CRVAL3  =              1.4E+09".into()
+            },
+            "CDELT1  =              -1.0E-03".into(),
+            "CDELT2  =               1.0E-03".into(),
+            if ctype.starts_with("WAVE") {
+                "CDELT3  =               1.0E-06".into()
+            } else {
+                "CDELT3  =               1.0E+04".into()
+            },
+            "CUNIT1  = 'deg'".into(),
+            "CUNIT2  = 'deg'".into(),
+            if ctype.starts_with("WAVE") {
+                "CUNIT3  = 'm'".into()
+            } else {
+                "CUNIT3  = 'Hz'".into()
+            },
+            // RESTWAV only -- no RESTFRQ anywhere in the header.
+            "RESTWAV =    0.211061140542".into(),
+        ];
+        let wcs = open_image_3d(&cards);
+        let forward = wcs
+            .pixel_to_world(&[1.0, 1.0, 3.0])
+            .unwrap_or_else(|e| panic!("{ctype} forward with RESTWAV only: {e}"));
+        assert!(
+            forward[2].is_finite(),
+            "{ctype}: spectral axis came back non-finite"
+        );
+        // And the inverse, which had its own RESTFRQ-only guard.
+        let back = wcs
+            .world_to_pixel(&[forward[0], forward[1], forward[2]])
+            .unwrap_or_else(|e| panic!("{ctype} inverse with RESTWAV only: {e}"));
+        assert!(
+            (back[2] - 3.0).abs() < 1e-6,
+            "{ctype}: spectral round-trip gave pixel {}, want 3",
+            back[2]
+        );
+    }
+}
+
+/// A spectral axis must survive `to_header` -> re-parse.
+///
+/// `to_header` used to refuse outright for anything spectral; now it
+/// writes the rest quantity and leans on CTYPE/CUNIT/CRVAL for the
+/// rest. This pins that the four together really do reconstruct the
+/// axis, for both the RESTFRQ and the RESTWAV spellings.
+#[test]
+fn to_header_round_trips_spectral_axes() {
+    for (ctype, cunit, crval, cdelt, rest) in [
+        (
+            "VOPT-F2W",
+            "m/s",
+            "1.0E+04",
+            "1.0E+03",
+            "RESTFRQ =        1.420405752E9",
+        ),
+        (
+            "WAVE-V2W",
+            "m",
+            "0.21",
+            "1.0E-06",
+            "RESTWAV =    0.211061140542",
+        ),
+        (
+            "FREQ-V2F",
+            "Hz",
+            "1.4E+09",
+            "1.0E+04",
+            "RESTWAV =    0.211061140542",
+        ),
+    ] {
+        let cards: Vec<String> = vec![
+            "CTYPE1  = 'RA---TAN'".into(),
+            "CTYPE2  = 'DEC--TAN'".into(),
+            format!("CTYPE3  = '{ctype}'"),
+            "CRPIX1  =                  2.0".into(),
+            "CRPIX2  =                  2.0".into(),
+            "CRPIX3  =                  8.0".into(),
+            "CRVAL1  =                 45.0".into(),
+            "CRVAL2  =                 30.0".into(),
+            format!("CRVAL3  = {crval:>20}"),
+            "CDELT1  =              -1.0E-03".into(),
+            "CDELT2  =               1.0E-03".into(),
+            format!("CDELT3  = {cdelt:>20}"),
+            "CUNIT1  = 'deg'".into(),
+            "CUNIT2  = 'deg'".into(),
+            format!("CUNIT3  = '{cunit}'"),
+            rest.into(),
+        ];
+        let truth = open_image_3d(&cards);
+        let header = truth
+            .to_header(' ')
+            .unwrap_or_else(|e| panic!("{ctype}: to_header: {e}"));
+        let round = fitsy::Wcs::from_header(&header, ' ')
+            .unwrap_or_else(|e| panic!("{ctype}: re-parse: {e}"))
+            .unwrap_or_else(|| panic!("{ctype}: re-parse found no WCS"));
+        for p in [1.0_f64, 4.0, 8.0, 15.0] {
+            let a = truth.pixel_to_world(&[1.0, 1.0, p]).unwrap();
+            let b = round.pixel_to_world(&[1.0, 1.0, p]).unwrap();
+            assert!(
+                a[2].is_finite() && (a[2] - b[2]).abs() <= 1e-9 * a[2].abs().max(1.0),
+                "{ctype}: spectral value drifted at pixel {p}: {} vs {}",
+                a[2],
+                b[2]
+            );
+        }
+    }
+}
+
+/// A DSS plate solution must survive `to_header` -> re-parse.
+///
+/// The plate model bypasses the standard pipeline entirely, so the
+/// serialized header carries both a placeholder TAN *and* the
+/// `PLT*`/`AMD*` family; re-parsing has to pick the plate model back
+/// up, and the sexagesimal `PLTRAH/M/S` round trip has to be exact
+/// enough not to move the plate centre.
+#[test]
+fn to_header_round_trips_dss_plate_solution() {
+    let path = test_data_dir().join("dss_plate.fits");
+    let bytes = std::fs::read(&path).expect("dss_plate.fits");
+    let file = FitsFile::from_bytes(bytes).unwrap();
+    let truth = file.wcs(0, ' ').unwrap().expect("DSS header has a WCS");
+    assert!(truth.dss.is_some(), "fixture is not a DSS plate");
+
+    let header = truth.to_header(' ').expect("to_header");
+    let round = fitsy::Wcs::from_header(&header, ' ')
+        .expect("re-parse")
+        .expect("re-parse found no WCS");
+    assert!(
+        round.dss.is_some(),
+        "plate solution dropped; the re-parsed WCS fell back to the placeholder TAN"
+    );
+    for &(px, py) in &[
+        (1.0_f64, 1.0_f64),
+        (500.0, 500.0),
+        (1060.0, 1060.0),
+        (2000.0, 2000.0),
+        (100.0, 2000.0),
+    ] {
+        let a = truth.pixel_to_world(&[px, py]).unwrap();
+        let b = round.pixel_to_world(&[px, py]).unwrap();
+        assert!(
+            near(a[0], b[0], 1e-9) && near(a[1], b[1], 1e-9),
+            "DSS round-trip drifted at ({px},{py}): {a:?} vs {b:?}"
+        );
+    }
+}
+
+/// `-TAB` lookups must stop extrapolating half a sample step past the
+/// table, per Paper III Sec.6.1.2 ("the value of `Upsilon_m` derived
+/// from `psi_m` must lie in the range `0.5 <= Upsilon_m <= K + 0.5`").
+///
+/// Regression: extrapolation was unbounded, so a pixel well outside
+/// the table received a confidently wrong coordinate instead of an
+/// error.
+#[test]
+fn tab_axis_extrapolation_is_bounded() {
+    use fitsy::{BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder, Value};
+
+    let wavelens: [f64; 5] = [4000.0, 4500.0, 5500.0, 7000.0, 9000.0];
+    let mut primary = ImageBuilder::<f32>::new(vec![2, 2, 5], vec![0.0_f32; 20])
+        .unwrap()
+        .primary(true);
+    for (k, v) in [
+        ("CTYPE1", Value::String("X".into())),
+        ("CTYPE2", Value::String("Y".into())),
+        ("CTYPE3", Value::String("WAVE-TAB".into())),
+        ("CRPIX1", Value::Real(1.0)),
+        ("CRPIX2", Value::Real(1.0)),
+        ("CRPIX3", Value::Real(1.0)),
+        ("CRVAL1", Value::Real(0.0)),
+        ("CRVAL2", Value::Real(0.0)),
+        ("CRVAL3", Value::Real(1.0)),
+        ("CDELT1", Value::Real(1.0)),
+        ("CDELT2", Value::Real(1.0)),
+        ("CDELT3", Value::Real(1.0)),
+        ("PS3_0", Value::String("WCS-TAB".into())),
+        ("PS3_1", Value::String("WAVELEN".into())),
+        ("PV3_1", Value::Integer(1)),
+    ] {
+        primary = primary.card(k, v, None);
+    }
+    let primary = primary.build().unwrap();
+
+    let mut bt = BinTableBuilder::new();
+    bt.add_column("WAVELEN", BinFieldKind::F64, 5, Some("Angstrom"), None)
+        .unwrap();
+    let mut row = Vec::new();
+    for w in wavelens {
+        row.extend_from_slice(&w.to_bits().to_be_bytes());
+    }
+    let (mut th, td) = bt.build(1, row).unwrap();
+    th.push("EXTNAME", Value::String("WCS-TAB".into()), None)
+        .unwrap();
+    th.push("EXTVER", Value::Integer(1), None).unwrap();
+
+    let mut buf = Vec::new();
+    let mut w = FitsWriter::new(&mut buf);
+    w.write_hdu(&primary.0, &primary.1).unwrap();
+    w.write_hdu(&th, &td).unwrap();
+    w.finish().unwrap();
+    let file = FitsFile::from_bytes(buf).unwrap();
+    let wcs = file.wcs(0, ' ').unwrap().expect("WCS present");
+
+    // 0-based pixel p maps to psi = 1 + p, so the table spans p in
+    // 0..=4 and the permitted half-step margin reaches p = -0.5 and
+    // p = 4.5.
+    for p in [0.0, 2.0, 4.0, -0.5, 4.5, -0.4999, 4.4999] {
+        assert!(
+            wcs.pixel_to_world(&[0.0, 0.0, p]).is_ok(),
+            "pixel {p} is inside the table or its half-step margin"
+        );
+    }
+    for p in [-0.5001, 4.5001, -3.0, 9.0] {
+        assert!(
+            wcs.pixel_to_world(&[0.0, 0.0, p]).is_err(),
+            "pixel {p} is outside the table and must not be extrapolated"
+        );
+    }
+    // The margin endpoints extrapolate linearly from the end segment.
+    let lo = wcs.pixel_to_world(&[0.0, 0.0, -0.5]).unwrap()[2];
+    assert!(
+        (lo - 3750.0).abs() < 1e-9,
+        "lower margin should extrapolate to 3750, got {lo}"
+    );
 }

@@ -385,7 +385,18 @@ impl PyWcs {
     /// Returns
     /// -------
     /// numpy.ndarray
-    ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees.
+    ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees. Pixels
+    ///   outside the projection's valid domain come back as ``nan``
+    ///   rather than aborting the call, matching ``astropy.wcs``;
+    ///   mask them with ``numpy.isfinite`` if you need to.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   Only for whole-WCS problems -- no celestial axis pair, or
+    ///   unresolved ``-TAB`` axes. Use :meth:`pixel_to_celestial` on
+    ///   a single point to get a diagnostic for an individual
+    ///   out-of-domain coordinate.
     #[pyo3(signature = (pixels, origin=0))]
     fn pixel_to_celestial_many<'py>(
         &self,
@@ -432,7 +443,17 @@ impl PyWcs {
     /// Returns
     /// -------
     /// numpy.ndarray
-    ///   Shape ``(N, 2)`` array of pixel coordinates.
+    ///   Shape ``(N, 2)`` array of pixel coordinates. Sky positions
+    ///   the projection cannot represent come back as ``nan``
+    ///   rather than aborting the call, matching ``astropy.wcs``.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   Only for whole-WCS problems -- no celestial axis pair, or
+    ///   unresolved ``-TAB`` axes. Use :meth:`celestial_to_pixel` on
+    ///   a single point to get a diagnostic for an individual
+    ///   out-of-domain coordinate.
     #[pyo3(signature = (sky, origin=0))]
     fn celestial_to_pixel_many<'py>(
         &self,
@@ -472,6 +493,20 @@ impl PyWcs {
 
     /// Serialize this WCS to a fresh :class:`Header`.
     ///
+    /// Round-trips: re-parsing the result gives back this WCS.
+    /// Everything the reader understands is written -- the linear
+    /// pipeline, LONPOLE/LATPOLE and the projection's PV parameters,
+    /// SIP, TPV, TNX/ZPX, DSS plate solutions, spectral rest
+    /// quantities, and the ``-TAB`` pointer cards.
+    ///
+    /// Two caveats, both inherent to returning a bare header:
+    ///
+    /// - ``NAXISn`` are emitted as zero placeholders, since a WCS
+    ///   carries no image dimensions. Merge into a header that has
+    ///   the real values.
+    /// - A ``-TAB`` axis names its lookup table by ``EXTNAME``; that
+    ///   BINTABLE is a separate HDU and must be written alongside.
+    ///
     /// Parameters
     /// ----------
     /// alt : str, optional
@@ -480,9 +515,8 @@ impl PyWcs {
     ///
     /// Raises
     /// ------
-    /// ValueError
-    ///   For spectral, ``-TAB``, TPV, TNX or DSS WCSs (not
-    ///   supported on the write path).
+    /// FitsError
+    ///   If ``alt`` is not ``' '`` or ``'A'``-``'Z'``.
     #[pyo3(signature = (alt=' '))]
     fn to_header(&self, alt: char) -> PyResult<PyHeader> {
         let h = self.inner.to_header(alt).into_py_result()?;

@@ -32,6 +32,10 @@ pub(super) fn zenithal_phi_r(x_deg: f64, y_deg: f64) -> (f64, f64) {
 #[derive(Debug, Clone, Copy)]
 pub struct Tan;
 impl Projection for Tan {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         90.0
     }
@@ -63,6 +67,10 @@ impl Projection for Tan {
 #[derive(Debug, Clone, Copy)]
 pub struct Stg;
 impl Projection for Stg {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         90.0
     }
@@ -104,6 +112,9 @@ impl Sin {
 impl Projection for Sin {
     fn theta0(&self) -> f64 {
         90.0
+    }
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.xi), (2, self.eta)]
     }
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         // Paper II eq. (30): x = R_0[costheta*sinphi + xi(1-sintheta)],
@@ -211,6 +222,16 @@ impl Projection for Zpn {
     fn theta0(&self) -> f64 {
         90.0
     }
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        // `coeffs[m]` is PV2_m directly. Trailing zeros are dropped;
+        // the parser zero-fills, and `from_pv` rejects an all-zero
+        // table, so at least one term always survives.
+        let last = self.coeffs.iter().rposition(|c| *c != 0.0);
+        match last {
+            Some(n) => (0..=n).map(|m| (m as u32, self.coeffs[m])).collect(),
+            None => Vec::new(),
+        }
+    }
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let zeta = (90.0 - theta) * D2R;
         let r = R2D * self.eval(zeta);
@@ -286,6 +307,9 @@ impl Projection for Azp {
     fn theta0(&self) -> f64 {
         90.0
     }
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.mu), (2, self.gamma)]
+    }
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let p = phi * D2R;
         let t = theta * D2R;
@@ -325,6 +349,10 @@ impl Projection for Azp {
 #[derive(Debug, Clone, Copy)]
 pub struct Arc;
 impl Projection for Arc {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         90.0
     }
@@ -343,6 +371,10 @@ impl Projection for Arc {
 #[derive(Debug, Clone, Copy)]
 pub struct Zea;
 impl Projection for Zea {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         90.0
     }
@@ -402,6 +434,9 @@ impl Szp {
 impl Projection for Szp {
     fn theta0(&self) -> f64 {
         90.0
+    }
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.mu), (2, self.phi_c), (3, self.theta_c)]
     }
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let p = phi * D2R;
@@ -504,6 +539,9 @@ impl Air {
 impl Projection for Air {
     fn theta0(&self) -> f64 {
         90.0
+    }
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        vec![(1, self.theta_b)]
     }
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         if theta <= -90.0 + 1e-12 {

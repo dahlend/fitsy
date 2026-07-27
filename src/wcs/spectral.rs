@@ -237,7 +237,7 @@ impl SpectralAxis {
             }
             Some(SpectralAlgorithm::Linear(lin)) => {
                 let f_r = self.f_at_reference()?;
-                let x_r = self.linearised_from_freq(lin, f_r);
+                let x_r = self.linearised_from_freq(lin, f_r)?;
                 let dxds = self.dxds_at_reference(lin, f_r)?;
                 let x = x_r + dxds * w_si;
                 let f = self.freq_from_linearised(lin, x)?;
@@ -263,10 +263,10 @@ impl SpectralAxis {
             }
             Some(SpectralAlgorithm::Linear(lin)) => {
                 let f_r = self.f_at_reference()?;
-                let x_r = self.linearised_from_freq(lin, f_r);
+                let x_r = self.linearised_from_freq(lin, f_r)?;
                 let dxds = self.dxds_at_reference(lin, f_r)?;
                 let f = self.freq_from_s(s_si)?;
-                let x = self.linearised_from_freq(lin, f);
+                let x = self.linearised_from_freq(lin, f)?;
                 if dxds == 0.0 {
                     return Err(FitsError::Wcs(
                         "spectral inverse: dX/dS at reference is zero".into(),
@@ -383,18 +383,24 @@ impl SpectralAxis {
         })
     }
 
-    fn linearised_from_freq(&self, lin: Linearised, f: f64) -> f64 {
-        match lin {
+    fn linearised_from_freq(&self, lin: Linearised, f: f64) -> Result<f64> {
+        Ok(match lin {
             Linearised::Freq => f,
             Linearised::Wave => SPEED_OF_LIGHT / f,
             Linearised::Velo => {
                 // Apparent velocity of radiation at frequency f
                 // relative to the rest frequency, m/s.
-                let f0 = self.restfrq.expect("validated in new()");
+                //
+                // `rest_freq()`, not `self.restfrq`: `new()` only
+                // guarantees that *one* of RESTFRQ / RESTWAV is
+                // present, so a header giving only RESTWAV (legal for
+                // e.g. `WAVE-V2W`) has `restfrq == None` and used to
+                // panic here.
+                let f0 = self.rest_freq()?;
                 let r2 = (f / f0).powi(2);
                 SPEED_OF_LIGHT * (1.0 - r2) / (1.0 + r2)
             }
-        }
+        })
     }
 
     fn freq_from_linearised(&self, lin: Linearised, x: f64) -> Result<f64> {
@@ -415,9 +421,11 @@ impl SpectralAxis {
                         "spectral: linearised |v| must be < c".into(),
                     ));
                 }
-                let f0 = self.restfrq.ok_or_else(|| {
-                    FitsError::Wcs("spectral V2*: RESTFRQ required to invert".into())
-                })?;
+                // `rest_freq()`, not `self.restfrq`: RESTWAV alone is
+                // a legal way to specify the rest quantity and
+                // `new()` accepts it, so demanding RESTFRQ here
+                // rejected headers the parser had already approved.
+                let f0 = self.rest_freq()?;
                 f0 * ((1.0 - beta) / (1.0 + beta)).sqrt()
             }
         })

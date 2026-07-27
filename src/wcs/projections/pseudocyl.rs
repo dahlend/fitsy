@@ -13,6 +13,10 @@ use crate::wcs::{D2R, R2D};
 #[derive(Debug, Clone, Copy)]
 pub struct Sfl;
 impl Projection for Sfl {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -34,6 +38,10 @@ impl Projection for Sfl {
 #[derive(Debug, Clone, Copy)]
 pub struct Par;
 impl Projection for Par {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -63,6 +71,10 @@ impl Projection for Par {
 #[derive(Debug, Clone, Copy)]
 pub struct Mol;
 impl Projection for Mol {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }
@@ -112,6 +124,10 @@ impl Projection for Mol {
 #[derive(Debug, Clone, Copy)]
 pub struct Ait;
 impl Projection for Ait {
+    fn pv2(&self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
+
     fn theta0(&self) -> f64 {
         0.0
     }

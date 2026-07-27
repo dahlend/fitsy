@@ -634,7 +634,7 @@ fn wcs_for_standard_row(row: &HashMap<String, String>) -> fitsy::Wcs {
 ///   - The reference pixel (CRPIX) maps to CRVAL via `pixel_to_world`.
 ///   - `world_to_pixel(ra, dec)` recovers the stored pixel within 1e-8 px.
 #[test]
-fn standard_projections_match_astropy() {
+fn standard_projections_match_reference() {
     let path = test_data_dir().join("wcs_standard.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "CSV is empty");
@@ -708,7 +708,7 @@ fn standard_projections_match_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in standard_projections_match_astropy:\n  {}",
+        "{} failure(s) in standard_projections_match_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -720,7 +720,7 @@ fn standard_projections_match_astropy() {
 ///   - The reference pixel maps to CRVAL.
 ///   - `world_to_pixel(ra, dec)` recovers the stored pixel within 1e-8 px.
 #[test]
-fn sip_matches_astropy() {
+fn sip_matches_reference() {
     let path = test_data_dir().join("wcs_sip.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "SIP CSV is empty");
@@ -799,7 +799,7 @@ fn sip_matches_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in sip_matches_astropy:\n  {}",
+        "{} failure(s) in sip_matches_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -813,7 +813,7 @@ fn sip_matches_astropy() {
 ///     (iterative Newton inverse; astropy's wcslib solver also uses 30
 ///     iterations and accepts up to 1e-10 px residual so 1e-5 is generous).
 #[test]
-fn tpv_matches_astropy() {
+fn tpv_matches_reference() {
     let path = test_data_dir().join("wcs_tpv.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "TPV CSV is empty");
@@ -829,7 +829,7 @@ fn tpv_matches_astropy() {
         f(row0, "cdelt1"),
         f(row0, "cdelt2"),
     );
-    // Only set non-zero / non-default PV terms (see gen_wcs_test_data.py).
+    // Only set non-zero / non-default PV terms (see `gen_wcs_test_data.py`).
     cards.extend([
         format!("PV1_1   = {:>20e}", f(row0, "pv1_1")),
         format!("PV1_4   = {:>20e}", f(row0, "pv1_4")),
@@ -883,7 +883,7 @@ fn tpv_matches_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in tpv_matches_astropy:\n  {}",
+        "{} failure(s) in tpv_matches_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -1476,7 +1476,7 @@ fn unresolved_tab_axis_errors_on_use() {
     assert!(format!("{err}").contains("unresolved -TAB"), "got: {err}");
 }
 
-// -- Edge-case projections vs astropy/WCSLIB -------------------------------
+// -- Edge-case projections against reference values -------------------------
 
 /// Build a `Wcs` for one row of `wcs_edgecases.csv` (per-row CRVAL/CDELT,
 /// optional `PV2_1`/`PV2_2` and `LONPOLE`).
@@ -1504,13 +1504,13 @@ fn wcs_for_edge_row(row: &HashMap<String, String>) -> fitsy::Wcs {
     open_image(&cards)
 }
 
-/// Reference values from astropy/WCSLIB in regions the standard grid never
+/// Reference values (see `gen_wcs_test_data.py`) in regions the standard grid never
 /// reaches: HPX polar zone (incl. defaulted H/K), XPH away from the pole,
 /// quad-cube faces 2-4, slant SIN (`PV2_1`/`PV2_2` != 0), and nonstandard
 /// `LONPOLE` (incl. the degenerate `delta_p` = +/-90 branch). Both directions
 /// are checked; forward/inverse bugs that cancel in round-trips fail here.
 #[test]
-fn edge_case_projections_match_astropy() {
+fn edge_case_projections_match_reference() {
     let path = test_data_dir().join("wcs_edgecases.csv");
     let rows = parse_csv(&path);
     assert!(!rows.is_empty(), "CSV is empty");
@@ -1575,7 +1575,7 @@ fn edge_case_projections_match_astropy() {
 
     assert!(
         failures.is_empty(),
-        "{} failure(s) in edge_case_projections_match_astropy:\n  {}",
+        "{} failure(s) in edge_case_projections_match_reference:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );

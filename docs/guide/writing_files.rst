@@ -1,9 +1,10 @@
 Writing FITS files
 ==================
 
-Three builder functions convert numpy / Python data into HDU specs:
+Four builder functions convert numpy / Python data into HDU specs:
 
 * :func:`fitsy.image` -- image HDUs from a numpy array
+* :func:`fitsy.compressed_image` -- tile-compressed image HDUs
 * :func:`fitsy.bintable` -- BINTABLE from a column dict
 * :func:`fitsy.ascii_table` -- ASCII TABLE from a column dict
 
@@ -26,8 +27,10 @@ Pass ``overwrite=True`` to replace it.
 Headers
 -------
 
-The ``header`` argument to :func:`fitsy.image` accepts a plain
-``dict``. Values may be scalars or ``(value, comment)`` tuples.
+The ``header`` argument to :func:`fitsy.image`,
+:func:`fitsy.compressed_image`, and :func:`fitsy.append` accepts
+either a :class:`fitsy.Header` or a plain ``dict``. Dict values may be
+scalars or ``(value, comment)`` tuples.
 
 Pixel scaling on write (``BSCALE`` / ``BZERO``)
 -----------------------------------------------

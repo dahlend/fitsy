@@ -52,8 +52,10 @@ fn header_has_wcs(h: &PyHeader) -> bool {
 /// * `"update"` -- read/write handle; in-place edits are preserved on
 ///   `writeto`.
 ///
-/// Astropy's `"append"`, `"denywrite"` and `"ostream"` are not
-/// implemented; pass `fitsy.write` instead for output-only workflows.
+/// `"denywrite"` is accepted as a synonym for `"readonly"` (we honour
+/// the read-only intent but do not take an OS-level lock). Astropy's
+/// `"append"` and `"ostream"` are not implemented; pass `fitsy.write`
+/// instead for output-only workflows.
 fn parse_mode(mode: &str) -> PyResult<bool> {
     match mode {
         // 'denywrite' is astropy's stricter readonly (no other
@@ -839,15 +841,27 @@ impl PyFitsFile {
     ///
     /// Notes
     /// -----
-    /// Only the target HDU's header is consulted; ``-TAB`` axis
-    /// tables stored in sibling HDUs are not currently resolved.
+    /// ``-TAB`` axes (Paper III Sec.6) are resolved against the
+    /// binary table their ``PSi_0`` / ``PVi_1`` cards name, which is
+    /// what :meth:`ImageHdu.wcs` -- header-only -- cannot do. The
+    /// lookup runs against the file this handle was opened from; a
+    /// handle built in memory, or one whose table extension was
+    /// added after opening, has nothing to resolve against and the
+    /// axis stays unresolved (using it then raises).
     #[pyo3(signature = (i=0, alt=' '))]
     fn wcs(&self, py: Python<'_>, i: usize, alt: char) -> PyResult<Option<PyWcs>> {
         let hdu = self.hdu(py, i)?;
         let bound = hdu.bind(py);
         let header: PyHeader = bound.getattr("header")?.extract()?;
         let wcs = crate::wcs::Wcs::from_header(&header.lock(), alt).into_py_result()?;
-        Ok(wcs.map(PyWcs::from))
+        let Some(mut wcs) = wcs else { return Ok(None) };
+        // `hdu()` above took and released the state lock; safe to
+        // re-take it here.
+        let backing = self.lock_state().file.clone();
+        if let Some(file) = backing {
+            wcs.resolve_tab(&file).into_py_result()?;
+        }
+        Ok(Some(PyWcs::from(wcs)))
     }
 
     /// Write the file (with all in-memory edits) to ``path``.

@@ -27,7 +27,7 @@ dependencies = ["numpy>=1.23"]
 [project.urls]
 Homepage = "https://github.com/dahlend/fitsy"
 Repository = "https://github.com/dahlend/fitsy"
-Documentation = "https://github.com/dahlend/fitsy#readme"
+Documentation = "https://dahlend.github.io/fitsy/"
 Changelog = "https://github.com/dahlend/fitsy/blob/main/CHANGELOG.md"
 Issues = "https://github.com/dahlend/fitsy/issues"
 
@@ -55,11 +55,14 @@ target-version = ["py310"]
 
 [tool.maturin]
 features = ["python"]
-module-name = "fitsy"
+module-name = "fitsy.fitsy"
+# Mixed layout: `python/fitsy/` is copied into the wheel and the
+# compiled extension is placed inside it. This is what puts
+# `__init__.pyi` and the PEP 561 `py.typed` marker *within* the
+# installed package -- `include = [...]` cannot, because its paths are
+# relative to the wheel root, so the stubs landed in a top-level
+# `stubs/` directory that no type checker ever looks at.
+python-source = "python"
 # Symbols are stripped via `[profile.release] strip` in Cargo.toml, not
 # here: maturin's own `strip` conflicts with the debuginfo flag that
 # `maturin develop` passes, which breaks the documented dev workflow.
-include = [
-    { path = "stubs/fitsy.pyi", format = "wheel" },
-    { path = "stubs/py.typed", format = "wheel" },
-]

@@ -128,6 +128,21 @@ impl IsoDateTime {
 
     /// Proleptic Gregorian MJD. Accuracy is limited by `f64` to ~30 us near
     /// MJD 50 000.
+    ///
+    /// # Leap seconds
+    ///
+    /// Every day is treated as exactly 86400 seconds, so a UTC day
+    /// carrying a leap second is compressed: `23:59:60` reports the
+    /// same MJD as the following midnight, and stamps earlier that day
+    /// sit one second later than a reader that stretches the day to
+    /// 86401 seconds (`astropy.time` does the latter). This is the
+    /// unavoidable ambiguity of labelling UTC with a real number --
+    /// UTC is not a uniform scale.
+    ///
+    /// It affects only the ~27 days in history that carry a leap
+    /// second, and only the *label*: [`Self::mjd_tai`] resolves each
+    /// stamp on those days to the correct, distinct TAI instant.
+    /// Prefer TAI for any arithmetic that crosses one.
     #[must_use]
     pub fn mjd(&self) -> f64 {
         // Fliegel & Van Flandern (1968) algorithm, as cited by the
@@ -152,27 +167,80 @@ impl IsoDateTime {
     /// TAI - UTC offset at this timestamp. See [`tai_minus_utc_at`].
     #[must_use]
     pub fn tai_minus_utc(&self) -> i32 {
-        tai_minus_utc_at(self.mjd())
+        // A `23:59:60` stamp is *inside* the inserted second. It
+        // belongs to the day it is written on -- the step to the new
+        // offset happens at the following midnight -- but [`Self::mjd`]
+        // necessarily reports it as that midnight, since a real-valued
+        // UTC MJD has no room for a 86401st second. Looking the offset
+        // up at that MJD would pick the post-step value and place the
+        // instant one second late in TAI, so evaluate at the start of
+        // the stamp's own day instead, which is unambiguously before
+        // the step.
+        let at = if self.second == 60 {
+            Self {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                frac_second: 0.0,
+                ..*self
+            }
+            .mjd()
+        } else {
+            self.mjd()
+        };
+        tai_minus_utc_at(at)
     }
 
     /// This UTC timestamp as TAI MJD.
+    ///
+    /// TAI is uniform, so this is the value to compare or difference
+    /// across a leap second; [`Self::mjd`] is a UTC *label* and is
+    /// deliberately not uniform (see that method's note).
     #[must_use]
     pub fn mjd_tai(&self) -> f64 {
         self.mjd() + f64::from(self.tai_minus_utc()) / 86_400.0
     }
 }
 
+/// `TDB - TT`, in days, at the given TDB MJD.
+///
+/// TDB and TT differ by a periodic relativistic term of amplitude
+/// ~1.7 ms, dominated by the Earth's orbital eccentricity. Paper IV
+/// Sec.3.1.2 notes the rigorous reduction needs a time ephemeris
+/// (Irwin & Fukushima 1999), which would be a large table for a
+/// library with no other ephemeris need; this is the standard
+/// two-term analytic form from the Astronomical Almanac, good to
+/// ~30 us -- some 50x better than treating TDB as TT outright, which
+/// is what this used to do.
+///
+/// `g` is defined on TT, but TDB and TT agree to 2 ms, far below the
+/// accuracy of the term itself, so feeding it TDB is harmless.
+fn tdb_minus_tt_days(mjd_tdb: f64) -> f64 {
+    // MJD 51544.5 == JD 2451545.0 == J2000.0.
+    let g = (357.53 + 0.985_600_3 * (mjd_tdb - 51544.5)).to_radians();
+    (0.001_658 * g.sin() + 0.000_014 * (2.0 * g).sin()) / 86_400.0
+}
+
 /// Convert an MJD in the given `TIMESYS` scale to UTC MJD.
 /// Returns `None` for scales that have no closed-form UTC reduction (`LOCAL`, `UT1`).
 fn mjd_to_utc(mjd: f64, timesys: &str) -> Option<f64> {
     let mjd_tai = |m: f64| m - f64::from(tai_minus_utc_at(m)) / 86_400.0;
+    // TT -> UTC. TAI = TT - 32.184 s exactly (Paper IV Sec.3.1.1).
+    let from_tt = |tt: f64| mjd_tai(tt - 32.184 / 86_400.0);
     Some(match timesys {
         "UTC" | "GMT" => mjd,
         "TAI" | "IAT" => mjd_tai(mjd),
-        "TDB" | "TT" | "TDT" | "ET" => mjd_tai(mjd - 32.184 / 86_400.0),
+        // TDT is the former name of TT; ET is its predecessor and is
+        // conventionally continuous with it.
+        "TT" | "TDT" | "ET" => from_tt(mjd),
+        "TDB" => from_tt(mjd - tdb_minus_tt_days(mjd)),
         "GPS" => mjd_tai(mjd + 19.0 / 86_400.0),
-        "TCG" => mjd_tai(mjd - L_G * (mjd - MJD_0) - 32.184 / 86_400.0),
-        "TCB" => mjd_tai(mjd - L_B * (mjd - MJD_0) + TDB_0_DAYS - 32.184 / 86_400.0),
+        "TCG" => from_tt(mjd - L_G * (mjd - MJD_0)),
+        "TCB" => {
+            // Paper IV Sec.3.1.2: TDB = TCB - L_B*(JD(TCB) - JD_0) + TDB_0.
+            let tdb = mjd - L_B * (mjd - MJD_0) + TDB_0_DAYS;
+            from_tt(tdb - tdb_minus_tt_days(tdb))
+        }
         _ => return None,
     })
 }
