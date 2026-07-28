@@ -30,9 +30,13 @@ impl<'a> ImageHdu<'a> {
         let n_elements: u64 = if axes.is_empty() || axes.contains(&0) {
             0
         } else {
-            axes.iter().product()
+            axes.iter()
+                .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
+                .ok_or_else(|| FitsError::Data("image pixel count overflows u64".into()))?
         };
-        let needed = n_elements * bitpix.byte_size() as u64;
+        let needed = n_elements
+            .checked_mul(bitpix.byte_size() as u64)
+            .ok_or_else(|| FitsError::Data("image data size overflows u64".into()))?;
         if data.len() as u64 != needed {
             return Err(FitsError::Data(format!(
                 "data slice {} bytes does not match expected {needed}",
@@ -86,10 +90,10 @@ impl<'a> ImageHdu<'a> {
             });
         }
         let bsize = self.bitpix.byte_size();
-        let mut out = Vec::with_capacity(self.n_elements as usize);
-        for chunk in self.data.chunks_exact(bsize) {
-            out.push(T::from_be_bytes(chunk));
-        }
+        // `collect` from the `ExactSizeIterator` rather than pushing in a
+        // loop: the per-push capacity check blocks vectorisation and costs
+        // roughly half the decode throughput.
+        let out: Vec<T> = self.data.chunks_exact(bsize).map(T::from_be_bytes).collect();
         ImageData::new(out, self.axes.clone())
     }
 
@@ -146,20 +150,50 @@ impl<'a> ImageHdu<'a> {
             bscale: self.header.bscale(),
             blank: self.header.blank(),
         };
-        let bsize = self.bitpix.byte_size();
-        let mut out = Vec::with_capacity(self.n_elements as usize);
-        for chunk in self.data.chunks_exact(bsize) {
-            let v = match self.bitpix {
-                Bitpix::U8 => scaling.apply_int(i64::from(<u8 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::I16 => scaling.apply_int(i64::from(<i16 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::I32 => scaling.apply_int(i64::from(<i32 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::I64 => scaling.apply_int(<i64 as Pixel>::from_be_bytes(chunk)),
-                Bitpix::F32 => scaling.apply_real(f64::from(<f32 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::F64 => scaling.apply_real(<f64 as Pixel>::from_be_bytes(chunk)),
-            };
-            out.push(v);
-        }
+        let out = self.scaled_pixels(&scaling, |v| v);
         ImageData::new(out, self.axes.clone())
+    }
+
+    /// Decode every pixel with `BZERO`/`BSCALE`/`BLANK` applied, passing
+    /// each through `cast` on the way out.
+    ///
+    /// The `BITPIX` match is hoisted out of the loop so each arm is a
+    /// single monomorphic pass that can vectorise, and `cast` is applied
+    /// during the collect so a narrower output never has to be staged
+    /// through a full-size `f64` buffer first.
+    fn scaled_pixels<T>(&self, scaling: &Scaling, cast: impl Fn(f64) -> T) -> Vec<T> {
+        match self.bitpix {
+            Bitpix::U8 => self
+                .data
+                .iter()
+                .map(|&b| cast(scaling.apply_int(i64::from(b))))
+                .collect(),
+            Bitpix::I16 => self
+                .data
+                .chunks_exact(2)
+                .map(|c| cast(scaling.apply_int(i64::from(<i16 as Pixel>::from_be_bytes(c)))))
+                .collect(),
+            Bitpix::I32 => self
+                .data
+                .chunks_exact(4)
+                .map(|c| cast(scaling.apply_int(i64::from(<i32 as Pixel>::from_be_bytes(c)))))
+                .collect(),
+            Bitpix::I64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| cast(scaling.apply_int(<i64 as Pixel>::from_be_bytes(c))))
+                .collect(),
+            Bitpix::F32 => self
+                .data
+                .chunks_exact(4)
+                .map(|c| cast(scaling.apply_real(f64::from(<f32 as Pixel>::from_be_bytes(c)))))
+                .collect(),
+            Bitpix::F64 => self
+                .data
+                .chunks_exact(8)
+                .map(|c| cast(scaling.apply_real(<f64 as Pixel>::from_be_bytes(c))))
+                .collect(),
+        }
     }
 
     /// Like [`Self::read_physical`] but returns `f32` instead of
@@ -173,23 +207,11 @@ impl<'a> ImageHdu<'a> {
             bscale: self.header.bscale(),
             blank: self.header.blank(),
         };
-        let bsize = self.bitpix.byte_size();
-        let mut out = Vec::with_capacity(self.n_elements as usize);
-        for chunk in self.data.chunks_exact(bsize) {
-            let v = match self.bitpix {
-                Bitpix::U8 => scaling.apply_int(i64::from(<u8 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::I16 => scaling.apply_int(i64::from(<i16 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::I32 => scaling.apply_int(i64::from(<i32 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::I64 => scaling.apply_int(<i64 as Pixel>::from_be_bytes(chunk)),
-                Bitpix::F32 => scaling.apply_real(f64::from(<f32 as Pixel>::from_be_bytes(chunk))),
-                Bitpix::F64 => scaling.apply_real(<f64 as Pixel>::from_be_bytes(chunk)),
-            };
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "documented precision loss is the point of this method"
-            )]
-            out.push(v as f32);
-        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "documented precision loss is the point of this method"
+        )]
+        let out = self.scaled_pixels(&scaling, |v| v as f32);
         ImageData::new(out, self.axes.clone())
     }
 

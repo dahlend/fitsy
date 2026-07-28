@@ -1,6 +1,6 @@
 //! `PyHeader` -- dict-like view of a fitsy `Header`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use pyo3::exceptions::{PyKeyError, PyTypeError};
@@ -108,7 +108,7 @@ pub struct PyHeader {
     /// Python or attached to a builder). When `Some`, every header
     /// mutation flips the bit so `flush()` / `__exit__` know they
     /// must rewrite the file.
-    pub(crate) dirty: Option<Arc<AtomicBool>>,
+    pub(crate) dirty: Option<Arc<crate::python::file::DirtyFlags>>,
 }
 
 impl PyHeader {
@@ -180,7 +180,7 @@ impl PyHeader {
             ));
         }
         if let Some(flag) = &self.dirty {
-            flag.store(true, Ordering::Release);
+            flag.definite.store(true, Ordering::Release);
         }
         Ok(())
     }

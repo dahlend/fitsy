@@ -29,7 +29,9 @@ nalgebra = ["dep:nalgebra"]
 # Conversions between fitsy types and `faer`'s `Mat`.
 faer = ["dep:faer"]
 # Optional Python bindings (PyO3 + numpy) built via maturin.
-python = ["dep:pyo3", "dep:numpy", "compression"]
+# `bytemuck` is only used to view numpy's buffer as bytes so a read can
+# land straight in it; it is not pulled in by the default build.
+python = ["dep:pyo3", "dep:numpy", "dep:bytemuck", "compression"]
 
 [profile.release]
 # Keeps published wheels small. Set here rather than under
@@ -42,6 +44,7 @@ nalgebra = { version = "0.35.0", optional = true, default-features = false, feat
 faer = { version = "0.24", optional = true, default-features = false, features = ["std"] }
 pyo3 = { version = "0.28", optional = true, features = ["extension-module", "abi3-py310"] }
 numpy = { version = "0.28", optional = true }
+bytemuck = { version = "1.23", optional = true, default-features = false }
 
 [dev-dependencies]
 flate2 = "1.1.9"

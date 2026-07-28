@@ -7,6 +7,9 @@ pub const BLOCK_SIZE: usize = 2880;
 pub const CARDS_PER_BLOCK: usize = BLOCK_SIZE / 80;
 
 /// Round a byte count up to the next 2880-byte boundary.
+///
+/// Saturates: an absurd `NAXISn` product lands within a block of
+/// `u64::MAX`, and a wrapped result would understate the data extent.
 #[inline]
 #[must_use]
 pub fn pad_to_block(n: u64) -> u64 {
@@ -14,7 +17,7 @@ pub fn pad_to_block(n: u64) -> u64 {
     if r == 0 {
         n
     } else {
-        n + (BLOCK_SIZE as u64 - r)
+        n.saturating_add(BLOCK_SIZE as u64 - r)
     }
 }
 
@@ -47,6 +50,13 @@ mod tests {
     #[test]
     fn pad_just_over() {
         assert_eq!(pad_to_block(BLOCK_SIZE as u64 + 1), 2 * BLOCK_SIZE as u64);
+    }
+
+    #[test]
+    fn pad_saturates_instead_of_overflowing() {
+        // 6700417 x 2753074036095 == u64::MAX: no room to round up.
+        assert_eq!(pad_to_block(u64::MAX), u64::MAX);
+        assert_eq!(pad_to_block(u64::MAX - 1), u64::MAX);
     }
 
     #[test]

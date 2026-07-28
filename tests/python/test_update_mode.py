@@ -7,6 +7,8 @@ Pixel-aligned ``section[key] = value`` writes go through positional
 ``pwrite`` directly and need no flush.
 """
 
+from pathlib import Path
+
 import fitsy
 import numpy as np
 import pytest
@@ -329,3 +331,102 @@ def test_complex_header_value_roundtrip(tmp_path):
         assert complex(v) == complex(1.5, -2.25)
         i = g[0].header["CXINT"]
         assert complex(i) == complex(3, 4)
+
+
+def test_data_setitem_persists_in_update_mode(tmp_path: Path) -> None:
+    """``hdu.data[...] = v`` must reach disk, like astropy's mmap path.
+
+    The array handed out is cached, so in-place numpy edits are
+    invisible to the library; update-mode handles mark the file dirty
+    on materialisation so ``flush`` writes the cache back.
+    """
+    p = tmp_path / "img.fits"
+    arr = np.zeros((3, 4), dtype=np.int32)
+    fitsy.write(str(p), [fitsy.image(arr)], overwrite=True)
+
+    with fitsy.open(str(p), mode="update") as f:
+        f[0].data[0, 0] = 42
+        f[0].data[1:3, 2:4] = 7
+        f.flush()
+
+    with fitsy.open(str(p)) as f:
+        got = f[0].data
+    assert got[0, 0] == 42
+    assert (got[1:3, 2:4] == 7).all()
+
+
+def test_data_inplace_ufunc_persists_in_update_mode(tmp_path: Path) -> None:
+    """``hdu.data += n`` bypasses ``__setitem__`` but must still persist."""
+    p = tmp_path / "img.fits"
+    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), dtype=np.int32))], overwrite=True)
+    with fitsy.open(str(p), mode="update") as f:
+        f[0].data += 5
+        f.flush()
+    with fitsy.open(str(p)) as f:
+        assert (f[0].data == 5).all()
+
+
+def test_data_is_read_only_when_not_in_update_mode(tmp_path: Path) -> None:
+    """Read-only handles refuse the edit rather than silently dropping it."""
+    p = tmp_path / "img.fits"
+    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), dtype=np.int32))], overwrite=True)
+    with fitsy.open(str(p)) as f:
+        assert f[0].data.flags.writeable is False
+        with pytest.raises(ValueError):
+            f[0].data[0, 0] = 1
+
+
+def test_compressed_image_data_setitem_persists(tmp_path: Path) -> None:
+    """Tile-compressed pixels materialise eagerly, so the dirty mark has
+    to happen where the array is handed out, not on lazy load."""
+    p = tmp_path / "z.fits"
+    arr = np.arange(64, dtype=np.int16).reshape(8, 8)
+    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
+                         fitsy.compressed_image(arr)], overwrite=True)
+
+    with fitsy.open(str(p), mode="update") as f:
+        f[1].data[0, 0] = 999
+        f.flush()
+
+    with fitsy.open(str(p)) as f:
+        assert f[1].data[0, 0] == 999
+
+
+def test_compressed_image_data_read_only_by_default(tmp_path: Path) -> None:
+    p = tmp_path / "z.fits"
+    arr = np.arange(64, dtype=np.int16).reshape(8, 8)
+    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
+                         fitsy.compressed_image(arr)], overwrite=True)
+    with fitsy.open(str(p)) as f:
+        assert f[1].data.flags.writeable is False
+        with pytest.raises(ValueError):
+            f[1].data[0, 0] = 1
+
+
+def test_reading_data_in_update_mode_does_not_rewrite(tmp_path: Path) -> None:
+    """numpy edits are invisible to us, so ``.data`` can only be flagged
+    as *maybe* changed. ``flush`` re-reads and compares, so a read-only
+    pass must leave the file untouched."""
+    p = tmp_path / "img.fits"
+    fitsy.write(str(p), [fitsy.image(np.arange(64, dtype=np.int32).reshape(8, 8))],
+                overwrite=True)
+    before = p.stat().st_mtime_ns
+
+    with fitsy.open(str(p), mode="update") as f:
+        assert f[0].data.sum() == np.arange(64).sum()
+        f.flush()
+
+    assert p.stat().st_mtime_ns == before, "read-only pass rewrote the file"
+
+
+def test_editing_data_in_update_mode_still_rewrites(tmp_path: Path) -> None:
+    """The converse of the above: a real edit must be detected."""
+    p = tmp_path / "img.fits"
+    fitsy.write(str(p), [fitsy.image(np.zeros((8, 8), dtype=np.int32))], overwrite=True)
+
+    with fitsy.open(str(p), mode="update") as f:
+        f[0].data[3, 4] = 42
+        f.flush()
+
+    with fitsy.open(str(p)) as f:
+        assert f[0].data[3, 4] == 42

@@ -169,7 +169,7 @@ pub fn open(_py: Python<'_>, path: PathBuf, mode: &str, lenient: bool) -> PyResu
         filename,
         original_path,
         updater,
-        dirty: Arc::new(AtomicBool::new(false)),
+        dirty: Arc::new(DirtyFlags::default()),
         stamp_checksums: AtomicBool::new(false),
     })
 }
@@ -260,13 +260,27 @@ pub struct PyFitsFile {
     /// triggers a rewrite-via-temp+rename of the original file.
     /// Pixel patches via `hdu.section[a:b] = arr` write through
     /// `pwrite` directly and do **not** flip this bit.
-    pub(crate) dirty: Arc<AtomicBool>,
+    pub(crate) dirty: Arc<DirtyFlags>,
     /// When true, the next `writeto` / `flush` will compute and
     /// stamp `CHECKSUM` / `DATASUM` cards on every emitted HDU
     /// via [`crate::FitsWriter::with_checksums`]. Toggled on by
     /// [`add_checksums`](Self::add_checksums); stays on for the
     /// lifetime of the file.
     pub(crate) stamp_checksums: AtomicBool,
+}
+
+/// Rewrite bookkeeping shared between a `FitsFile` and the HDU
+/// wrappers it hands out.
+#[derive(Debug, Default)]
+pub(crate) struct DirtyFlags {
+    /// A mutation that definitely needs a rewrite.
+    pub(crate) definite: AtomicBool,
+    /// A writeable pixel array was handed to Python. numpy edits are
+    /// invisible from here, so we cannot tell whether it was modified;
+    /// `flush` compares the cache against the file and only rewrites if
+    /// it actually differs. That keeps a read-only pass over `.data` in
+    /// `mode='update'` from costing a full rewrite.
+    pub(crate) handed_out: AtomicBool,
 }
 
 impl PyFitsFile {
@@ -347,7 +361,7 @@ impl PyFitsFile {
         py: Python<'_>,
         file_idx: usize,
         file: &Arc<FitsFile>,
-        dirty_flag: Option<Arc<AtomicBool>>,
+        dirty_flag: Option<Arc<DirtyFlags>>,
     ) -> PyResult<Option<Py<PyAny>>> {
         use crate::Value;
         use crate::data::Bitpix;
@@ -428,6 +442,37 @@ impl PyFitsFile {
     /// On success, drops the original `FitsFile` and `FitsUpdater`
     /// and re-opens them against the freshly written file so that
     /// further mutations and pixel-patches keep working.
+    /// Did any HDU that handed a writeable array to Python actually
+    /// come out different from the file?
+    ///
+    /// numpy edits are invisible to us, so the only exact answer is to
+    /// re-read and compare. That costs one sequential read instead of a
+    /// full rewrite, and lets a read-only pass over `.data` in update
+    /// mode finish without touching the file. Anything we cannot verify
+    /// counts as changed.
+    fn handed_out_data_changed(&self, py: Python<'_>) -> bool {
+        let snapshot: Vec<Py<PyAny>> = {
+            let st = self.lock_state();
+            st.slots
+                .iter()
+                .filter_map(|s| match s {
+                    HduSlot::Materialized(p) => Some(p.clone_ref(py)),
+                    HduSlot::Pending(_) => None,
+                })
+                .collect()
+        };
+        for obj in snapshot {
+            let bound = obj.bind(py);
+            let Ok(img) = bound.extract::<PyRef<'_, PyImageHdu>>() else {
+                continue; // only image HDUs hand out a pixel array
+            };
+            if !img.data_matches_source(py) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn persist_full_rewrite(&self, py: Python<'_>) -> PyResult<()> {
         use std::fs::OpenOptions;
         use std::io::{BufWriter, Write};
@@ -655,7 +700,7 @@ impl PyFitsFile {
             filename: None,
             original_path: None,
             updater: None,
-            dirty: Arc::new(AtomicBool::new(false)),
+            dirty: Arc::new(DirtyFlags::default()),
             stamp_checksums: AtomicBool::new(false),
         }
     }
@@ -709,7 +754,7 @@ impl PyFitsFile {
     /// Replace ``file[i]``. Accepts an HDU instance or a builder.
     fn __setitem__(&self, py: Python<'_>, i: isize, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
-        self.dirty.store(true, Ordering::Release);
+        self.dirty.definite.store(true, Ordering::Release);
         self.invalidate_bindings();
         let hdu = coerce_to_hdu(py, &value)?;
         let mut st = self.lock_state();
@@ -725,7 +770,7 @@ impl PyFitsFile {
     /// Remove ``file[i]``.
     fn __delitem__(&self, i: isize) -> PyResult<()> {
         self.ensure_writable()?;
-        self.dirty.store(true, Ordering::Release);
+        self.dirty.definite.store(true, Ordering::Release);
         self.invalidate_bindings();
         let mut st = self.lock_state();
         let n = st.slots.len() as isize;
@@ -754,7 +799,7 @@ impl PyFitsFile {
     /// Append an HDU at the end. Accepts an HDU instance or a builder.
     fn append(&self, py: Python<'_>, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
-        self.dirty.store(true, Ordering::Release);
+        self.dirty.definite.store(true, Ordering::Release);
         self.invalidate_bindings();
         let hdu = coerce_to_hdu(py, &value)?;
         self.lock_state().slots.push(HduSlot::Materialized(hdu));
@@ -764,7 +809,7 @@ impl PyFitsFile {
     /// Insert an HDU at position ``i``. Accepts an HDU instance or a builder.
     fn insert(&self, py: Python<'_>, i: isize, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
-        self.dirty.store(true, Ordering::Release);
+        self.dirty.definite.store(true, Ordering::Release);
         self.invalidate_bindings();
         let hdu = coerce_to_hdu(py, &value)?;
         let mut st = self.lock_state();
@@ -934,7 +979,7 @@ impl PyFitsFile {
             // Force a full rewrite even if no edits are pending so
             // the on-disk bytes match what `materialize_all + encode`
             // would produce -- matches astropy semantics.
-            self.dirty.store(true, Ordering::Release);
+            self.dirty.definite.store(true, Ordering::Release);
             return self.persist_full_rewrite(py);
         }
         if !overwrite && path.exists() {
@@ -1315,7 +1360,12 @@ impl PyFitsFile {
         if self.updater.is_none() {
             return Ok(());
         }
-        if self.dirty.swap(false, Ordering::AcqRel) {
+        if self.dirty.definite.swap(false, Ordering::AcqRel) {
+            self.dirty.handed_out.store(false, Ordering::Release);
+            self.persist_full_rewrite(py)?;
+        } else if self.dirty.handed_out.swap(false, Ordering::AcqRel)
+            && self.handed_out_data_changed(py)
+        {
             self.persist_full_rewrite(py)?;
         } else if let Some(updater) = self.updater.as_ref() {
             let guard = updater
@@ -1513,7 +1563,7 @@ fn wrap_hdu(
     header: PyHeader,
     read_only: bool,
     updater: Option<&Arc<Mutex<FitsUpdater>>>,
-    dirty_flag: Option<Arc<AtomicBool>>,
+    dirty_flag: Option<Arc<DirtyFlags>>,
     file: Arc<FitsFile>,
 ) -> PyResult<Py<PyAny>> {
     use crate::Hdu;

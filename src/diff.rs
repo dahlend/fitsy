@@ -613,6 +613,11 @@ fn format_bin_value(v: &crate::hdu::bintable::BinValue) -> String {
         V::Uint(x) => opts(x),
         V::Logical(x) => opts(x),
         V::Str(s) => format!("{:?}", s.trim_end()),
+        V::StrArray(v) => list(
+            &v.iter()
+                .map(|s| format!("{:?}", s.trim_end()))
+                .collect::<Vec<_>>(),
+        ),
         V::Bits(bytes, n) => format!("{n} bits {bytes:02x?}"),
         V::C64(x) => list(
             &x.iter()

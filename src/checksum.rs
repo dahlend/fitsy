@@ -254,7 +254,16 @@ fn write_quoted_value(card: &mut [u8], value: &str) -> Result<(), &'static str> 
             return Err("non-printable byte in checksum/datasum value");
         }
     }
-    write_quoted_value_raw(card, bytes)
+    // Sec.4.2.1.1: pad to 8 chars so the closing quote lands in column
+    // 20 or later; a bare `'0'` would close at column 13.
+    let mut padded = [b' '; 8];
+    let n = bytes.len().min(8);
+    padded[..n].copy_from_slice(&bytes[..n]);
+    if bytes.len() < 8 {
+        write_quoted_value_raw(card, &padded)
+    } else {
+        write_quoted_value_raw(card, bytes)
+    }
 }
 
 fn write_quoted_value_raw(card: &mut [u8], bytes: &[u8]) -> Result<(), &'static str> {
@@ -367,6 +376,30 @@ mod tests {
         // DATASUM for an empty data unit is 0.
         let line = std::str::from_utf8(&buf[4 * 80..5 * 80]).unwrap();
         assert!(line.starts_with("DATASUM = '0"), "got: `{line}`");
+    }
+
+    /// Sec.4.2.1.1: the closing quote must fall in column 20 or later.
+    #[test]
+    fn short_datasum_is_padded_to_fixed_format_width() {
+        let cards = [
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "CHECKSUM= '0000000000000000'",
+            "DATASUM = '0         '",
+            "END",
+        ];
+        let mut buf = vec![b' '; 2880];
+        for (i, c) in cards.iter().enumerate() {
+            let off = i * 80;
+            buf[off..off + c.len()].copy_from_slice(c.as_bytes());
+        }
+        stamp_checksum(&mut buf, &[]).unwrap();
+        let card = std::str::from_utf8(&buf[4 * 80..5 * 80]).unwrap();
+        assert_eq!(&card[..20], "DATASUM = '0       '", "got: `{card}`");
+        assert_eq!(card.as_bytes()[19], b'\'');
+        // The padding is summed too, so the stamp must still verify.
+        assert!(checksum_is_valid(&buf, &[]));
     }
 
     #[test]

@@ -187,6 +187,7 @@ dependencies = [
 name = "fitsy"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
  "faer",
  "flate2",
  "nalgebra",

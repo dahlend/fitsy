@@ -191,3 +191,25 @@ fn header_parse_tolerates_partial_trailing_block() {
     buf.extend_from_slice(b"0123456789");
     Header::parse(&buf, 0).expect("valid header + stray tail bytes parses");
 }
+
+/// 6700417 * 2753074036095 == `u64::MAX`, so rounding the data section up
+/// to a block boundary used to overflow instead of erroring.
+#[test]
+fn absurd_naxis_product_is_rejected_without_panicking() {
+    let mut buf = Vec::new();
+    for c in [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    2",
+        "NAXIS1  =              6700417",
+        "NAXIS2  =        2753074036095",
+        "END",
+    ] {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    pad_to_block(&mut buf, b' ');
+    assert!(
+        FitsFile::from_bytes(buf).is_err(),
+        "a data section larger than the file must be an error"
+    );
+}

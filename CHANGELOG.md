@@ -28,10 +28,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fitsy.getdata`, `setval` and `delval` follow `astropy.io.fits` for
   empty HDUs, omitted values and missing keywords.
 - Type stubs ship inside the package beside a `py.typed` marker.
+- `funpack` recomputes `CHECKSUM`/`DATASUM` per HDU, as cfitsio does;
+  `-C` opts out.
+- `bintable` writes `list[list[str]]` as an `nA` column with `TDIMn`.
+- Character columns reject non-ASCII instead of writing it through.
+- Reading `hdu.data` in update mode no longer forces a rewrite.
+- `RandomGroups.group()` arrays are frozen, like the table accessors.
+- Unscaled image reads decode into numpy's buffer: ~3x faster, half the
+  peak memory. Adds `bytemuck`, behind the `python` feature.
 - Breaking (Rust): `Projection` implementors must supply `pv2`.
+- Breaking (Rust): new `BinValue::StrArray` for `A` columns with `TDIMn`.
 
 ### Fixed
 
+- Unsigned `I`/`J` table columns read the lower half of their range
+  2^16 / 2^32 too high.
+- Tile-compressed headers stripped the leading `Z` off every keyword,
+  so `ZP` became `P`.
+- `ZTILE` and the container's `CHECKSUM`/`DATASUM` leaked into the
+  decompressed image header.
+- An overflowing variable-length-array descriptor panicked.
+- `DATASUM` was written unpadded, under the 8-character minimum.
+- An absurd `NAXISn` product overflowed when padded to a block.
+- `hdu.data[...] = v` in update mode was dropped on `flush`,
+  tile-compressed images included.
+- `BinTable.data` / `AsciiTable.data` were writeable but rebuilt per
+  access, so edits vanished; now frozen.
+- `A` columns with a `TDIMn` returned one concatenated string.
+- A `TDIMn` product smaller than the `TFORMn` repeat was ignored.
 - Native-pole selection took the wrong root of Paper II eq. (9),
   mirroring the sky at `LONPOLE = 180`.
 - `TDB` was reduced as `TT`, and a `23:59:60` stamp landed one second

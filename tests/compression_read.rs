@@ -528,3 +528,90 @@ fn synthetic_header_drops_blank_for_float_image() {
         "synthetic float header must not carry BLANK"
     );
 }
+
+/// Regression: only the Sec.10.2 reserved `Z*` names are rewritten.
+/// `ZP`/`ZD` are ordinary keywords; `ZTILE` is geometry, not `TILE`.
+#[test]
+fn synthetic_header_preserves_non_reserved_z_keywords() {
+    let nx: usize = 2;
+    let ny: usize = 1;
+    let pixels: [i16; 2] = [7, 9];
+    let mut be = Vec::new();
+    for v in pixels {
+        be.extend_from_slice(&v.to_be_bytes());
+    }
+    let mut e = GzEncoder::new(Vec::new(), Compression::default());
+    e.write_all(&be).unwrap();
+    let payload = e.finish().unwrap();
+
+    let row_size: usize = 8;
+    let pcount = payload.len();
+    let header_cards: Vec<String> = vec![
+        "XTENSION= 'BINTABLE'".into(),
+        "BITPIX  =                    8".into(),
+        "NAXIS   =                    2".into(),
+        format!("NAXIS1  = {row_size:>20}"),
+        "NAXIS2  =                    1".into(),
+        format!("PCOUNT  = {pcount:>20}"),
+        "GCOUNT  =                    1".into(),
+        "TFIELDS =                    1".into(),
+        "TTYPE1  = 'COMPRESSED_DATA'".into(),
+        format!("TFORM1  = '1PB({pcount:<3})'"),
+        "ZIMAGE  =                    T".into(),
+        "ZBITPIX =                   16".into(),
+        "ZNAXIS  =                    2".into(),
+        format!("ZNAXIS1 = {nx:>20}"),
+        format!("ZNAXIS2 = {ny:>20}"),
+        format!("ZTILE1  = {nx:>20}"),
+        format!("ZTILE2  = {ny:>20}"),
+        "ZCMPTYPE= 'GZIP_1  '".into(),
+        // The wrapper's own sums, over the *compressed* bytes.
+        "CHECKSUM= 'Z7HYd4GWZ4GWb4GW'".into(),
+        "DATASUM = '1541178127'".into(),
+        // Ordinary image keywords that merely begin with `Z`.
+        "ZP      =                 25.3".into(),
+        "ZD      =                 12.5".into(),
+        "CTYPE1  = 'RA---TAN'".into(),
+        "END".into(),
+    ];
+    let mut buf = empty_primary();
+    for c in &header_cards {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    pad_to_block(&mut buf, b' ');
+    buf.extend_from_slice(&(pcount as i32).to_be_bytes());
+    buf.extend_from_slice(&0_i32.to_be_bytes());
+    buf.extend_from_slice(&payload);
+    pad_to_block(&mut buf, 0);
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::CompressedImage(c) = f.hdu(1).unwrap() else {
+        panic!("expected compressed image");
+    };
+    let synth = c.synthetic_image_header().unwrap();
+
+    assert_eq!(synth.optional_real("ZP"), Some(25.3), "ZP must survive");
+    assert_eq!(synth.optional_real("ZD"), Some(12.5), "ZD must survive");
+    assert!(!synth.contains("P"), "ZP must not be rewritten to P");
+    assert!(!synth.contains("D"), "ZD must not be rewritten to D");
+    // Compression geometry stays out of the image header.
+    assert!(!synth.contains("TILE1"), "ZTILE1 must not leak as TILE1");
+    assert!(!synth.contains("TILE2"), "ZTILE2 must not leak as TILE2");
+    assert!(!synth.contains("ZTILE1"));
+    // These cover the compressed bytes, not the decompressed image.
+    assert!(
+        !synth.contains("CHECKSUM"),
+        "the BINTABLE's CHECKSUM must not describe the decompressed image"
+    );
+    assert!(
+        !synth.contains("DATASUM"),
+        "the BINTABLE's DATASUM must not describe the decompressed image"
+    );
+    // The structural rewrite still works.
+    assert_eq!(synth.bitpix().unwrap(), 16);
+    assert_eq!(synth.axes().unwrap(), vec![nx as u64, ny as u64]);
+    assert_eq!(
+        synth.optional_string("CTYPE1").map(str::to_string),
+        Some("RA---TAN".to_string())
+    );
+}

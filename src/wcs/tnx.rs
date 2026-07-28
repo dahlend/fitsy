@@ -252,15 +252,16 @@ pub struct Tnx {
 
 impl Tnx {
     /// Parse the `lngcor` / `latcor` surfaces from the reassembled
-    /// `WAT1` and `WAT2` strings. Returns `Ok(None)` when neither
-    /// string carries an `lngcor`/`latcor` body.
-    pub fn from_wat_strings(wat1: Option<&str>, wat2: Option<&str>) -> Result<Option<Self>> {
-        let lngcor = wat1
-            .and_then(extract_cor)
+    /// `WATi_` strings of the longitude and latitude axes (the caller
+    /// resolves which is which). Each is looked up by its own name, so a
+    /// mislabelled string yields `None` rather than the wrong axis.
+    pub fn from_wat_strings(wat_lon: Option<&str>, wat_lat: Option<&str>) -> Result<Option<Self>> {
+        let lngcor = wat_lon
+            .and_then(|w| extract_cor(w, "lngcor"))
             .map(TnxSurface::parse)
             .transpose()?;
-        let latcor = wat2
-            .and_then(extract_cor)
+        let latcor = wat_lat
+            .and_then(|w| extract_cor(w, "latcor"))
             .map(TnxSurface::parse)
             .transpose()?;
         if lngcor.is_none() && latcor.is_none() {
@@ -324,18 +325,10 @@ impl Tnx {
     }
 }
 
-/// Extract the body of an `lngcor = "..."` or `latcor = "..."` clause
-/// from a reassembled WAT string. Returns the substring between the
-/// double quotes, or `None` if the clause is absent.
-fn extract_cor(wat: &str) -> Option<&str> {
-    // Look for either `lngcor` or `latcor` followed by `= "...".`.
-    let key = if wat.contains("lngcor") {
-        "lngcor"
-    } else if wat.contains("latcor") {
-        "latcor"
-    } else {
-        return None;
-    };
+/// Extract the body of the `<key> = "..."` clause (`key` is `lngcor` or
+/// `latcor`) from a reassembled WAT string. Returns the substring between
+/// the double quotes, or `None` if the clause is absent.
+fn extract_cor<'a>(wat: &'a str, key: &str) -> Option<&'a str> {
     let after = &wat[wat.find(key)? + key.len()..];
     let q1 = after.find('"')?;
     let rest = &after[q1 + 1..];
@@ -429,7 +422,9 @@ mod tests {
     #[test]
     fn extract_cor_finds_quoted_body() {
         let s = "wtype=tnx axtype=ra projp1=0 lngcor = \"3 1 1 1 -1 1 -1 1 0.5\"";
-        assert_eq!(extract_cor(s).unwrap(), "3 1 1 1 -1 1 -1 1 0.5");
+        assert_eq!(extract_cor(s, "lngcor").unwrap(), "3 1 1 1 -1 1 -1 1 0.5");
+        // A surface is only picked up under its own name.
+        assert!(extract_cor(s, "latcor").is_none());
     }
 
     #[test]

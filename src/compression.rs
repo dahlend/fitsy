@@ -905,50 +905,37 @@ fn scatter_tile(
 
 // -- Synthetic image header ----------------------------------------
 
-/// Map a Z-prefixed compressed-image keyword to its image-HDU
-/// equivalent per Sec.10.4. Returns `None` if the keyword should be
-/// dropped (e.g. ZIMAGE itself, ZCMPTYPE, `COMPRESSED_DATA` bookkeeping).
+/// Map a compressed-BINTABLE keyword to its synthetic-IMAGE form, or
+/// `None` to drop it.
+///
+/// Sec.10.2 reserves a fixed set of `Z*` names and copies every other
+/// image keyword verbatim -- there is no "strip the leading Z" rule, so
+/// `ZP` and `ZD` pass through. The reserved names are either re-emitted
+/// by `synthesise_image_header` or bookkeeping, so this only drops them.
 fn z_to_image_keyword(k: &str) -> Option<String> {
     const T_PREFIXES: &[&str] = &[
         "TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP", "TBCOL",
     ];
-    // Keywords that are bookkeeping for the BINTABLE container and
-    // don't belong on the synthetic IMAGE.
+    const Z_INDEXED: &[&str] = &["ZNAME", "ZVAL", "ZTILE", "ZNAXIS"];
+    // Checksums cover the *compressed* bytes; ZHECKSUM/ZDATASUM cover a
+    // pre-compression image that lossy tiles need not reproduce. Neither
+    // survives -- callers recompute (`FitsWriter::with_checksums`).
     let drop = [
-        "ZIMAGE", "ZCMPTYPE", "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSIMPLE", "ZTENSION", "ZEXTEND",
-        "ZBLOCKED", "ZPCOUNT", "ZGCOUNT", "ZHECKSUM", "ZDATASUM", "XTENSION", "BITPIX", "NAXIS",
-        "NAXIS1", "NAXIS2", "PCOUNT", "GCOUNT", "TFIELDS", "EXTEND", "THEAP",
+        "ZIMAGE", "ZCMPTYPE", "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSCALE", "ZZERO", "ZBLANK",
+        "ZBITPIX", "ZNAXIS", "ZSIMPLE", "ZTENSION", "ZEXTEND", "ZBLOCKED", "ZPCOUNT", "ZGCOUNT",
+        "ZHECKSUM", "ZDATASUM", "XTENSION", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "PCOUNT",
+        "GCOUNT", "TFIELDS", "EXTEND", "THEAP", "CHECKSUM", "DATASUM",
     ];
     if drop.contains(&k) {
         return None;
     }
-    // ZNAMEn / ZVALn are algorithm parameters, not image keywords.
-    for prefix in ["ZNAME", "ZVAL"] {
-        if let Some(rest) = k.strip_prefix(prefix)
-            && !rest.is_empty()
-            && rest.chars().all(|c| c.is_ascii_digit())
-        {
-            return None;
-        }
-    }
-    // TTYPEn / TFORMn / TUNITn / TDIMn / TSCALn / TZEROn / TNULLn /
-    // TDISPn / TBCOLn are BINTABLE column descriptors -- drop them all.
-    if T_PREFIXES.iter().any(|p| {
-        k.starts_with(p) && {
-            let rest = &k[p.len()..];
-            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
-        }
+    if Z_INDEXED.iter().chain(T_PREFIXES).any(|p| {
+        k.strip_prefix(p)
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
     }) {
         return None;
     }
-    // The actual mapping: strip a single leading `Z` for any keyword
-    // beginning with one (ZBITPIX -> BITPIX, ZNAXIS -> NAXIS,
-    // ZCTYPE1 -> CTYPE1, ...) and keep all non-Z keywords as-is.
-    Some(if let Some(stripped) = k.strip_prefix('Z') {
-        stripped.to_string()
-    } else {
-        k.to_string()
-    })
+    Some(k.to_string())
 }
 
 fn synthesise_image_header(bt: &Header) -> Result<Header> {

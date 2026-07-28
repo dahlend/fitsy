@@ -1,6 +1,6 @@
 //! `PyImageHdu` -- image HDU with lazy numpy data.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use numpy::{
@@ -107,7 +107,7 @@ pub struct PyImageHdu {
     /// on a compressed image, etc.) flip the bit so `flush()` /
     /// `__exit__` know to rewrite the file. Pure pixel-patch
     /// writes via ``pwrite`` leave the bit alone.
-    pub(crate) dirty: Option<Arc<AtomicBool>>,
+    pub(crate) dirty: Option<Arc<super::file::DirtyFlags>>,
 }
 
 impl PyImageHdu {
@@ -168,13 +168,20 @@ impl PyImageHdu {
             // as empty rather than erroring.
             return Ok(None);
         };
-        let bytes = binding
-            .file
-            .read_data_owned(binding.hdu_idx)
-            .into_py_result()?;
         let header = header_with_layout(&self.header.lock(), &self.axes, self.bitpix);
-        let img = ImageHdu::new(header, &bytes).into_py_result()?;
-        let arr = read_pixels(py, &img, self.bitpix, &self.axes)?;
+        let arr = if header.bzero() == 0.0 && header.bscale() == 1.0 && header.blank().is_none() {
+            // Identity scaling: read straight into numpy's buffer so the
+            // image is never staged through an intermediate `Vec`.
+            let shape: Vec<usize> = self.axes.iter().rev().map(|&n| n as usize).collect();
+            file_to_array(py, &binding.file, binding.hdu_idx, self.bitpix, &shape)?
+        } else {
+            let bytes = binding
+                .file
+                .read_data_owned(binding.hdu_idx)
+                .into_py_result()?;
+            let img = ImageHdu::new(header, &bytes).into_py_result()?;
+            read_pixels(py, &img, self.bitpix, &self.axes)?
+        };
         if self.read_only {
             freeze_array(py, &arr)?;
         }
@@ -467,34 +474,7 @@ fn read_raw_to_array(
     bitpix: Bitpix,
     shape: &[usize],
 ) -> PyResult<Py<PyAny>> {
-    Ok(match bitpix {
-        Bitpix::U8 => to_array(py, img.read_raw::<u8>().into_py_result()?.into_vec(), shape),
-        Bitpix::I16 => to_array(
-            py,
-            img.read_raw::<i16>().into_py_result()?.into_vec(),
-            shape,
-        ),
-        Bitpix::I32 => to_array(
-            py,
-            img.read_raw::<i32>().into_py_result()?.into_vec(),
-            shape,
-        ),
-        Bitpix::I64 => to_array(
-            py,
-            img.read_raw::<i64>().into_py_result()?.into_vec(),
-            shape,
-        ),
-        Bitpix::F32 => to_array(
-            py,
-            img.read_raw::<f32>().into_py_result()?.into_vec(),
-            shape,
-        ),
-        Bitpix::F64 => to_array(
-            py,
-            img.read_raw::<f64>().into_py_result()?.into_vec(),
-            shape,
-        ),
-    })
+    raw_bytes_to_array(py, img.raw_bytes(), bitpix, shape)
 }
 
 #[pymethods]
@@ -592,7 +572,54 @@ impl PyImageHdu {
     ///   (``NAXIS == 0``).
     #[getter]
     fn data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(self.ensure_data(py)?.unwrap_or_else(|| py.None()))
+        let Some(arr) = self.ensure_data(py)? else {
+            return Ok(py.None());
+        };
+        // Handing a writeable array to Python: numpy in-place edits
+        // (`hdu.data[i] = v`) are invisible from here, so the cache has
+        // to be written back on flush. This lives in the getter rather
+        // than in `ensure_data` so it also covers HDUs whose pixels were
+        // materialised eagerly (tile-compressed images), and so the
+        // internal `encode` read does not mark the file dirty.
+        // Read-only handles get a frozen array and never need it.
+        //
+        // This records only "may have changed": `flush` compares the
+        // cache against the file, so merely reading `.data` in update
+        // mode does not cost a rewrite.
+        if !self.read_only
+            && let Some(flag) = &self.dirty
+        {
+            flag.handed_out.store(true, Ordering::Release);
+        }
+        Ok(arr)
+    }
+
+    /// Whether the cached pixel array still matches the bytes on disk.
+    ///
+    /// Returns `false` when that cannot be established (no read source,
+    /// or a scaled HDU whose cache is not a straight image of the data
+    /// section), so the caller falls back to rewriting.
+    pub(crate) fn data_matches_source(&self, py: Python<'_>) -> bool {
+        let Some(arr) = self.data_if_loaded(py) else {
+            return true; // never materialised, so nothing to write back
+        };
+        let Some(binding) = self.read_binding.as_ref() else {
+            return false;
+        };
+        let header = header_with_layout(&self.header.lock(), &self.axes, self.bitpix);
+        if header.bzero() != 0.0 || header.bscale() != 1.0 || header.blank().is_some() {
+            return false;
+        }
+        let bound = arr.bind(py);
+        let (file, idx) = (&binding.file, binding.hdu_idx);
+        match self.bitpix {
+            Bitpix::U8 => cache_matches::<u8>(bound, file, idx),
+            Bitpix::I16 => cache_matches::<i16>(bound, file, idx),
+            Bitpix::I32 => cache_matches::<i32>(bound, file, idx),
+            Bitpix::I64 => cache_matches::<i64>(bound, file, idx),
+            Bitpix::F32 => cache_matches::<f32>(bound, file, idx),
+            Bitpix::F64 => cache_matches::<f64>(bound, file, idx),
+        }
     }
 
     /// Slicing accessor that mirrors :class:`numpy.ndarray`
@@ -643,7 +670,7 @@ impl PyImageHdu {
     #[setter]
     fn set_data(&mut self, value: Bound<'_, PyAny>) -> PyResult<()> {
         if let Some(flag) = &self.dirty {
-            flag.store(true, Ordering::Release);
+            flag.definite.store(true, Ordering::Release);
         }
         // Reassigning `data` changes BITPIX/NAXISn, so the cached
         // writable-file binding (which encodes the on-disk byte
@@ -792,6 +819,162 @@ fn build_header(
     Ok(header)
 }
 
+/// A pixel type that can be byte-swapped from big-endian in place.
+///
+/// The float impls swap through the same-width unsigned integer so the
+/// bit pattern -- including a NaN payload (Sec.4.4.2.5) -- is carried
+/// through untouched. `from_be` is a no-op on big-endian hosts.
+trait SwapBe: numpy::Element + bytemuck::Pod {
+    fn swap_be_in_place(slice: &mut [Self]);
+}
+
+impl SwapBe for u8 {
+    fn swap_be_in_place(_: &mut [Self]) {}
+}
+
+/// Every width swaps through its unsigned view: the signed spelling
+/// (`i16::from_be`) costs about a third of the throughput because it
+/// does not vectorise as well, and for floats it is the only way to
+/// move the bits without going through a float value at all.
+macro_rules! swap_be {
+    ($($t:ty => $u:ty),*) => {$(
+        impl SwapBe for $t {
+            fn swap_be_in_place(slice: &mut [Self]) {
+                for x in bytemuck::cast_slice_mut::<$t, $u>(slice) {
+                    *x = <$u>::from_be(*x);
+                }
+            }
+        }
+    )*};
+}
+swap_be!(i16 => u16, i32 => u32, i64 => u64, f32 => u32, f64 => u64);
+
+/// Allocate a numpy array of `shape`, let `fill` write the raw
+/// big-endian pixels straight into its buffer, then swap in place.
+///
+/// The obvious spelling -- read into a `Vec<u8>`, decode into a
+/// `Vec<T>`, hand that to `into_pyarray` -- allocates the image three
+/// times and fills it twice. Going through numpy's own buffer does one
+/// allocation and one pass, which also halves the peak footprint.
+fn alloc_swapped<T: SwapBe>(
+    py: Python<'_>,
+    shape: &[usize],
+    fill: impl FnOnce(&mut [u8]) -> PyResult<()>,
+) -> PyResult<Py<PyAny>> {
+    let n: usize = shape.iter().product();
+    let arr = numpy::PyArray1::<T>::zeros(py, n, false);
+    {
+        let mut rw = arr.readwrite();
+        let dst = rw.as_slice_mut()?;
+        fill(bytemuck::cast_slice_mut(dst))?;
+        T::swap_be_in_place(dst);
+    }
+    Ok(arr
+        .reshape(shape.to_vec())
+        .expect(
+            "internal invariant: element count must equal NAXIS product; \
+             this is a fitsy bug, please report",
+        )
+        .into_any()
+        .unbind())
+}
+
+/// Dispatch `alloc_swapped` on `BITPIX`.
+macro_rules! by_bitpix {
+    ($py:expr, $bitpix:expr, $shape:expr, $fill:expr) => {
+        match $bitpix {
+            Bitpix::U8 => alloc_swapped::<u8>($py, $shape, $fill),
+            Bitpix::I16 => alloc_swapped::<i16>($py, $shape, $fill),
+            Bitpix::I32 => alloc_swapped::<i32>($py, $shape, $fill),
+            Bitpix::I64 => alloc_swapped::<i64>($py, $shape, $fill),
+            Bitpix::F32 => alloc_swapped::<f32>($py, $shape, $fill),
+            Bitpix::F64 => alloc_swapped::<f64>($py, $shape, $fill),
+        }
+    };
+}
+
+/// Identity-scaling decode straight from the file: no intermediate
+/// buffer, so the image is allocated once and touched once.
+fn file_to_array(
+    py: Python<'_>,
+    file: &crate::FitsFile,
+    hdu_idx: usize,
+    bitpix: Bitpix,
+    shape: &[usize],
+) -> PyResult<Py<PyAny>> {
+    by_bitpix!(py, bitpix, shape, |dst: &mut [u8]| file
+        .read_data_into(hdu_idx, dst)
+        .into_py_result())
+}
+
+/// Re-read HDU `hdu_idx` and compare it byte-for-byte with the pixels
+/// numpy is holding.
+///
+/// Streamed through a small fixed buffer rather than a full-size one so
+/// verifying does not double the peak footprint of a large image, and
+/// so a difference near the start exits without reading the rest.
+/// Compared as raw bytes rather than as `T`, which keeps the answer
+/// exact for NaN payloads; the buffer is allocated as `[T]` so its byte
+/// view is always correctly aligned.
+fn cache_matches<T: SwapBe>(
+    arr: &Bound<'_, PyAny>,
+    file: &crate::FitsFile,
+    hdu_idx: usize,
+) -> bool {
+    /// Chunk size in elements, sized so the buffer stays around 1 MiB.
+    const CHUNK_BYTES: usize = 1 << 20;
+
+    let Ok(typed) = arr.cast::<numpy::PyArrayDyn<T>>() else {
+        return false;
+    };
+    let ro = typed.readonly();
+    let Ok(cached) = ro.as_slice() else {
+        return false; // non-contiguous: cannot compare cheaply
+    };
+    let elem = size_of::<T>();
+    let per_chunk = (CHUNK_BYTES / elem).max(1);
+    let cached_bytes: &[u8] = bytemuck::cast_slice(cached);
+    let mut scratch: Vec<T> = vec![T::zeroed(); per_chunk.min(cached.len().max(1))];
+    let mut done = 0_usize;
+    while done < cached.len() {
+        let n = per_chunk.min(cached.len() - done);
+        let buf = &mut scratch[..n];
+        let byte_off = done * elem;
+        if file
+            .read_data_range_into(hdu_idx, byte_off as u64, bytemuck::cast_slice_mut(buf))
+            .is_err()
+        {
+            return false;
+        }
+        T::swap_be_in_place(buf);
+        if bytemuck::cast_slice::<T, u8>(buf) != &cached_bytes[byte_off..byte_off + n * elem] {
+            return false;
+        }
+        done += n;
+    }
+    true
+}
+
+/// Identity-scaling decode from bytes already in memory.
+fn raw_bytes_to_array(
+    py: Python<'_>,
+    raw: &[u8],
+    bitpix: Bitpix,
+    shape: &[usize],
+) -> PyResult<Py<PyAny>> {
+    by_bitpix!(py, bitpix, shape, |dst: &mut [u8]| {
+        if dst.len() != raw.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "pixel buffer is {} bytes, data section is {}",
+                dst.len(),
+                raw.len()
+            )));
+        }
+        dst.copy_from_slice(raw);
+        Ok(())
+    })
+}
+
 fn to_array<T>(py: Python<'_>, data: Vec<T>, shape: &[usize]) -> Py<PyAny>
 where
     T: numpy::Element,
@@ -896,6 +1079,11 @@ impl PyRandomGroups {
         let d_shape = vec![self.data_per_group as usize];
         let params = decode_be_to_array(py, self.bitpix, params_be, &p_shape);
         let data = decode_be_to_array(py, self.bitpix, data_be, &d_shape);
+        // Decoded fresh on every call and with no write-back path, so an
+        // edit could never persist. Freeze both, matching the table
+        // accessors, so a write raises instead of vanishing.
+        freeze_array(py, &params)?;
+        freeze_array(py, &data)?;
         let tup = pyo3::types::PyTuple::new(py, [params, data])?;
         Ok(tup.unbind())
     }
@@ -965,7 +1153,7 @@ pub struct PyImageSection {
     /// pwrite path (compressed image, fancy index, dtype mismatch)
     /// fall back to mutating the cached numpy array and flip this
     /// bit so `flush()` rewrites the file.
-    pub(crate) dirty: Option<Arc<AtomicBool>>,
+    pub(crate) dirty: Option<Arc<super::file::DirtyFlags>>,
 }
 
 impl PyImageSection {
@@ -1232,7 +1420,7 @@ impl PyImageSection {
                     };
                     arr.bind(py).set_item(&key, &target)?;
                     if let Some(flag) = &self.dirty {
-                        flag.store(true, Ordering::Release);
+                        flag.definite.store(true, Ordering::Release);
                     }
                     self.update_binding = None;
                     return Ok(());
@@ -1251,7 +1439,7 @@ impl PyImageSection {
         };
         arr.bind(py).set_item(&key, &value)?;
         if let Some(flag) = &self.dirty {
-            flag.store(true, Ordering::Release);
+            flag.definite.store(true, Ordering::Release);
         }
         Ok(())
     }

@@ -213,7 +213,8 @@ impl FitsFile {
 
             let data_logical_len = data_section_size(&header)?;
             let data_padded = pad_to_block(data_logical_len);
-            let data_end = header_end + data_padded;
+            // Saturate: a wrapped sum would pass the check below.
+            let data_end = header_end.saturating_add(data_padded);
             if data_end > total {
                 return Err(FitsError::Block {
                     offset: header_end,
@@ -279,7 +280,8 @@ impl FitsFile {
 
             let data_logical_len = data_section_size(&header)?;
             let data_padded = pad_to_block(data_logical_len);
-            let data_end = header_end + data_padded;
+            // Saturate: a wrapped sum would pass the check below.
+            let data_end = header_end.saturating_add(data_padded);
             if data_end > total {
                 return Err(FitsError::Block {
                     offset: header_end,
@@ -417,6 +419,63 @@ impl FitsFile {
                 buf.truncate(logical);
                 Ok(buf)
             }
+        }
+    }
+
+    /// Read the unpadded data section for HDU `i` into `dst`, which
+    /// must be exactly the logical data length. **Bypasses the cache.**
+    ///
+    /// Lets a caller that already owns a correctly sized buffer -- the
+    /// Python reader hands us numpy's own allocation -- avoid the
+    /// intermediate `Vec` that [`read_data_owned`](Self::read_data_owned)
+    /// allocates, halving both the copies and the peak footprint.
+    #[cfg(feature = "python")]
+    pub(crate) fn read_data_into(&self, i: usize, dst: &mut [u8]) -> Result<()> {
+        let logical = self
+            .hdu_spans
+            .get(i)
+            .ok_or_else(|| {
+                FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
+            })?
+            .data_logical_len as usize;
+        if dst.len() != logical {
+            return Err(FitsError::Data(format!(
+                "read_data_into: destination is {} bytes, data section is {logical}",
+                dst.len()
+            )));
+        }
+        self.read_data_range_into(i, 0, dst)
+    }
+
+    /// Fill `dst` from the data section of HDU `i`, starting `offset`
+    /// bytes in. Lets a caller stream the section through a small fixed
+    /// buffer instead of materialising it whole.
+    #[cfg(feature = "python")]
+    pub(crate) fn read_data_range_into(&self, i: usize, offset: u64, dst: &mut [u8]) -> Result<()> {
+        let span = self.hdu_spans.get(i).ok_or_else(|| {
+            FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
+        })?;
+        if offset
+            .checked_add(dst.len() as u64)
+            .is_none_or(|end| end > span.data_logical_len)
+        {
+            return Err(FitsError::Data(format!(
+                "read_data_range_into: [{offset}, +{}) escapes the {}-byte data section",
+                dst.len(),
+                span.data_logical_len
+            )));
+        }
+        let start = span.header_end.checked_add(offset).ok_or_else(|| {
+            FitsError::Data("read_data_range_into: offset overflows the file".into())
+        })?;
+        match &self.backing {
+            Backing::InMemory(src) => {
+                let s = start as usize;
+                dst.copy_from_slice(&src.as_bytes()[s..s + dst.len()]);
+                Ok(())
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::OnDisk(file) => pread_exact(file, start, dst),
         }
     }
 

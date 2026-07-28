@@ -349,6 +349,9 @@ fn generic_cell_summary(v: &BinValue, tdim: Option<&[usize]>) -> String {
                 format!("\"{s}\"")
             }
         }
+        // `tdim[0]` is the string width; the rest is the array shape.
+        // Sliced defensively: a malformed TDIM must not panic here.
+        BinValue::StrArray(v) => format!("str[{}]", shape_str(v.len(), tdim.and_then(|d| d.get(1..)))),
         BinValue::C64(x) => format!("c64[{}]", shape_str(x.len(), tdim)),
         BinValue::C128(x) => format!("c128[{}]", shape_str(x.len(), tdim)),
         BinValue::Bits(_, count) => format!("bits[{count}]"),
@@ -504,7 +507,12 @@ impl PyBinTable {
         kwargs.set_item("names", names)?;
         let rec = np.getattr("rec")?;
         let result = rec.call_method("fromarrays", (arrays,), Some(&kwargs))?;
-        Ok(result.unbind())
+        // This array is rebuilt on every access, so an edit could never
+        // reach the file or even the next read. Freeze it so a write
+        // raises instead of vanishing silently.
+        let out = result.unbind();
+        freeze_if_array(py, &out);
+        Ok(out)
     }
 
     /// Column accessor; equivalent to ``table[name]``.
@@ -657,12 +665,18 @@ fn bin_value_to_py(
     Ok(bound.get_item(0)?.unbind())
 }
 
+/// Reshape a Python list of strings into a numpy array of `target`
+/// shape. `None` leaves the caller with the flat list.
+fn reshape_str_cell(py: Python<'_>, list: &Py<PyAny>, target: &[usize]) -> Option<Py<PyAny>> {
+    let np = py.import("numpy").ok()?;
+    let arr = np.call_method1("array", (list.bind(py),)).ok()?;
+    Some(arr.call_method1("reshape", (target.to_vec(),)).ok()?.unbind())
+}
+
 fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>) -> Py<PyList> {
     // Reshape numeric cell arrays per `TDIMn` when present. FITS
     // dimension order is fastest-varying first (FORTRAN/column-major),
-    // so we reverse to get C-order for numpy and only apply the
-    // shape when the element count matches (a sanity check that
-    // protects against malformed `TDIMn` keywords).
+    // so we reverse to get C-order for numpy.
     let c_shape: Option<Vec<usize>> = shape.map(|s| {
         let mut v = s.to_vec();
         v.reverse();
@@ -673,10 +687,22 @@ fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>
             return arr;
         };
         let prod: usize = target.iter().product();
-        if prod != n || target.len() < 2 {
+        // Sec.7.3.3.2: the TDIM product must be <= the repeat count;
+        // any trailing elements are undefined fill and are dropped.
+        // A larger product means a malformed TDIM -- leave the cell flat.
+        if target.is_empty() || prod > n {
             return arr;
         }
-        match arr.bind(py).call_method1("reshape", (target.clone(),)) {
+        let bound = arr.bind(py);
+        let trimmed = if prod < n {
+            match bound.get_item(pyo3::types::PySlice::new(py, 0, prod as isize, 1)) {
+                Ok(t) => t,
+                Err(_) => return arr,
+            }
+        } else {
+            bound.clone()
+        };
+        match trimmed.call_method1("reshape", (target.clone(),)) {
             Ok(r) => r.unbind(),
             Err(_) => arr,
         }
@@ -730,6 +756,19 @@ fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>
             }
             BinValue::Logical(v) => v.clone().into_py_any(py).unwrap_or_else(|_| py.None()),
             BinValue::Str(s) => s.clone().into_py_any(py).unwrap_or_else(|_| py.None()),
+            BinValue::StrArray(v) => {
+                // TDIM's first entry is each string's width; the rest give
+                // the array shape, reversed for numpy's C order. A single
+                // remaining dimension is already a flat list.
+                let list = v.clone().into_py_any(py).unwrap_or_else(|_| py.None());
+                match shape.filter(|d| d.len() > 2) {
+                    Some(d) => {
+                        let target: Vec<usize> = d[1..].iter().rev().copied().collect();
+                        reshape_str_cell(py, &list, &target).unwrap_or(list)
+                    }
+                    None => list,
+                }
+            }
             BinValue::C64(v) => v.clone().into_py_any(py).unwrap_or_else(|_| py.None()),
             BinValue::C128(v) => v.clone().into_py_any(py).unwrap_or_else(|_| py.None()),
             BinValue::Bits(bytes, count) => {
@@ -945,7 +984,10 @@ impl PyAsciiTable {
         kwargs.set_item("names", names)?;
         let rec = np.getattr("rec")?;
         let result = rec.call_method("fromarrays", (arrays,), Some(&kwargs))?;
-        Ok(result.unbind())
+        // Rebuilt on every access -- see `PyBinTable::data`.
+        let out = result.unbind();
+        freeze_if_array(py, &out);
+        Ok(out)
     }
 
     /// Column accessor; equivalent to ``table[name]``.

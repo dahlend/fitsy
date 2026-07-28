@@ -424,9 +424,17 @@ pub fn bintable(
             None => None,
         };
         match &enc {
-            ColumnEncoding::Fixed { kind, repeat, .. } => {
-                bt.add_column(name.clone(), *kind, *repeat, unit.as_deref(), None)
-                    .into_py_result()?;
+            ColumnEncoding::Fixed {
+                kind, repeat, tdim, ..
+            } => {
+                bt.add_column(
+                    name.clone(),
+                    *kind,
+                    *repeat,
+                    unit.as_deref(),
+                    tdim.as_deref(),
+                )
+                .into_py_result()?;
             }
             ColumnEncoding::Vla {
                 element,
@@ -522,6 +530,8 @@ enum ColumnEncoding {
         repeat: usize,
         row_bytes: Vec<u8>,
         n_rows: usize,
+        /// `TDIMn` to stamp, if the cell is multi-dimensional.
+        tdim: Option<String>,
     },
     Vla {
         descriptor: BinFieldKind,
@@ -563,6 +573,7 @@ fn encode_array_column(arr: &Bound<'_, PyAny>) -> PyResult<Option<ColumnEncoding
                     repeat,
                     row_bytes: bytes,
                     n_rows: n,
+                    tdim: None,
                 }));
             }
         };
@@ -589,9 +600,32 @@ fn encode_array_column(arr: &Bound<'_, PyAny>) -> PyResult<Option<ColumnEncoding
             repeat,
             row_bytes: bytes,
             n_rows: n,
+            tdim: None,
         }));
     }
     Ok(None)
+}
+
+/// Reject anything outside the restricted ASCII set a FITS character
+/// field is defined over.
+///
+/// Sec.3 defines a character string as decimal 32-126, and Sec.7.2.5
+/// says an `Aw` field *shall* be composed of it. Writing other bytes
+/// would emit a file the standard does not describe and that another
+/// reader is free to reject, so fail rather than silently transcode or
+/// truncate what the caller passed. This matches the header writer,
+/// which refuses a non-ASCII string value for the same reason.
+fn validate_fits_ascii(strings: impl IntoIterator<Item = impl AsRef<str>>) -> PyResult<()> {
+    for s in strings {
+        let s = s.as_ref();
+        if let Some(b) = s.bytes().find(|b| !(0x20..=0x7E).contains(b)) {
+            return Err(PyValueError::new_err(format!(
+                "character columns are restricted to ASCII 32-126 (Standard Sec.7.2.5); \
+                 found byte 0x{b:02X} in {s:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Encode one Python column to FITS bytes.
@@ -624,6 +658,7 @@ fn encode_column(arr: &Bound<'_, PyAny>) -> PyResult<ColumnEncoding> {
     // String column: list[str] -> nA, repeat = max length, padded
     // right with spaces.
     if let Ok(strings) = arr.extract::<Vec<String>>() {
+        validate_fits_ascii(&strings)?;
         let n = strings.len();
         let max = strings.iter().map(String::len).max().unwrap_or(1).max(1);
         let mut bytes = vec![b' '; n * max];
@@ -636,6 +671,45 @@ fn encode_column(arr: &Bound<'_, PyAny>) -> PyResult<ColumnEncoding> {
             repeat: max,
             row_bytes: bytes,
             n_rows: n,
+            tdim: None,
+        });
+    }
+
+    // String-array column: list[list[str]] (or a 2-D unicode array) ->
+    // `nA` plus a `TDIMn` of `(width, count)`. Sec.7.3.3.2: the first
+    // TDIM axis is each string's width and the rest are the array
+    // shape. Checked after the flat `list[str]` case, which a nested
+    // list cannot match.
+    if let Ok(rows) = arr.extract::<Vec<Vec<String>>>() {
+        validate_fits_ascii(rows.iter().flatten())?;
+        let n = rows.len();
+        let per_row = rows.first().map_or(0, Vec::len);
+        if rows.iter().any(|r| r.len() != per_row) {
+            return Err(PyValueError::new_err(
+                "string-array column: every row must hold the same number of strings",
+            ));
+        }
+        let width = rows
+            .iter()
+            .flatten()
+            .map(String::len)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let repeat = width * per_row;
+        let mut bytes = vec![b' '; n * repeat];
+        for (r, row) in rows.iter().enumerate() {
+            for (j, s) in row.iter().enumerate() {
+                let off = r * repeat + j * width;
+                bytes[off..off + s.len()].copy_from_slice(s.as_bytes());
+            }
+        }
+        return Ok(ColumnEncoding::Fixed {
+            kind: BinFieldKind::Char,
+            repeat,
+            row_bytes: bytes,
+            n_rows: n,
+            tdim: Some(format!("({width},{per_row})")),
         });
     }
 
@@ -662,6 +736,7 @@ fn encode_column(arr: &Bound<'_, PyAny>) -> PyResult<ColumnEncoding> {
                 repeat: 1,
                 row_bytes: bytes,
                 n_rows: n,
+                tdim: None,
             });
         }
     }
@@ -898,6 +973,7 @@ fn extract_ascii_column(
     if let Ok(list) = arr.extract::<Vec<Option<String>>>() {
         // None entries are treated as empty string for A-columns.
         let strings: Vec<String> = list.into_iter().map(Option::unwrap_or_default).collect();
+        validate_fits_ascii(&strings)?;
         let format = if let Some(s) = fmt_override {
             parse_ascii_format(s)?
         } else {

@@ -573,6 +573,10 @@ pub enum BinValue {
     Float(Vec<f64>),
     /// `A` character array (returned as one trimmed string).
     Str(String),
+    /// `A` character array carrying a `TDIMn` (Sec.7.3.3.2): the first
+    /// dimension is the width of each string and the rest give the
+    /// array shape, so the cell is an array of fixed-width strings.
+    StrArray(Vec<String>),
     /// `E`/`D` floats.
     F32(Vec<f32>),
     F64(Vec<f64>),
@@ -620,6 +624,30 @@ fn decode_cell(col: &BinColumn, raw: &[u8], heap: &[u8]) -> Result<BinValue> {
                     col.index
                 ))
             })?;
+            // Sec.7.3.3.2: `TDIMn` on an `A` column makes the cell an
+            // array of strings -- the first dimension is each string's
+            // width, the rest are the array shape. Trailing elements
+            // beyond the TDIM product are undefined fill.
+            if let Some(dims) = col.tdim.as_ref()
+                && dims.len() >= 2
+                && dims[0] > 0
+                && let Some(count) = dims[1..].iter().try_fold(1_usize, |a, &d| a.checked_mul(d))
+                && let Some(needed) = count.checked_mul(dims[0])
+                && needed <= s.len()
+            {
+                let out = s.as_bytes()[..needed]
+                    .chunks_exact(dims[0])
+                    .map(|c| {
+                        // Each element is padded independently, so trim
+                        // per string rather than across the whole field.
+                        String::from_utf8_lossy(c)
+                            .trim_end_matches('\0')
+                            .trim_end()
+                            .to_string()
+                    })
+                    .collect();
+                return Ok(BinValue::StrArray(out));
+            }
             Ok(BinValue::Str(
                 s.trim_end_matches('\0').trim_end().to_string(),
             ))
@@ -667,10 +695,17 @@ fn decode_cell(col: &BinColumn, raw: &[u8], heap: &[u8]) -> Result<BinValue> {
                 keyword: format!("TFORM{}", col.index),
                 msg: "P/Q descriptor missing inner type".into(),
             })?;
+            // `n` is off-disk: a wrapped byte count would pass the heap
+            // check below and leave `n` to reach `Vec::with_capacity`.
             let bytes_needed = if matches!(inner, BinFieldKind::Bit) {
                 n.div_ceil(8)
             } else {
-                n * inner.element_bytes()
+                n.checked_mul(inner.element_bytes()).ok_or_else(|| {
+                    FitsError::Data(format!(
+                        "BINTABLE col {}: VLA byte length overflows usize (n={n})",
+                        col.index
+                    ))
+                })?
             };
             if off.saturating_add(bytes_needed) > heap.len() {
                 return Err(FitsError::Data(format!(
@@ -758,9 +793,13 @@ fn decode_int(
             let mut out = Vec::with_capacity(n);
             for c in raw.chunks_exact(elem) {
                 let signed = read(c);
+                // Add within the native type: widening first would put
+                // every negative stored value 2^n too high.
                 let unsigned = match col.format.kind {
-                    BinFieldKind::I16 => u64::from(signed as i16 as u16).wrapping_add(0x8000),
-                    BinFieldKind::I32 => u64::from(signed as i32 as u32).wrapping_add(0x8000_0000),
+                    BinFieldKind::I16 => u64::from((signed as i16 as u16).wrapping_add(0x8000)),
+                    BinFieldKind::I32 => {
+                        u64::from((signed as i32 as u32).wrapping_add(0x8000_0000))
+                    }
                     BinFieldKind::I64 => (signed as u64).wrapping_add(0x8000_0000_0000_0000),
                     _ => unreachable!("Unsigned only set for I/J/K"),
                 };
@@ -909,6 +948,141 @@ mod tests {
         let p = BinFormat::parse("PJ").unwrap();
         assert_eq!(p.vla_kind, Some(BinFieldKind::I32));
         assert_eq!(p.vla_max, None);
+    }
+
+    fn scalar_col(kind: BinFieldKind, tscal: f64, tzero: f64) -> BinColumn {
+        BinColumn {
+            index: 1,
+            name: "COL".into(),
+            unit: String::new(),
+            format: BinFormat {
+                repeat: 1,
+                kind,
+                vla_kind: None,
+                vla_max: None,
+            },
+            offset: 0,
+            tscal,
+            tzero,
+            tnull: None,
+            tdim: None,
+            int_storage: IntStorage::detect(kind, tscal, tzero),
+        }
+    }
+
+    fn decode_uint(col: &BinColumn, raw: &[u8]) -> u64 {
+        match decode_cell(col, raw, &[]).unwrap() {
+            BinValue::Uint(v) => v[0].unwrap(),
+            other => panic!("expected Uint, got {other:?}"),
+        }
+    }
+
+    /// Sec.11.3.1: `physical = stored + 2^(8n-1)`, wrapping at the
+    /// column width, so `stored = -2^(8n-1)` reads back as 0.
+    #[test]
+    fn unsigned_i16_column_covers_full_u16_range() {
+        let col = scalar_col(BinFieldKind::I16, 1.0, 32_768.0);
+        assert_eq!(col.int_storage, IntStorage::Unsigned);
+        for (stored, want) in [
+            (-32_768_i16, 0_u64),
+            (-32_767, 1),
+            (-1, 32_767),
+            (0, 32_768),
+            (1, 32_769),
+            (32_767, 65_535),
+        ] {
+            assert_eq!(decode_uint(&col, &stored.to_be_bytes()), want, "{stored}");
+        }
+    }
+
+    #[test]
+    fn unsigned_i32_column_covers_full_u32_range() {
+        let col = scalar_col(BinFieldKind::I32, 1.0, 2_147_483_648.0);
+        assert_eq!(col.int_storage, IntStorage::Unsigned);
+        for (stored, want) in [
+            (i32::MIN, 0_u64),
+            (-1, 2_147_483_647),
+            (0, 2_147_483_648),
+            (i32::MAX, 4_294_967_295),
+        ] {
+            assert_eq!(decode_uint(&col, &stored.to_be_bytes()), want, "{stored}");
+        }
+    }
+
+    #[test]
+    fn unsigned_i64_column_covers_full_u64_range() {
+        let col = scalar_col(BinFieldKind::I64, 1.0, 9_223_372_036_854_775_808.0);
+        assert_eq!(col.int_storage, IntStorage::Unsigned);
+        for (stored, want) in [
+            (i64::MIN, 0_u64),
+            (-1, 9_223_372_036_854_775_807),
+            (0, 9_223_372_036_854_775_808),
+            (i64::MAX, u64::MAX),
+        ] {
+            assert_eq!(decode_uint(&col, &stored.to_be_bytes()), want, "{stored}");
+        }
+    }
+
+    /// An element count that overflows on conversion to bytes must be
+    /// rejected, not wrapped (`capacity overflow` panic in release).
+    #[test]
+    fn vla_element_count_overflow_is_an_error() {
+        let mut col = scalar_col(BinFieldKind::Q, 1.0, 0.0);
+        col.format.vla_kind = Some(BinFieldKind::F64);
+        let mut raw = [0_u8; 16];
+        // 2^61 elements * 8 bytes wraps to 0 in a 64-bit usize.
+        raw[..8].copy_from_slice(&(1_i64 << 61).to_be_bytes());
+        assert!(decode_cell(&col, &raw, &[]).is_err());
+    }
+
+    /// Sec.7.3.3.2: `TDIM` on an `A` column makes the cell an array of
+    /// strings -- first dimension is the width, the rest the shape.
+    #[test]
+    fn char_column_with_tdim_splits_into_strings() {
+        let mut col = scalar_col(BinFieldKind::Char, 1.0, 0.0);
+        col.format.repeat = 15;
+        col.tdim = Some(vec![5, 3]);
+        match decode_cell(&col, b"alphabeta gamma", &[]).unwrap() {
+            BinValue::StrArray(v) => assert_eq!(v, vec!["alpha", "beta", "gamma"]),
+            other => panic!("expected StrArray, got {other:?}"),
+        }
+    }
+
+    /// Without `TDIM` an `A` column stays one string.
+    #[test]
+    fn char_column_without_tdim_is_one_string() {
+        let mut col = scalar_col(BinFieldKind::Char, 1.0, 0.0);
+        col.format.repeat = 15;
+        match decode_cell(&col, b"alphabeta gamma", &[]).unwrap() {
+            BinValue::Str(s) => assert_eq!(s, "alphabeta gamma"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// A `TDIM` product smaller than the repeat count is legal; the
+    /// trailing elements are undefined fill and are dropped.
+    #[test]
+    fn char_column_tdim_shorter_than_repeat_drops_fill() {
+        let mut col = scalar_col(BinFieldKind::Char, 1.0, 0.0);
+        col.format.repeat = 15;
+        col.tdim = Some(vec![5, 2]);
+        match decode_cell(&col, b"alphabeta gamma", &[]).unwrap() {
+            BinValue::StrArray(v) => assert_eq!(v, vec!["alpha", "beta"]),
+            other => panic!("expected StrArray, got {other:?}"),
+        }
+    }
+
+    /// A `TDIM` that overruns the field is malformed: fall back to one
+    /// string rather than reading past the cell.
+    #[test]
+    fn char_column_oversized_tdim_falls_back() {
+        let mut col = scalar_col(BinFieldKind::Char, 1.0, 0.0);
+        col.format.repeat = 15;
+        col.tdim = Some(vec![5, 9]);
+        assert!(matches!(
+            decode_cell(&col, b"alphabeta gamma", &[]).unwrap(),
+            BinValue::Str(_)
+        ));
     }
 
     #[test]

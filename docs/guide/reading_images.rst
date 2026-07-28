@@ -78,6 +78,12 @@ boolean masks, or scaled HDUs) raises a ``ValueError`` so that
 the caller can either narrow the key or explicitly opt into a
 full-file rewrite via ``hdu.data[...] = value``.
 
+Note that numpy edits to ``hdu.data`` are invisible to fitsy, so
+under ``mode='update'`` merely *reading* ``hdu.data`` marks the file
+for rewrite on ``flush``. Read through ``section`` (or open read-only,
+where ``data`` is frozen) to avoid paying for a rewrite you did not
+ask for.
+
 Limitations of lazy reads
 -------------------------
 

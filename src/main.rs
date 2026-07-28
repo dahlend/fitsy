@@ -406,17 +406,21 @@ fn string_card(h: &Header, key: &str) -> Option<String> {
 fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "fitsy funpack <input> [-o <output>]\n\n\
+            "fitsy funpack <input> [-o <output>] [-C]\n\n\
              Decompress every tile-compressed image HDU in `input`\n\
              and write the result to `output`. If `-o` is omitted,\n\
              `.fz` is stripped from the input name (or `.funpacked\n\
              .fits` is appended).\n\n\
-             Non-compressed HDUs are copied through unchanged."
+             Non-compressed HDUs are copied through unchanged.\n\n\
+             CHECKSUM and DATASUM are recomputed per HDU, as cfitsio's\n\
+             funpack does; the `.fz` sums are not carried over because\n\
+             tile compression may be lossy. Pass -C to skip."
         );
         return Ok(());
     }
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut checksums = true;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -427,6 +431,7 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             s if s.starts_with("--output=") => {
                 output = Some(PathBuf::from(&s["--output=".len()..]));
             }
+            "-C" | "--no-checksum" => checksums = false,
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag `{other}`").into());
             }
@@ -446,6 +451,9 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let file = open_fits(&input)?;
     let mut sink = File::create(&output)?;
     let mut writer = FitsWriter::new(&mut sink);
+    if checksums {
+        writer = writer.with_checksums();
+    }
     let mut decompressed = 0_usize;
     for i in 0..file.len() {
         let hdu = file.hdu(i)?;
