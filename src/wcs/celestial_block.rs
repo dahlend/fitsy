@@ -47,4 +47,12 @@ pub struct CelestialBlock {
     /// world coordinates (CTYPE projection codes `TNX` / `ZPX`,
     /// encoded in the `WAT1_xxx`/`WAT2_xxx` records).
     pub tnx: Option<Tnx>,
+    /// Projection-plane coordinates `(x0, y0)` of the fiducial point,
+    /// degrees.
+    ///
+    /// Normally `(0, 0)`: the fiducial point sits at the projection's
+    /// origin. `PVi_1`/`PVi_2` on the longitude axis (Sec.8.2) move it
+    /// off that origin, and intermediate coordinates are zero at the
+    /// reference point, so they need this offset before projecting.
+    pub fiducial_offset: (f64, f64),
 }

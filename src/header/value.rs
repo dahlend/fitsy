@@ -119,14 +119,12 @@ pub fn parse_lenient(keyword: &str, body: &[u8]) -> (Value, Option<String>) {
 /// the rule that a `/` inside a string literal is not a comment marker
 /// (Sec.4.1.2.3).
 ///
-/// The scan runs over raw bytes: every character that matters to it --
-/// the quote `'`, the space, and the comment slash `/` -- is ASCII, so a
-/// non-ASCII byte is treated as ordinary content. The extracted comment
-/// is free text and is always sanitized (any byte outside 0x20..=0x7E is
-/// mapped to a space) so a stray byte there never fails the parse. The
-/// value field, by contrast, is returned verbatim and must be valid
-/// ASCII text: a non-ASCII byte in it is an error (strict callers
-/// propagate it; [`parse_lenient`] turns it into [`Value::Unparsed`]).
+/// The scan runs over raw bytes, and every character it looks for is
+/// ASCII, so a non-ASCII byte is just content. Comments are free text
+/// and always sanitized, so a stray byte there never fails the parse.
+/// The value field is returned verbatim and must be ASCII: a stray
+/// byte is an error, which [`parse_lenient`] turns into
+/// [`Value::Unparsed`].
 pub fn split_value_and_comment(body: &[u8], keyword: &str) -> Result<ValueAndComment> {
     // Skip leading spaces; the first non-space byte tells us whether the
     // value is a string literal (which may contain a `/`).

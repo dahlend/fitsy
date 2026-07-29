@@ -99,8 +99,8 @@ fn cmd_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("HDUs: {}", file.len());
     println!("{:>3}  {:<10}  {:<24}  SHAPE", "#", "KIND", "EXTNAME/VER");
     for i in 0..file.len() {
-        let hdu = file.hdu(i)?;
-        let header = hdu.header();
+        // Header-only: nothing `info` prints needs the data.
+        let header = &file.parsed_header(i)?;
         let extname = string_card(header, "EXTNAME").unwrap_or_default();
         let extver = header
             .first("EXTVER")
@@ -115,7 +115,7 @@ fn cmd_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             format!("{extname}{extver}")
         };
-        let (kind, shape) = describe_hdu(&hdu);
+        let (kind, shape) = describe_header(header, i);
         println!("{i:>3}  {kind:<10}  {label:<24}  {shape}");
 
         // WCS info -- try primary (alt=' ') then alternates A..Z.
@@ -213,64 +213,93 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
     lines
 }
 
-fn describe_hdu(hdu: &Hdu<'_>) -> (&'static str, String) {
-    match hdu {
-        Hdu::Image(img) => {
-            let axes = img.axes();
-            let shape = if axes.is_empty() {
-                "(no data)".into()
-            } else {
-                let dims = axes
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" x ");
-                format!("{dims}, BITPIX={}", img.bitpix().as_i64())
-            };
-            ("Image", shape)
+/// Summarize an HDU. Every figure printed is a header keyword, so
+/// the data section is never read.
+fn describe_header(h: &Header, index: usize) -> (&'static str, String) {
+    let int = |key: &str| match h.first(key) {
+        Some(Value::Integer(n)) => Some(*n),
+        _ => None,
+    };
+    let axes = |naxis_key: &str, axis_key: &dyn Fn(usize) -> String| -> Vec<i64> {
+        let n = match h.first(naxis_key) {
+            Some(Value::Integer(n)) if *n > 0 => *n as usize,
+            _ => 0,
+        };
+        (1..=n).filter_map(|i| int(&axis_key(i))).collect()
+    };
+    let join = |dims: &[i64]| {
+        dims.iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(" x ")
+    };
+    let image_shape = || {
+        let dims = axes("NAXIS", &|i| format!("NAXIS{i}"));
+        if dims.is_empty() {
+            "(no data)".to_string()
+        } else {
+            format!("{}, BITPIX={}", join(&dims), int("BITPIX").unwrap_or(0))
         }
-        Hdu::RandomGroups(rg) => (
-            "RandomGrp",
+    };
+
+    let xtension = string_card(h, "XTENSION").unwrap_or_default();
+    if index == 0 {
+        // Same test the reader uses (Sec.6): GROUPS = T alone is not
+        // enough, or an ordinary image with a stray card would be
+        // reported as random groups.
+        let random_groups = matches!(h.first("GROUPS"), Some(Value::Logical(true)))
+            && int("NAXIS").is_some_and(|n| n >= 2)
+            && int("NAXIS1") == Some(0);
+        if random_groups {
+            return (
+                "RandomGrp",
+                format!(
+                    "{} groups, PCOUNT={}, BITPIX={}",
+                    int("GCOUNT").unwrap_or(1),
+                    int("PCOUNT").unwrap_or(0),
+                    int("BITPIX").unwrap_or(0),
+                ),
+            );
+        }
+        return ("Image", image_shape());
+    }
+    match xtension.as_str() {
+        "IMAGE" => ("Image", image_shape()),
+        "TABLE" => (
+            "AsciiTab",
             format!(
-                "{} groups, PCOUNT={}, BITPIX={}",
-                rg.n_groups(),
-                rg.pcount(),
-                rg.bitpix().as_i64(),
+                "{} rows x {} cols",
+                int("NAXIS2").unwrap_or(0),
+                int("TFIELDS").unwrap_or(0)
             ),
         ),
-        Hdu::AsciiTable(t) => (
-            "AsciiTab",
-            format!("{} rows x {} cols", t.n_rows(), t.columns().len()),
-        ),
-        Hdu::BinTable(t) => (
-            "BinTable",
-            format!("{} rows x {} cols", t.n_rows(), t.columns().len()),
-        ),
-        #[cfg(feature = "compression")]
-        Hdu::CompressedImage(c) => {
-            let axes = c.axes();
-            let dims = axes
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(" x ");
-            let tile = c
-                .tile_shape()
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(" x ");
+        "BINTABLE" if matches!(h.first("ZIMAGE"), Some(Value::Logical(true))) => {
+            let dims = axes("ZNAXIS", &|i| format!("ZNAXIS{i}"));
+            let tiles = axes("ZNAXIS", &|i| format!("ZTILE{i}"));
+            let tile = if tiles.is_empty() {
+                "?".to_string()
+            } else {
+                join(&tiles)
+            };
             (
                 "CompImage",
-                format!("{dims}, BITPIX={}, tiles {tile}", c.bitpix().as_i64()),
+                format!(
+                    "{}, BITPIX={}, tiles {tile}",
+                    join(&dims),
+                    int("ZBITPIX").unwrap_or(0)
+                ),
             )
         }
-        Hdu::Conforming(h) => ("Other", format!("XTENSION={}", h.xtension())),
-        #[allow(
-            unreachable_patterns,
-            reason = "Hdu is #[non_exhaustive]; needed for forward compatibility"
-        )]
-        _ => ("Other", String::new()),
+        "BINTABLE" => (
+            "BinTable",
+            format!(
+                "{} rows x {} cols",
+                int("NAXIS2").unwrap_or(0),
+                int("TFIELDS").unwrap_or(0)
+            ),
+        ),
+        "" => ("Other", String::new()),
+        other => ("Other", format!("XTENSION={other}")),
     }
 }
 
@@ -382,9 +411,11 @@ fn display_value(v: &Value) -> String {
             }
         }
         Value::Integer(n) => n.to_string(),
-        Value::Real(x) => format!("{x:.17e}"),
+        // `{:?}` is the shortest decimal that round-trips and keeps a
+        // decimal point. `{:.17e}` printed 30.0 as `3.0000...e1`.
+        Value::Real(x) => format!("{x:?}"),
         Value::ComplexInteger(re, im) => format!("({re}, {im})"),
-        Value::ComplexReal(re, im) => format!("({re:.17e}, {im:.17e})"),
+        Value::ComplexReal(re, im) => format!("({re:?}, {im:?})"),
         Value::String(s) => format!("'{s}'"),
         Value::Undefined => "(undefined)".into(),
         Value::Unparsed(s) => s.clone(),
@@ -540,8 +571,9 @@ fn cmd_checksum(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut any_fail = false;
     println!("{:>3}  {:<9}  {:<9}  EXTNAME", "#", "CHECKSUM", "DATASUM");
     for r in &reports {
-        let hdu = file.hdu(r.hdu)?;
-        let extname = string_card(hdu.header(), "EXTNAME").unwrap_or_default();
+        // `verify_checksums` streams without caching; loading the HDU
+        // for EXTNAME would pull the whole file back into memory.
+        let extname = string_card(&file.parsed_header(r.hdu)?, "EXTNAME").unwrap_or_default();
         let fmt = |v: Option<bool>| match v {
             None => "absent   ",
             Some(true) => "OK       ",

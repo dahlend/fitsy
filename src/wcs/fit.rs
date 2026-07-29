@@ -13,9 +13,8 @@
 //! 5. Compose a [`Wcs`] and report per-point and RMS residuals
 //!    (round-tripped through the fitted model, in arcseconds).
 //!
-//! The solver is a self-contained Householder QR (no external linalg
-//! dependency); it handles the small dense systems (<= ~120 unknowns
-//! for an order-9 SIP fit) we encounter in practice.
+//! The solver is a self-contained Householder QR, sized for the small
+//! dense systems this needs (<= ~120 unknowns for an order-9 SIP fit).
 
 use std::sync::Arc;
 
@@ -141,7 +140,7 @@ pub fn fit_celestial_wcs(
     // 2. De-project sky -> intermediate world (xi, eta) in degrees.
     let projection = projection::build(opts.projection, &[])?;
     let theta0 = projection.theta0();
-    let rotation = CelestialRotation::new(alpha0, delta0, None, None, theta0)?;
+    let rotation = CelestialRotation::new(alpha0, delta0, None, None, 0.0, theta0)?;
     let mut iw: Vec<(f64, f64)> = Vec::with_capacity(n);
     for &(ra, dec) in sky {
         let (phi, theta) = rotation.celestial_to_native(ra, dec);
@@ -501,6 +500,9 @@ fn build_wcs(
         sip,
         tpv: None,
         tnx: None,
+        // A fit always puts the fiducial point at the projection's
+        // own origin, so there is nothing to offset.
+        fiducial_offset: (0.0, 0.0),
     });
 
     Ok(Wcs {
@@ -782,7 +784,7 @@ mod tests {
     fn synthesize_wcs(crpix: (f64, f64), crval: (f64, f64), cd: [f64; 4], sip: Option<Sip>) -> Wcs {
         let projection = projection::build(ProjectionKind::Tan, &[]).unwrap();
         let theta0 = projection.theta0();
-        let rotation = CelestialRotation::new(crval.0, crval.1, None, None, theta0).unwrap();
+        let rotation = CelestialRotation::new(crval.0, crval.1, None, None, 0.0, theta0).unwrap();
         build_wcs(
             ProjectionKind::Tan,
             CelestialFrame::Equatorial,

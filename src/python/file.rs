@@ -44,18 +44,14 @@ fn header_has_wcs(h: &PyHeader) -> bool {
 
 /// Parse a FITS file open mode into the read-only flag.
 ///
-/// We follow astropy's `fits.open` naming so users coming from astropy
-/// don't have to relearn the vocabulary:
+/// Named after astropy's `fits.open` modes:
 ///
-/// * `"readonly"` (default) -- read-only handle; header mutation and
-///   `writeto` raise.
-/// * `"update"` -- read/write handle; in-place edits are preserved on
-///   `writeto`.
+/// * `"readonly"` (default) -- header mutation and `writeto` raise.
+/// * `"update"` -- read/write; edits are kept on `writeto`.
 ///
-/// `"denywrite"` is accepted as a synonym for `"readonly"` (we honour
-/// the read-only intent but do not take an OS-level lock). Astropy's
-/// `"append"` and `"ostream"` are not implemented; pass `fitsy.write`
-/// instead for output-only workflows.
+/// `"denywrite"` is a synonym for `"readonly"`, without the OS-level
+/// lock. `"append"` and `"ostream"` are not implemented; use
+/// `fitsy.write` for output-only work.
 fn parse_mode(mode: &str) -> PyResult<bool> {
     match mode {
         // 'denywrite' is astropy's stricter readonly (no other
@@ -93,31 +89,25 @@ fn parse_mode(mode: &str) -> PyResult<bool> {
 ///   in this release; reconstruct the table with
 ///   :func:`fitsy.bintable` to change column values.
 /// lenient : bool, optional
-///   Tolerate common non-conforming header content so real-world files
-///   load. **Default True.** Pass ``lenient=False`` to require strict
-///   FITS conformance instead.
+///   Tolerate common non-conforming headers so real-world files load.
+///   **Default True.** Pass ``lenient=False`` to require strict FITS
+///   conformance.
 ///
-///   Non-conforming bytes in free-text *comments* (Latin-1, tabs, other
-///   control bytes) are always tolerated and sanitized to spaces even
-///   when ``lenient=False`` -- a stray byte in a comment never fails
-///   the load.
+///   Stray bytes in free-text *comments* are always sanitized to
+///   spaces, even when ``lenient=False``.
 ///
-///   Leniency additionally tolerates non-conforming *values* that would
-///   otherwise abort the load:
+///   Leniency also accepts non-conforming *values*:
 ///
-///   * ``SIMPLE = F`` primary headers written by some pipelines;
-///   * non-ASCII bytes in string *values* -- sanitized to spaces;
-///   * lower-case keywords (folded to upper case) and other stray
-///     keyword characters;
-///   * value fields that match no standard type (e.g. a malformed
-///     number or unquoted string) -- kept verbatim as a string so the
-///     rest of the header and the pixel/table data still load;
-///   * some structural defects: stray bytes trailing the ``END`` card,
-///     a lower-case ``end`` terminator, and broken ``CONTINUE``
-///     long-string chains.
+///   * ``SIMPLE = F`` primary headers;
+///   * non-ASCII bytes in string values, sanitized to spaces;
+///   * lower-case or otherwise malformed keywords;
+///   * values matching no standard type, kept verbatim as a string so
+///     the rest of the file still loads;
+///   * stray bytes after ``END``, a lower-case ``end``, and broken
+///     ``CONTINUE`` chains.
 ///
-///   A present ``END`` card, block alignment, and the declared
-///   data-section size are always enforced, in every mode.
+///   A present ``END``, block alignment and the declared data size are
+///   enforced in every mode.
 ///
 /// Returns
 /// -------
@@ -210,25 +200,22 @@ struct FileState {
 
 /// Owning, ordered, mutable list of HDUs.
 ///
-/// astropy parity: ``FitsFile`` behaves like astropy's
-/// ``astropy.io.fits.HDUList``. Slots are typed Python
-/// objects (:class:`ImageHdu` / :class:`BinTable` /
-/// :class:`AsciiTable`); they own their header and data and
-/// survive after the file handle is dropped.
+/// Behaves like astropy's ``astropy.io.fits.HDUList``. Each slot is a
+/// typed object (:class:`ImageHdu` / :class:`BinTable` /
+/// :class:`AsciiTable`) owning its own header and data, and outlives
+/// the file handle.
 ///
-/// In ``mode='readonly'`` (the default), in-place edits
-/// (``f[0].data[...] = x``, ``f[0].header["K"] = v``,
-/// ``f.append(hdu)``, ``del f[i]``) are kept in memory and
-/// preserved on the next :meth:`writeto`; the on-disk source
-/// file is never modified.
+/// In ``mode='readonly'`` (the default), edits such as
+/// ``f[0].data[...] = x``, ``f[0].header["K"] = v``, ``f.append(hdu)``
+/// and ``del f[i]`` stay in memory until the next :meth:`writeto`; the
+/// source file is never modified.
 ///
-/// In ``mode='update'``, those same edits are written back to
-/// the source file on :meth:`flush`, :meth:`close`, or clean
-/// ``__exit__``. Pixel patches via ``f[i].section[...] = arr``
-/// are written immediately via positional ``pwrite``.
+/// In ``mode='update'`` the same edits go back to the source file on
+/// :meth:`flush`, :meth:`close` or a clean ``__exit__``. Pixel patches
+/// via ``f[i].section[...] = arr`` are written immediately.
 ///
-/// Use the module-level :func:`open` factory rather than
-/// constructing this class directly.
+/// Use the :func:`open` factory rather than constructing this
+/// directly.
 ///
 /// Examples
 /// --------
@@ -345,17 +332,13 @@ impl PyFitsFile {
 
     /// Try the header-only fast path for a plain image HDU.
     ///
-    /// Returns `Some(py_image_hdu)` when the HDU at `file_idx` is a
-    /// plain image (primary or `XTENSION='IMAGE'`, not random
-    /// groups, not a tile-compressed image). Returns `None`
-    /// otherwise so the caller can fall back to the generic
-    /// `file.hdu(i)` dispatch.
+    /// `Some` when the HDU at `file_idx` is a plain image -- not
+    /// random groups, not tile-compressed -- and `None` when the
+    /// caller should fall back to `file.hdu(i)`.
     ///
-    /// This avoids the per-HDU data cache (the bytes are read
-    /// lazily on demand via `read_data_owned` /
-    /// `read_image_subarray_be`), so `fitsy.open(...)` followed by
-    /// iteration over header-only properties costs only the
-    /// already-cached header parses -- no pixel bytes resident.
+    /// This path skips the per-HDU data cache, reading pixels only on
+    /// demand, so opening a file and reading header properties keeps
+    /// no pixel bytes resident.
     fn try_image_fast_path(
         &self,
         py: Python<'_>,

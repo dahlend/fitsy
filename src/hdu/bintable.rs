@@ -13,15 +13,14 @@
 //!
 //! # Variable-length-array (VLA) columns
 //!
-//! VLA columns are parsed -- the column's `BinFormat::vla_kind` and
-//! `BinFormat::vla_max` are surfaced -- but there is currently no
-//! high-level accessor that yields a typed slice per row. To read
-//! VLA payloads, use [`BinTableHdu::heap_bytes`] together with the
-//! per-cell descriptor: each `P` cell is two big-endian `i32`s
-//! `(n_elements, heap_offset)` and each `Q` cell is the same with
-//! `i64`s (Standard Sec.7.3.5). Multiply `n_elements` by the inner
-//! type's byte size from `vla_kind` to slice the heap. Writing VLA
-//! columns is also out of scope for the current builder.
+//! VLA columns are parsed -- `BinFormat::vla_kind` and
+//! `BinFormat::vla_max` are surfaced -- but there is no typed
+//! per-row accessor yet, and the builder cannot write them.
+//!
+//! To read one, slice [`BinTableHdu::heap_bytes`] using the cell
+//! descriptor: a `P` cell is two big-endian `i32`s
+//! `(n_elements, heap_offset)`, a `Q` cell the same in `i64`
+//! (Sec.7.3.5). The element size comes from `vla_kind`.
 
 use crate::error::{FitsError, Result};
 use crate::header::Header;

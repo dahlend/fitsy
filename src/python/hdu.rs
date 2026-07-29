@@ -51,19 +51,16 @@ pub(crate) struct ReadBinding {
 
 /// Image HDU with lazy numpy data.
 ///
-/// Returned by :meth:`FitsFile.hdu` (or ``file[i]``) when the HDU
-/// kind is an image. The pixel data is **not** read at materialisation
-/// time; the first access to ``hdu.data`` (or any operation that
-/// needs the full array, e.g. :meth:`FitsFile.writeto`) reads it
-/// from disk via positional ``pread``. Subsequent accesses return
-/// the same array, and in-place mutation (``hdu.data[0, 0] = 42``)
-/// is preserved on the next :meth:`FitsFile.writeto`.
+/// Returned by :meth:`FitsFile.hdu` (or ``file[i]``) for an image HDU.
+/// Pixels are read on the first access to ``hdu.data``, not before.
+/// Later accesses return the same array, and in-place edits like
+/// ``hdu.data[0, 0] = 42`` are kept on the next
+/// :meth:`FitsFile.writeto`.
 ///
-/// For workloads that operate on rectangular sub-regions of an
-/// image larger than RAM, use :attr:`section` -- ``hdu.section[a:b]``
-/// reads only the requested bytes, and ``hdu.section[a:b] = arr``
-/// writes only the touched bytes (via ``pwrite``) without
-/// materialising the full array in memory.
+/// For images larger than RAM, use :attr:`section`:
+/// ``hdu.section[a:b]`` reads only those bytes and
+/// ``hdu.section[a:b] = arr`` writes only those, never materialising
+/// the whole array.
 ///
 /// Examples
 /// --------
@@ -296,19 +293,14 @@ impl PyImageHdu {
 /// HDU actually has.
 ///
 /// Layout cards on an attached header are advisory: the write path
-/// ignores whatever they say and re-stamps `BITPIX`/`NAXIS*` from the
-/// HDU's own `axes`/`bitpix` (see `apply_extra_header` in
-/// `python::writer` and [`PyImageHdu::restamp_layout`]). That is what
-/// makes `ImageHdu(new_data, header=other_hdu.header)` work at all --
-/// the donor header describes a different image and is expected to
-/// disagree.
+/// re-stamps `BITPIX`/`NAXIS*` from the HDU's own `axes`/`bitpix`.
+/// That is what makes `ImageHdu(new_data, header=other_hdu.header)`
+/// work -- the donor header describes a different image.
 ///
-/// The read path has to follow the same rule, because it decodes
-/// through [`crate::ImageHdu`], which derives its geometry entirely
-/// from the header it is handed. Passing the user's header verbatim
-/// makes any stale or edited `NAXISn` abort the read of bytes that
-/// are perfectly fine. Everything else -- `BZERO`, `BSCALE`, `BLANK`
-/// -- is left as the user set it, since those cards *are* theirs.
+/// The read path must follow the same rule, since [`crate::ImageHdu`]
+/// takes its geometry from the header it is given, and a stale
+/// `NAXISn` would abort a read of perfectly good bytes. `BZERO`,
+/// `BSCALE` and `BLANK` are left alone: those cards are the user's.
 fn header_with_layout(header: &crate::Header, axes: &[u64], bitpix: Bitpix) -> crate::Header {
     use crate::Value;
     let mut h = header.clone();
@@ -484,17 +476,16 @@ impl PyImageHdu {
     /// Parameters
     /// ----------
     /// data : array-like
-    ///   Pixel data. Dtype must be one of ``bool``, ``int8``,
-    ///   ``uint8``, ``int16``, ``uint16``, ``int32``, ``uint32``,
-    ///   ``int64``, ``uint64``, ``float32``, ``float64``. Unsigned
-    ///   integers (and ``int8``) are encoded with the standard
-    ///   ``BZERO`` convention so they round-trip via the reader.
-    ///   A numpy array in the platform's byte order is stored by
-    ///   reference, so in-place mutation is preserved on
-    ///   :meth:`FitsFile.writeto`. Anything else (a nested list, a
-    ///   byte-swapped array) is converted once via
-    ///   :func:`numpy.asarray` and the HDU holds that conversion --
-    ///   later edits to the original object are not seen.
+    ///   Pixel data, of dtype ``bool``, ``int8``, ``uint8``,
+    ///   ``int16``, ``uint16``, ``int32``, ``uint32``, ``int64``,
+    ///   ``uint64``, ``float32`` or ``float64``. Unsigned integers and
+    ///   ``int8`` use the standard ``BZERO`` convention, so they
+    ///   round-trip.
+    ///
+    ///   A numpy array in native byte order is stored by reference, so
+    ///   in-place edits reach :meth:`FitsFile.writeto`. Anything else
+    ///   is converted once via :func:`numpy.asarray`, and later edits
+    ///   to the original are not seen.
     /// header : Header or Mapping[str, Any], optional
     ///   Initial header. Layout cards (``BITPIX``, ``NAXIS*``)
     ///   are recomputed from the array on write.

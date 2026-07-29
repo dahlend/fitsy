@@ -75,21 +75,57 @@ impl LinearTransform {
         Self::from_matrix(crpix, cd)
     }
 
-    /// 2-axis legacy `CROTA2` (Sec.8.2.1.4, deprecated). Builds the
-    /// equivalent PC matrix
-    /// $$ \mathrm{PC} \;=\; \begin{pmatrix}
+    /// Legacy `CROTAi` (Sec.8.2, deprecated). Builds the equivalent
+    /// `PC` matrix: the identity everywhere except the 2x2 block on
+    /// the rotated axis pair `(lon, lat)`, which holds
+    /// $$ \begin{pmatrix}
     ///   \cos\rho & -\lambda\sin\rho \\
     ///   \sin\rho/\lambda &  \cos\rho
     /// \end{pmatrix}$$
-    /// with `lambda = CDELT2/CDELT1`.
-    pub fn from_crota(crpix: [f64; 2], cdelt: [f64; 2], crota_deg: f64) -> Result<Self> {
-        if cdelt[0] == 0.0 {
-            return Err(FitsError::Wcs("CDELT1 = 0 with CROTA2".into()));
+    /// with `lambda = CDELT_lat/CDELT_lon`.
+    ///
+    /// `CROTAi` is indexed and attaches to the latitude axis, so the
+    /// rotated pair need not be axes 1 and 2, nor the image 2-D.
+    pub fn from_crota(
+        crpix: Vec<f64>,
+        cdelt: Vec<f64>,
+        crota_deg: f64,
+        lon: usize,
+        lat: usize,
+    ) -> Result<Self> {
+        let n = crpix.len();
+        if lon >= n || lat >= n || lon == lat {
+            return Err(FitsError::Wcs(format!(
+                "CROTA: rotated axis pair ({lon}, {lat}) is not valid for {n} axes"
+            )));
+        }
+        if cdelt.len() != n {
+            return Err(FitsError::Wcs(format!(
+                "CROTA dimensions inconsistent: crpix={n}, cdelt={}",
+                cdelt.len()
+            )));
+        }
+        // Sec.8.2: "CDELTi ... The value must not be zero." A zero
+        // here makes the ratio below infinite or NaN.
+        for axis in [lon, lat] {
+            if cdelt[axis] == 0.0 {
+                return Err(FitsError::Wcs(format!(
+                    "CDELT{} = 0 with CROTA (Sec.8.2: the value must not be zero)",
+                    axis + 1
+                )));
+            }
         }
         let rho = crota_deg * super::D2R;
-        let lam = cdelt[1] / cdelt[0];
-        let pc = vec![rho.cos(), -lam * rho.sin(), rho.sin() / lam, rho.cos()];
-        Self::from_pc(crpix.to_vec(), cdelt.to_vec(), pc)
+        let lam = cdelt[lat] / cdelt[lon];
+        let mut pc = vec![0.0; n * n];
+        for i in 0..n {
+            pc[i * n + i] = 1.0;
+        }
+        pc[lon * n + lon] = rho.cos();
+        pc[lon * n + lat] = -lam * rho.sin();
+        pc[lat * n + lon] = rho.sin() / lam;
+        pc[lat * n + lat] = rho.cos();
+        Self::from_pc(crpix, cdelt, pc)
     }
 
     fn from_matrix(crpix: Vec<f64>, matrix: Vec<f64>) -> Result<Self> {
@@ -263,6 +299,17 @@ fn invert_matrix(m: &[f64], n: usize) -> Result<Vec<f64>> {
         "matrix must be nxn; got {} elements for n={n}",
         m.len()
     );
+    // Every comparison against NaN is false, so the pivot test below
+    // would pass a NaN matrix straight through and yield an all-NaN
+    // inverse instead of the error Sec.8.2 calls for.
+    if let Some(pos) = m.iter().position(|v| !v.is_finite()) {
+        return Err(FitsError::Wcs(format!(
+            "linear matrix element [{}][{}] is not finite ({})",
+            pos / n,
+            pos % n,
+            m[pos]
+        )));
+    }
     // Augmented [M | I].
     let mut a = vec![0.0; n * 2 * n];
     for i in 0..n {
@@ -350,7 +397,7 @@ mod tests {
     #[test]
     fn crota_equivalent_to_pc() {
         // CROTA2 = 30deg; check (1,0) pixel offset rotates correctly.
-        let lt = LinearTransform::from_crota([1.0, 1.0], [1.0, 1.0], 30.0).unwrap();
+        let lt = LinearTransform::from_crota(vec![1.0, 1.0], vec![1.0, 1.0], 30.0, 0, 1).unwrap();
         let x = lt.pix_to_intermediate(&[2.0, 1.0]).unwrap();
         let c = (30_f64).to_radians().cos();
         let s = (30_f64).to_radians().sin();
@@ -358,9 +405,42 @@ mod tests {
         assert!((x[1] - s).abs() < 1e-12);
     }
 
+    /// A cube's extra axes must pass through untouched while the sky
+    /// plane still rotates.
+    #[test]
+    fn crota_rotates_only_the_celestial_pair_in_a_cube() {
+        let lt = LinearTransform::from_crota(vec![1.0, 1.0, 1.0], vec![1.0, 1.0, 7.0], 30.0, 0, 1)
+            .unwrap();
+        let x = lt.pix_to_intermediate(&[2.0, 1.0, 2.0]).unwrap();
+        let c = (30_f64).to_radians().cos();
+        let s = (30_f64).to_radians().sin();
+        assert!((x[0] - c).abs() < 1e-12);
+        assert!((x[1] - s).abs() < 1e-12);
+        // Third axis keeps its own CDELT and picks up no rotation.
+        assert!((x[2] - 7.0).abs() < 1e-12);
+    }
+
+    /// Sec.8.2: "CDELTi ... The value must not be zero." With CROTA a
+    /// zero yields a NaN matrix that used to invert without complaint.
+    #[test]
+    fn crota_with_zero_cdelt_rejected() {
+        for cdelt in [vec![0.0, 1.0], vec![1.0, 0.0]] {
+            let r = LinearTransform::from_crota(vec![1.0, 1.0], cdelt, 30.0, 0, 1);
+            assert!(r.is_err(), "zero CDELT accepted");
+        }
+    }
+
     #[test]
     fn singular_matrix_rejected() {
         let r = LinearTransform::from_cd(vec![0.0, 0.0], vec![1.0, 2.0, 2.0, 4.0]);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn non_finite_matrix_rejected() {
+        for bad in [f64::NAN, f64::INFINITY] {
+            let r = LinearTransform::from_cd(vec![0.0, 0.0], vec![1.0, 0.0, bad, 1.0]);
+            assert!(r.is_err(), "non-finite element {bad} accepted");
+        }
     }
 }

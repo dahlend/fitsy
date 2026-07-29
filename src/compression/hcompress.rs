@@ -10,12 +10,11 @@
 //!    optional `hsmooth` smoothing of coefficients between transform
 //!    levels (enabled by the `SMOOTH` parameter; off by default).
 //!
-//! The decoder is generic over the coefficient type via the [`Coeff`]
-//! trait so a single implementation services both 32-bit and 64-bit
-//! payloads (`fits_hdecompress` vs `fits_hdecompress64` in cfitsio).
-//! Output pixel widths supported: 1 / 2 / 4 / 8 byte signed integers
-//! (i.e. `ZBITPIX` 8, 16, 32 or 64, plus quantized floats which feed
-//! through the i32 path).
+//! The [`Coeff`] trait makes the decoder generic over coefficient
+//! width, so one implementation covers both cfitsio's
+//! `fits_hdecompress` and `fits_hdecompress64`. Output pixels may be
+//! 1, 2, 4 or 8 byte signed integers; quantized floats use the i32
+//! path.
 
 use std::ops::{Add, AddAssign, BitAnd, BitOr, BitOrAssign, BitXor, Neg, Shl, Shr, Sub};
 

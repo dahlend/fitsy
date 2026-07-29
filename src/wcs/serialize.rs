@@ -17,28 +17,24 @@
 //!
 //! `tests/wcs.rs::to_header_round_trips_every_projection` pins the
 //! contract: parse -> `to_header` -> parse must reproduce the same
-//! sky positions for every projection code and pole convention.
+//! sky positions for every projection and pole convention.
 //!
 //! Two things a `Header` cannot carry on its own:
 //!
-//! * **`NAXISi`.** No image dimensions are known here, so placeholder
-//!   zeros are emitted; merge into a header that has the real values.
-//! * **The `-TAB` lookup table.** Paper III puts the coordinate array
-//!   in a separate BINTABLE extension. The pointer cards name it, but
-//!   a caller writing this header out must carry that extension along,
-//!   exactly as the source file did.
+//! * **`NAXISi`.** No image dimensions are known here, so zeros are
+//!   emitted; merge into a header that has the real values.
+//! * **The `-TAB` lookup table**, which Paper III puts in a separate
+//!   BINTABLE. The pointer cards name it, but the caller has to carry
+//!   that extension along.
 //!
-//! One keyword family is written unsuffixed even under an alternate
-//! `alt`: `RESTFRQ` / `RESTWAV`. The Standard defines `RESTFRQa` /
-//! `RESTWAVa` (FITS 4.0 Table 22), but [`crate::wcs`]'s parser reads
-//! only the bare spelling, so a suffixed card would not round-trip.
-//! `to_header('A')` on a spectral WCS therefore emits a rest quantity
-//! that wcslib and astropy attribute to the primary description.
+//! `RESTFRQ` / `RESTWAV` are written unsuffixed even for an alternate
+//! description. The Standard defines `RESTFRQa` / `RESTWAVa`, but this
+//! crate's parser reads only the bare spelling, so a suffixed card
+//! would not round-trip -- at the cost that wcslib and astropy read
+//! ours as belonging to the primary description.
 //!
-//! Values are written **resolved** rather than as-found: the defaults
-//! in Paper II Sec.2.4 depend on the projection's `theta0`, so echoing
-//! the angles we actually computed is immune to a default being
-//! re-derived differently on the way back in.
+//! Values are written **resolved** rather than as-found, since the
+//! Paper II Sec.2.4 defaults depend on the projection's `theta0`.
 
 use std::fmt::Write as _;
 
@@ -144,19 +140,14 @@ impl Wcs {
 
         // LONPOLE / LATPOLE and the projection's own PVi_m table.
         //
-        // Both are written unconditionally with the *resolved* values
-        // rather than only when they differ from the default. The
-        // Paper II Sec.2.4 defaults depend on `theta0`, which varies
-        // per projection, so echoing resolved angles is both simpler
-        // and immune to a default we might compute differently on the
-        // way back in.
+        // Written unconditionally, with resolved values: the Sec.2.4
+        // defaults depend on the projection's `theta0`, so echoing
+        // what we computed avoids re-deriving a default differently.
         //
-        // `rotation.theta_p` is LATPOLE with the eq. (9) branch already
-        // resolved, so writing it makes the reader re-select the same
-        // root. For the theta0 = 0 projections (cylindrical,
-        // pseudo-cylindrical, quad-cube, HPX, ...) both roots are
-        // usually valid and picking the wrong one moves the sky by
-        // tens of degrees.
+        // `theta_p` is LATPOLE with the eq. (9) branch already picked,
+        // so the reader re-selects the same root. Where `theta0 = 0`
+        // both roots are usually valid, and the wrong one moves the
+        // sky by tens of degrees.
         if let Some(cb) = &self.celestial {
             let lon_axis = cb.pair.lon + 1;
             let lat_axis = cb.pair.lat + 1;
@@ -178,6 +169,26 @@ impl Wcs {
                     Value::Real(v),
                     Some("Projection parameter"),
                 )?;
+            }
+            // A moved fiducial point rides on the *longitude* axis
+            // (Sec.8.2). Only written when it differs from the
+            // projection's origin: TPV and TNX/ZPX claim `PV<lon>_m`
+            // for coefficients, which a defaulted card would corrupt.
+            if cb.tpv.is_none() && cb.tnx.is_none() {
+                if cb.rotation.phi0 != 0.0 {
+                    h.push(
+                        format!("PV{lon_axis}_1{suffix}"),
+                        Value::Real(cb.rotation.phi0),
+                        Some("[deg] Native longitude of fiducial point"),
+                    )?;
+                }
+                if cb.rotation.theta0 != cb.projection.theta0() {
+                    h.push(
+                        format!("PV{lon_axis}_2{suffix}"),
+                        Value::Real(cb.rotation.theta0),
+                        Some("[deg] Native latitude of fiducial point"),
+                    )?;
+                }
             }
             if let Some(tpv) = &cb.tpv {
                 write_tpv(&mut h, tpv, lon_axis, lat_axis, &suffix)?;
@@ -232,25 +243,17 @@ impl Wcs {
             )?;
         }
 
-        // Spectral axes need only their rest quantity: CTYPE, CUNIT
-        // and CRVAL are already written above, and `SpectralAxis` is
-        // reconstructed from exactly those four inputs.
+        // Spectral axes need only their rest quantity; CTYPE, CUNIT
+        // and CRVAL are written above, and those four rebuild a
+        // `SpectralAxis`.
         //
-        // A WCS description has one rest-quantity slot however many
-        // spectral axes it declares, so two axes disagreeing about it
-        // is an error rather than a silent write of the first:
-        // dropping one would hand back a WCS that re-parses into a
-        // different transform.
+        // There is one rest-quantity slot however many spectral axes
+        // a description declares, so two axes disagreeing is an error:
+        // silently keeping the first would re-parse into a different
+        // transform.
         //
-        // Written unsuffixed even for an alternate description. The
-        // Standard does define `RESTFRQa` / `RESTWAVa` (FITS 4.0
-        // Table 22), but `crate::wcs::parse` only reads the bare
-        // forms, so emitting a suffix here would produce a header
-        // this crate cannot read back. The cost is that
-        // `to_header('A')` on a spectral WCS writes a card wcslib
-        // and astropy attach to the *primary* description; fixing it
-        // properly means teaching the parser the suffixed spelling
-        // first.
+        // Written unsuffixed even for an alternate description; see
+        // the module note.
         if let Some(sx) = self.spectral.first() {
             if let Some(other) = self
                 .spectral
@@ -342,16 +345,14 @@ fn alt_suffix(alt: char) -> Result<String> {
 
 /// TPV polynomial: `PV<lon>_m` and `PV<lat>_m`.
 ///
-/// `PVi_1` is always emitted, even when zero. Its default is `1.0`,
+/// `PVi_1` is always emitted, even when zero: its default is `1.0`,
 /// not `0.0` (TPV registry), so omitting a deliberately-zeroed linear
-/// term would silently restore identity scaling on the way back in.
+/// term would restore identity scaling on the way back in.
 ///
-/// Writing it also buys interoperability: wcslib does *not* apply the
-/// documented `PVi_1 = 1` default when an axis has no `PVi_m` cards at
-/// all, so a header carrying only `PV2_*` reads 3.5 arcsec differently
-/// in astropy than here. Emitting both axes explicitly removes the
-/// ambiguity, and the serialized header then agrees with astropy to
-/// 1e-10 arcsec.
+/// It also settles a disagreement -- wcslib skips that default when an
+/// axis has no `PVi_m` cards at all, so a header with only `PV2_*`
+/// reads 3.5 arcsec differently in astropy. Emitting both axes brings
+/// the two within 1e-10 arcsec.
 fn write_tpv(
     h: &mut Header,
     tpv: &Tpv,
@@ -394,11 +395,8 @@ fn projection_code_of(ctype: &str) -> String {
 /// suffixed form.
 ///
 /// `wtype` comes from the CTYPE code rather than being hardcoded.
-/// Our own reader ignores it -- `Tnx::from_wat_strings` only greps
-/// for `lngcor`/`latcor` -- so a wrong value round-trips here
-/// undetected while producing a header whose `WAT` records
-/// contradict its `CTYPE` for every other reader, which do key on
-/// it.
+/// Our reader ignores it, so a wrong value round-trips undetected
+/// while contradicting the CTYPE for every reader that does read it.
 fn write_tnx(
     h: &mut Header,
     tnx: &Tnx,
@@ -459,25 +457,20 @@ fn encode_tnx_surface(s: &TnxSurface) -> String {
 ///
 /// # Why every continuation fragment starts with a space
 ///
-/// The two readers in the wild disagree about how to rejoin these
-/// fragments. IRAF's own convention is plain **concatenation** -- it
-/// pads each record with trailing blanks and relies on them
-/// surviving -- while [`crate::wcs::wat::reassemble`] joins with a
-/// single space, because FITS 4.0 Sec.4.2.1.1 makes trailing blanks
-/// insignificant so a conforming parser cannot see IRAF's padding
-/// (see that module's note).
+/// Readers disagree on how to rejoin the fragments. IRAF concatenates
+/// them, relying on its own trailing blanks; ours joins with a single
+/// space, because Sec.4.2.1.1 makes trailing blanks insignificant so a
+/// conforming parser cannot see IRAF's padding.
 ///
-/// Splitting on a token boundary and dropping the space satisfies
-/// only the second: a concatenating reader would glue `1.0` and
-/// `0.00015` into `1.00.00015`. Leading blanks *are* significant, so
-/// carrying the separator at the head of the next fragment satisfies
-/// both -- concatenation reproduces the record exactly, and joining
-/// with a space merely doubles one, which `TnxSurface::parse` cannot
-/// notice because it tokenizes with `split_ascii_whitespace`.
+/// Splitting on a token boundary and dropping the space suits only the
+/// second -- a concatenating reader glues `1.0` and `0.00015` into
+/// `1.00.00015`. Leading blanks *are* significant, so putting the
+/// separator at the head of the next fragment suits both: concatenation
+/// is exact, and joining with a space merely doubles one, which the
+/// whitespace-tokenizing parser cannot notice.
 ///
-/// Fragments are kept short enough to sit in one 80-byte card without
-/// tripping the long-string `CONTINUE` convention, which IRAF readers
-/// would not understand here.
+/// Fragments stay short enough for one 80-byte card, since the
+/// `CONTINUE` convention would not help an IRAF reader here.
 fn write_wat_record(h: &mut Header, axis: usize, record: &str) -> Result<()> {
     const MAX: usize = 60;
     let mut fragment = String::new();
@@ -686,9 +679,10 @@ mod tests {
             crate::wcs::projection::build(crate::wcs::projection::ProjectionKind::Tan, &[])
                 .unwrap();
         let theta0 = projection.theta0();
-        let rotation =
-            crate::wcs::celestial::CelestialRotation::new(crval.0, crval.1, None, None, theta0)
-                .unwrap();
+        let rotation = crate::wcs::celestial::CelestialRotation::new(
+            crval.0, crval.1, None, None, 0.0, theta0,
+        )
+        .unwrap();
         let _ = (theta0, rotation, projection);
         // Use the fitter's `synthesize` path indirectly by building
         // a header and parsing.
@@ -773,10 +767,9 @@ mod tests {
     /// `wtype=` must name the projection the CTYPE names.
     ///
     /// Regression: it was hardcoded to `tnx`, so a `RA---ZPX` WCS
-    /// serialized to a header whose `WAT` records claimed TNX. Our
-    /// own reader ignores `wtype` -- it only greps for
-    /// `lngcor`/`latcor` -- so the round-trip test passed while the
-    /// output was wrong for every reader that does read it.
+    /// wrote `WAT` records claiming TNX. Our reader ignores `wtype`,
+    /// so the round trip passed while the output was wrong for every
+    /// reader that does not.
     #[test]
     fn wat_wtype_follows_the_ctype() {
         for (code, extra) in [
@@ -814,15 +807,13 @@ mod tests {
         }
     }
 
-    /// The `WATi_nnn` split must survive *both* rejoin conventions:
-    /// IRAF concatenates the fragments, our reader joins them with a
-    /// single space (see `crate::wcs::wat`). Carrying the separator
-    /// at the head of each continuation fragment satisfies both,
-    /// because FITS preserves leading blanks but not trailing ones.
+    /// The `WATi_nnn` split must survive both rejoin conventions:
+    /// IRAF concatenates, our reader joins with a space. Leading the
+    /// continuation fragment with the separator suits both, since FITS
+    /// keeps leading blanks but not trailing ones.
     ///
-    /// Regression: the split dropped the separator entirely, so a
-    /// concatenating reader turned `1.0` + `0.00015` into
-    /// `1.00.00015`.
+    /// Regression: the split dropped the separator, so a concatenating
+    /// reader turned `1.0` + `0.00015` into `1.00.00015`.
     #[test]
     fn wat_fragments_rejoin_under_both_conventions() {
         let cards = vec![

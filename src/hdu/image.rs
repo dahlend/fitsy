@@ -93,13 +93,17 @@ impl<'a> ImageHdu<'a> {
         // `collect` from the `ExactSizeIterator` rather than pushing in a
         // loop: the per-push capacity check blocks vectorisation and costs
         // roughly half the decode throughput.
-        let out: Vec<T> = self.data.chunks_exact(bsize).map(T::from_be_bytes).collect();
+        let out: Vec<T> = self
+            .data
+            .chunks_exact(bsize)
+            .map(T::from_be_bytes)
+            .collect();
         ImageData::new(out, self.axes.clone())
     }
 
-    /// Decode the array into the native pixel type indicated by
-    /// `BITPIX`, returning a [`ImagePixels`] enum so callers don't
-    /// need to know the type at compile time. No scaling is applied.
+    /// Decode into the native `BITPIX` type, as an [`ImagePixels`]
+    /// enum so the caller need not know it at compile time. No scaling
+    /// is applied.
     ///
     /// # Examples
     ///
@@ -224,13 +228,12 @@ impl<'a> ImageHdu<'a> {
 
     /// Read a rectangular sub-array.
     ///
-    /// `start` and `shape` are in FITS axis order -- element 0 is the
-    /// `NAXIS1` (fastest-varying) axis. Both must have length
-    /// `NAXIS`. The returned [`ImageData`] has the requested `shape`.
-    /// Each row of the requested region is copied with a single byte
-    /// range read; sub-pixel sub-axes are walked recursively, so the
-    /// I/O is still bounded by the volume of the requested cuboid
-    /// (not the full image).
+    /// `start` and `shape` are in FITS axis order (element 0 is
+    /// `NAXIS1`, the fastest-varying axis) and must both have length
+    /// `NAXIS`. The result has the requested `shape`.
+    ///
+    /// Each row is copied in one range read, so the I/O is bounded by
+    /// the requested region, not the whole image.
     pub fn read_subarray<T: Pixel>(&self, start: &[u64], shape: &[u64]) -> Result<ImageData<T>> {
         use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
 

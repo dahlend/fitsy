@@ -79,25 +79,21 @@ pub struct TabAxis {
 
 impl TabAxis {
     /// Forward map: intermediate world coordinate -> world coordinate.
-    /// `psi` is the **un-shifted** intermediate value (i.e. before
-    /// adding `CRVAL`); per Paper III the table lookup is performed
-    /// on the linear-pipeline output and the result is the final
-    /// world coordinate (no further `CRVAL` addition).
+    /// `psi` is the un-shifted intermediate value: Paper III looks up
+    /// the linear-pipeline output directly, and the result is already
+    /// the world coordinate.
     ///
     /// # Domain
     ///
     /// Paper III Sec.6.1.2 defines the axis over
     /// `0.5 <= Upsilon_m <= K + 0.5` -- the table plus half a sample
-    /// step at each end, which covers the outer halves of the
-    /// boundary pixels, since pixels near an image edge routinely
-    /// sit a fraction of a row off the tabulated range. Inside that
-    /// margin the value is linearly interpolated (or extrapolated
-    /// from the nearest segment); beyond it the coordinate is
-    /// undefined and this returns an error. `wcslib` returns NaN in
-    /// the same region.
+    /// step at each end, covering the outer halves of the boundary
+    /// pixels. Values inside are interpolated; beyond it the
+    /// coordinate is undefined and this errors, where `wcslib`
+    /// returns NaN.
     ///
-    /// [`Self::inverse`] deliberately does *not* impose the matching
-    /// bound; see its note.
+    /// [`Self::inverse`] does not impose the matching bound; see its
+    /// note.
     pub fn forward(&self, psi: f64) -> Result<f64> {
         if self.coord.is_empty() {
             return Err(FitsError::Wcs(format!(
@@ -116,13 +112,9 @@ impl TabAxis {
         };
         // Paper III Sec.6.1.2: "The value of Upsilon_m derived from
         // psi_m must lie in the range 0.5 <= Upsilon_m <= K + 0.5."
-        // Extrapolation is permitted, but only by the half sample
-        // step that covers the outer halves of the boundary pixels --
-        // not indefinitely. `c` here is the 0-based form of
-        // Upsilon_m, so the bound is [-0.5, K - 0.5].
-        //
-        // Unbounded extrapolation invented a coordinate for pixels
-        // the table does not describe: `wcslib` returns NaN there.
+        // Extrapolating further invents a coordinate for pixels the
+        // table does not describe. `c` is the 0-based Upsilon_m, so
+        // the bound is [-0.5, K - 0.5].
         let k = self.coord.len() as f64;
         if !(c >= -0.5 && c <= k - 0.5) {
             return Err(FitsError::Wcs(format!(
@@ -144,17 +136,16 @@ impl TabAxis {
     /// # Asymmetry with [`Self::forward`]
     ///
     /// This extrapolates without limit where `forward` refuses past
-    /// the Paper III margin, so a world value off the end of the
-    /// table yields a pixel that `forward` would then reject. That is
-    /// deliberate: [`Wcs::celestial_to_pixel`](crate::Wcs::celestial_to_pixel)
-    /// fills the non-celestial axes with `CRVAL`, which for a `-TAB`
-    /// axis is a linear-pipeline value, not a table value, and is
-    /// routinely nowhere near the tabulated range. Bounding here
-    /// would make every sky-to-pixel call on a `-TAB` cube fail over
-    /// an axis the caller never asked about.
+    /// the Paper III margin, so a world value off the end of the table
+    /// yields a pixel `forward` would reject. That is deliberate:
+    /// [`Wcs::celestial_to_pixel`](crate::Wcs::celestial_to_pixel)
+    /// fills the other axes with `CRVAL`, which on a `-TAB` axis is
+    /// routinely nowhere near the tabulated range -- bounding here
+    /// would fail every sky-to-pixel call on a `-TAB` cube over an
+    /// axis the caller never asked about.
     ///
-    /// Callers who need the round trip to be closed should check the
-    /// result with `forward`.
+    /// Check the result with `forward` if you need a closed round
+    /// trip.
     pub fn inverse(&self, world: f64) -> Result<f64> {
         if self.coord.len() < 2 {
             return Err(FitsError::Wcs(format!(
@@ -319,14 +310,13 @@ mod tests {
         assert!(tab.inverse(3.0).is_err());
     }
 
-    /// Paper III Sec.6.1.2 allows extrapolation by exactly half a
-    /// sample step past each end -- enough to cover the outer halves
-    /// of the boundary pixels -- and leaves the coordinate undefined
-    /// beyond that (`0.5 <= Upsilon_m <= K + 0.5`).
+    /// Paper III Sec.6.1.2 allows half a sample step past each end
+    /// (`0.5 <= Upsilon_m <= K + 0.5`) and leaves the coordinate
+    /// undefined beyond that.
     ///
-    /// Regression: extrapolation was unbounded, so a pixel far
-    /// outside the table got a confidently wrong coordinate instead
-    /// of an error. `wcslib` returns NaN there.
+    /// Regression: extrapolation was unbounded, so a pixel far outside
+    /// the table got a confidently wrong coordinate instead of an
+    /// error.
     #[test]
     fn extrapolates_only_to_the_half_step_limit() {
         let tab = TabAxis {

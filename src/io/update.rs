@@ -5,16 +5,14 @@
 //! rectangular patch into one image HDU's data section without
 //! touching the rest of the file.
 //!
-//! This is the primitive behind ``hdu.data[a:b, c:d] = patch``
-//! semantics under ``mode='update'``: small edits to large files
-//! cost O(patch), not O(file). Patch writes go through positional
-//! `pwrite` (`FileExt::write_at`) so no `unsafe` is involved and
-//! external truncation surfaces as an `Err` instead of `SIGBUS`.
+//! This backs ``hdu.data[a:b, c:d] = patch`` under ``mode='update'``,
+//! where a small edit to a large file costs O(patch). Writes use
+//! positional `pwrite`, so there is no `unsafe` and a truncated file
+//! gives an `Err` rather than SIGBUS.
 //!
-//! Like astropy's mmap-backed update path, patches are NOT crash-safe:
-//! a process death mid-write can leave a torn file with no automatic
-//! recovery. Callers that need atomicity should write to a temp file
-//! and rename, or take an external snapshot before patching.
+//! Patches are **not** crash-safe, as in astropy's mmap update mode:
+//! dying mid-write leaves a torn file. For atomicity, snapshot first
+//! or write to a temp file and rename.
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -46,14 +44,13 @@ struct ImageMeta {
 ///
 /// # Concurrency
 ///
-/// Backed by a writable file handle and `pwrite`. The caller must
-/// ensure no other process or thread mutates the file concurrently.
+/// The caller must ensure nothing else mutates the file meanwhile.
 ///
 /// # Safety
 ///
-/// Resizing an HDU is **not** supported (it would invalidate the
-/// offsets of every following HDU). Patch writes are bounds-checked
-/// against the cached axis lengths and against the file length.
+/// Resizing an HDU is **not** supported: it would invalidate every
+/// following HDU's offset. Patches are bounds-checked against the
+/// cached axis lengths and the file length.
 #[derive(Debug)]
 pub struct FitsUpdater {
     file: File,
@@ -63,15 +60,12 @@ pub struct FitsUpdater {
     /// One entry per HDU. `None` for non-image HDUs (we only support
     /// image patches today).
     images: Vec<Option<ImageMeta>>,
-    /// Monotonically increasing tag bumped on every reopen / replace
-    /// of the inner state. Callers that cache `(updater, hdu_idx)`
-    /// across rewrites can record the generation at the time the
-    /// binding was issued and refuse the patch when the generation
-    /// has advanced. See `FitsFile.persist_full_rewrite`.
+    /// Bumped whenever the inner state is replaced. A caller caching
+    /// `(updater, hdu_idx)` across rewrites records the tag and
+    /// refuses the patch once it advances.
     ///
-    /// Only consulted by the Python wrapper today; pure-Rust
-    /// `FitsUpdater` users have no shared cached bindings to
-    /// invalidate.
+    /// Only the Python wrapper needs this; pure-Rust users have no
+    /// cached bindings to invalidate.
     #[cfg(feature = "python")]
     generation: u64,
 }
@@ -79,12 +73,10 @@ pub struct FitsUpdater {
 impl FitsUpdater {
     /// Open `path` for in-place updates.
     ///
-    /// Parses the file once to discover HDU layouts, then keeps a
-    /// plain read/write handle -- patches go through positional
-    /// `pwrite`, not a mapping, as described in the module docs.
-    /// Headers are parsed leniently by default (matching
-    /// [`FitsFile::open`](crate::FitsFile::open)); use
-    /// [`Self::open_with`] with `lenient = false` for strict parsing.
+    /// Parses the file once for its HDU layout, then keeps a plain
+    /// read/write handle. Headers are parsed leniently, like
+    /// [`FitsFile::open`](crate::FitsFile::open); use
+    /// [`Self::open_with`] for strict parsing.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with(path, true)
     }
@@ -216,22 +208,19 @@ impl FitsUpdater {
 
     /// Write a rectangular pixel patch into image HDU `i`.
     ///
-    /// `start` and `shape` are in FITS axis order (element 0 is the
-    /// `NAXIS1` / fastest-varying axis). Both must have length
-    /// `NAXIS`. Values are encoded big-endian and copied row by row;
-    /// only the touched byte range is written.
+    /// `start` and `shape` are in FITS axis order (element 0 is
+    /// `NAXIS1`, the fastest-varying axis) and must both have length
+    /// `NAXIS`. Only the touched byte range is written.
     ///
-    /// `pixels` must contain `shape.iter().product()` elements in
-    /// C order with the `NAXIS1` axis varying fastest (matches the
-    /// in-memory layout of a numpy array of shape `shape` reversed).
+    /// `pixels` holds `shape.iter().product()` elements in C order
+    /// with `NAXIS1` fastest -- the layout of a numpy array of the
+    /// reversed `shape`.
     ///
     /// # Crash safety
     ///
-    /// None. A crash mid-patch can leave the file with a torn write
-    /// (some rows updated, others not). This matches astropy's
-    /// mmap-backed update mode. Callers that need atomicity should
-    /// snapshot the file before patching or use a temp-file + rename
-    /// rewrite via `FitsFile.flush()` instead.
+    /// None: dying mid-patch leaves some rows updated and others not,
+    /// as in astropy's mmap update mode. Snapshot first, or rewrite
+    /// via `FitsFile.flush()`, if you need atomicity.
     pub fn write_image_subarray<T: Pixel>(
         &mut self,
         i: usize,

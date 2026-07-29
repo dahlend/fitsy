@@ -8,17 +8,13 @@
 //!
 //! ## Trailing-space caveat
 //!
-//! IRAF writes each WAT fragment padded with trailing spaces to a
-//! fixed width and relies on those spaces being preserved when the
-//! reader concatenates them. FITS 4.0 Sec.4.2.1.1 says trailing spaces
-//! in quoted strings are *not significant*, so a strictly conforming
-//! reader (such as ours) discards them. In practice IRAF also breaks
-//! every fragment at a whitespace boundary, so joining the trimmed
-//! fragments with a single space recovers the original record without
-//! splitting tokens. The very rare pathological file that breaks a
-//! numeric token mid-card (against IRAF's own writer) cannot be
-//! reconstructed losslessly here; such files are not currently
-//! supported.
+//! IRAF pads each fragment with trailing spaces and relies on them
+//! surviving concatenation, but Sec.4.2.1.1 makes trailing spaces in
+//! quoted strings insignificant, so a conforming reader discards them.
+//! IRAF also breaks fragments at whitespace, so joining the trimmed
+//! pieces with one space recovers the record without splitting tokens.
+//! A file that breaks a number mid-card -- which IRAF's own writer
+//! never produces -- cannot be reassembled here.
 
 use crate::header::Header;
 use crate::header::value::Value;

@@ -7,13 +7,11 @@
 //!   the underlying FITS bytes, leaving any non-gzipped buffer
 //!   unchanged.
 //!
-//! * **FITS tile-compressed images** (`*.fz`, Pence & Seaman 2010
-//!   / FITS standard 2016 Sec.10). The image is stored as a `BINTABLE`
-//!   carrying `ZIMAGE = T`, `ZBITPIX`, `ZNAXIS`, `ZNAXISn`,
-//!   `ZTILEn`, `ZCMPTYPE`, plus a variable-length `COMPRESSED_DATA`
-//!   column. Each row holds one tile. The standard also lets any
-//!   tile fall back to GZIP via `GZIP_COMPRESSED_DATA`, or store
-//!   raw pixels verbatim via `UNCOMPRESSED_DATA`.
+//! * **FITS tile-compressed images** (`*.fz`, Pence & Seaman 2010 /
+//!   Standard Sec.10). The image lives in a `BINTABLE` with
+//!   `ZIMAGE = T`, the `Z*` geometry keywords and a variable-length
+//!   `COMPRESSED_DATA` column, one tile per row. Any tile may fall
+//!   back to `GZIP_COMPRESSED_DATA` or raw `UNCOMPRESSED_DATA`.
 //!
 //! This crate currently implements `GZIP_1`, `GZIP_2`, `RICE_1`,
 //! `PLIO_1` and `HCOMPRESS_1` for 8-/16-/32-/64-bit integer images,
@@ -1290,15 +1288,13 @@ impl TileOpts {
 impl<W: std::io::Write> crate::io::writer::FitsWriter<W> {
     /// Tile-compress an IMAGE HDU and stream it out as a BINTABLE.
     ///
-    /// `header` and `data` describe the **uncompressed** image (the
-    /// same `(Header, Vec<u8>)` pair an
-    /// [`ImageBuilder`](crate::ImageBuilder) would emit). The writer
-    /// re-encodes them per Standard Sec.7.4 (Pence & Seaman 2010) and
-    /// writes the resulting tile-compressed BINTABLE through
+    /// `header` and `data` describe the **uncompressed** image, as
+    /// [`ImageBuilder`](crate::ImageBuilder) would emit it. They are
+    /// re-encoded per Sec.7.4 and written through
     /// [`write_hdu`](Self::write_hdu).
     ///
-    /// Only `GZIP_1` is emitted. See [`TileOpts`] for tile-shape and
-    /// `EXTNAME` controls.
+    /// Only `GZIP_1` is emitted. [`TileOpts`] controls tile shape and
+    /// `EXTNAME`.
     pub fn write_hdu_compressed(
         &mut self,
         header: &Header,

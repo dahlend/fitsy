@@ -59,16 +59,14 @@ pub(crate) const R2D: f64 = 180.0 / std::f64::consts::PI;
 pub struct Wcs {
     pub naxis: usize,
     pub linear: LinearTransform,
-    /// Per-axis CTYPE values, uppercase.
+    /// Per-axis CTYPE values, exactly as parsed. Codes are matched
+    /// case-insensitively, but the strings are not folded.
     pub ctype: Vec<String>,
     /// Per-axis CUNIT values; empty string if not given.
     pub cunit: Vec<String>,
-    /// Per-axis CRVAL reference value, in `cunit[i]` units. Always the
-    /// true as-parsed/as-fit value, including on the celestial pair
-    /// (also mirrored into `celestial`'s rotation) and spectral axes
-    /// (also mirrored into the matching `SpectralAxis::crval_si`) --
-    /// the pixel<->world pipeline recomputes those axes from the
-    /// rotation/spectral algorithm rather than from this field.
+    /// Per-axis CRVAL reference value, in `cunit[i]` units, always as
+    /// parsed. Celestial and spectral axes are also mirrored into
+    /// their own structs, and the pipeline reads those instead.
     pub crval: Vec<f64>,
     /// Celestial axis pair plus everything that depends on it
     /// (projection, native<->celestial rotation, optional SIP/TPV).
@@ -117,24 +115,15 @@ pub struct Wcs {
     /// but unresolved, `pixel_to_world` / `world_to_pixel` return a
     /// clear error rather than silently dropping the lookup.
     pub tab: Vec<TabAxis>,
-    /// Size of the image this WCS was read from, in FITS axis order
-    /// (`NAXIS1` first) -- a **snapshot of the `NAXISn` cards**, not
-    /// part of the coordinate description.
+    /// Snapshot of the `NAXISn` cards, in FITS axis order, for callers
+    /// like [`Self::footprint`] that need the image extent. Not part of
+    /// the coordinate description: nothing in the pipeline reads it,
+    /// and it is not re-checked, so a cropped or rebinned image leaves
+    /// it stale.
     ///
-    /// `None` when there was no image to read it from, which
-    /// includes every WCS produced by
-    /// [`fit_celestial_wcs`] and any
-    /// header without `NAXISn` cards. Its length is the image's
-    /// `NAXIS`, which can differ from [`Self::naxis`] when `WCSAXES`
-    /// declares a different number of coordinate axes.
-    ///
-    /// Nothing in the pixel<->world pipeline reads this field, and
-    /// nothing validates against it: the image it describes may have
-    /// been cropped or rebinned since. It exists so callers that do
-    /// need the extent -- [`Self::footprint`] and the like -- can get
-    /// it without threading the shape through every call. Treat a
-    /// stale value as the caller's problem, the same way the writer
-    /// treats layout cards on a user-supplied header.
+    /// `None` for a fitted WCS or a header without `NAXISn`. Its
+    /// length can differ from [`Self::naxis`] when `WCSAXES` declares
+    /// a different number of coordinate axes.
     pub pixel_shape: Option<Vec<u64>>,
 }
 
@@ -143,14 +132,11 @@ impl Wcs {
     ///
     /// # Pixel indexing convention
     ///
-    /// **Pixel coordinates in this API are 0-based** (numpy / C / row-major
-    /// convention): the center of the first pixel is `(0.0, 0.0, ...)`.
-    /// The underlying FITS standard (Sec.3.3.4) defines pixels as 1-based,
-    /// so this method internally adds `1.0` to every input before
-    /// evaluating the WCS pipeline. If you are porting from a FITS-native
-    /// tool (cfitsio, wcslib, IRAF) that expects 1-based pixels, subtract
-    /// 1 from those coordinates before calling. Astropy's `wcs.WCS` uses
-    /// the same 0-based default (its `origin=0` argument).
+    /// **Pixel coordinates in this API are 0-based** (numpy / C
+    /// convention): the first pixel's center is `(0.0, 0.0, ...)`, as
+    /// in astropy's `wcs.WCS` with `origin=0`. FITS itself is 1-based
+    /// (Sec.3.3.4), so a coordinate from cfitsio, wcslib or IRAF needs
+    /// 1 subtracted before it is passed here.
     ///
     /// Applies to every pixel-coordinate method on `Wcs`: [`pixel_to_world`],
     /// [`world_to_pixel`], [`pixel_to_celestial`], [`celestial_to_pixel`],
@@ -252,7 +238,13 @@ impl Wcs {
                 x = xp;
                 y = yp;
             }
-            let (phi, theta) = c.projection.x2s(x, y)?;
+            // Intermediate coordinates are zero at the reference
+            // point, the projection measures from its own origin.
+            // These differ only if PVi_1/PVi_2 moved the fiducial
+            // point (Sec.8.2).
+            let (phi, theta) = c
+                .projection
+                .x2s(x + c.fiducial_offset.0, y + c.fiducial_offset.1)?;
             let (alpha, delta) = c.rotation.native_to_celestial(phi, theta);
             world[c.pair.lon] = alpha;
             world[c.pair.lat] = delta;
@@ -298,24 +290,32 @@ impl Wcs {
                 self.tab_specs.len().saturating_sub(self.tab.len()),
             )));
         }
-        if let Some(c) = self.celestial.as_ref() {
-            // DSS plate solution: bypass the standard inverse and
-            // hand the world coordinates straight to the plate
-            // model. Other (non-celestial) axes still flow through
-            // the linear pipeline below.
-            if let Some(dss) = self.dss.as_ref() {
-                let (px, py) = dss.world_to_pixel(world[c.pair.lon], world[c.pair.lat])?;
-                let mut out = vec![0.0; self.naxis];
-                // DSS works in 1-based coords internally; the public
-                // API is 0-based.
-                out[c.pair.lon] = px - 1.0;
-                out[c.pair.lat] = py - 1.0;
-                return Ok(out);
-            }
+        // A DSS plate replaces the celestial pipeline, but the other
+        // axes still need the linear one below. Resolve the pair now
+        // and splice it in at the end.
+        let dss_pixel = match (self.celestial.as_ref(), self.dss.as_ref()) {
+            (Some(c), Some(dss)) => Some((
+                c.pair,
+                dss.world_to_pixel(world[c.pair.lon], world[c.pair.lat])?,
+            )),
+            _ => None,
+        };
+        if let Some((pair, _)) = dss_pixel {
+            // The celestial slots still hold `world - CRVAL`, which is
+            // meaningless here. Zero them so the inverse matrix cannot
+            // mix them into the axes it is still responsible for.
+            intermediate[pair.lon] = 0.0;
+            intermediate[pair.lat] = 0.0;
+        }
+        if let Some(c) = self.celestial.as_ref()
+            && dss_pixel.is_none()
+        {
             let alpha = world[c.pair.lon];
             let delta = world[c.pair.lat];
             let (phi, theta) = c.rotation.celestial_to_native(alpha, delta);
-            let (mut x, mut y) = c.projection.s2x(phi, theta)?;
+            let (x_proj, y_proj) = c.projection.s2x(phi, theta)?;
+            // Back to intermediate coordinates; see the forward pass.
+            let (mut x, mut y) = (x_proj - c.fiducial_offset.0, y_proj - c.fiducial_offset.1);
             // Inverse TNX/ZPX (Newton on the additive surface).
             if let Some(tnx) = c.tnx.as_ref() {
                 let (xp, yp) = tnx.inverse(x, y)?;
@@ -338,6 +338,7 @@ impl Wcs {
         let mut dp = self.linear.apply_inverse_matrix(&intermediate)?;
         // Inverse SIP.
         if let Some(c) = self.celestial.as_ref()
+            && dss_pixel.is_none()
             && let Some(sip) = c.sip.as_ref()
         {
             let (u, v) = sip.inverse(dp[c.pair.lon], dp[c.pair.lat])?;
@@ -346,7 +347,14 @@ impl Wcs {
         }
         let crpix = self.linear.crpix();
         // 1-based -> 0-based: see pixel_to_world doc.
-        Ok((0..self.naxis).map(|i| crpix[i] + dp[i] - 1.0).collect())
+        let mut out: Vec<f64> = (0..self.naxis).map(|i| crpix[i] + dp[i] - 1.0).collect();
+        if let Some((pair, (px, py))) = dss_pixel {
+            // DSS works in 1-based coords internally; the public API
+            // is 0-based.
+            out[pair.lon] = px - 1.0;
+            out[pair.lat] = py - 1.0;
+        }
+        Ok(out)
     }
 
     /// Indices of the celestial longitude / latitude axes, if any.
@@ -366,24 +374,18 @@ impl Wcs {
     /// Sky positions of the image's four corner pixels, as
     /// `(lon, lat)` in degrees.
     ///
-    /// Corners are the **centers of the corner pixels** -- `(0, 0)`,
-    /// `(nx-1, 0)`, `(nx-1, ny-1)`, `(0, ny-1)` in this crate's
-    /// 0-based convention -- matching the default of astropy's
-    /// `WCS.calc_footprint()`. For the outer edge of the pixel grid
-    /// instead, call [`Self::pixel_to_celestial`] with `-0.5` and
-    /// `n - 0.5` directly.
-    ///
-    /// Returns the corners counter-clockwise in pixel space, starting
-    /// at the origin.
+    /// Corner *pixel centers* -- `(0, 0)`, `(nx-1, 0)`, `(nx-1, ny-1)`,
+    /// `(0, ny-1)` -- counter-clockwise from the origin, matching
+    /// astropy's `WCS.calc_footprint()`. For the outer edge of the
+    /// grid, call [`Self::pixel_to_celestial`] with `-0.5` and
+    /// `n - 0.5` instead.
     ///
     /// # Errors
     ///
-    /// Returns [`FitsError::Wcs`] if the WCS has no celestial axis
-    /// pair, or if [`Self::pixel_shape`] is absent (a fitted WCS, or
-    /// a header without `NAXISn`) or does not cover both celestial
-    /// axes. Note that the shape is a snapshot taken at parse time:
-    /// if the image has since been cropped or rebinned, the corners
-    /// describe the original.
+    /// [`FitsError::Wcs`] if the WCS has no celestial pair, or if
+    /// [`Self::pixel_shape`] is absent or does not cover both
+    /// celestial axes. The shape is a parse-time snapshot, so a
+    /// cropped image yields the original corners.
     pub fn footprint(&self) -> Result<[(f64, f64); 4]> {
         let (lon, lat) = self
             .celestial_axes()
@@ -416,15 +418,10 @@ impl Wcs {
         ])
     }
 
-    /// Validate the preconditions that apply to a whole batch rather
-    /// than to one point, so the batch helpers can distinguish
-    /// "this WCS cannot transform anything" (an `Err`) from "this
-    /// particular point is outside the projection" (a `NaN` slot).
-    ///
-    /// These two are the only structural failures reachable from the
-    /// celestial helpers: the linear matrix is inverted once at parse
-    /// time, and the coordinate vectors are built here with the right
-    /// length, so every remaining error is per-point.
+    /// Check what applies to a whole batch, so the batch helpers can
+    /// tell "this WCS cannot transform at all" (an `Err`) from "this
+    /// point is outside the projection" (a `NaN` slot). These are the
+    /// only two: every other failure is per-point.
     fn batch_precheck(&self) -> Result<()> {
         if self.celestial.is_none() {
             return Err(FitsError::Wcs("WCS has no celestial axis pair".into()));
@@ -443,26 +440,21 @@ impl Wcs {
         Ok(())
     }
 
-    /// Batch pixel -> (RA, Dec). Same transform as
-    /// [`Self::pixel_to_celestial`] but amortises the per-call setup
-    /// across `pixels.len()` points and writes into a caller-owned
-    /// `Vec` so a tight catalog-projection loop pays no per-point
-    /// allocation cost.
+    /// Batch pixel -> (RA, Dec), the same transform as
+    /// [`Self::pixel_to_celestial`] with the per-call setup shared
+    /// across all points.
     ///
     /// # Out-of-domain points
     ///
-    /// Points that fall outside the projection's valid domain yield
-    /// `(f64::NAN, f64::NAN)` in their slot instead of aborting the
-    /// call, matching `wcslib` and `astropy.wcs`. Most all-sky
-    /// projections cover only part of the plane (SIN's unit circle,
-    /// ZPN below `PV2_0`, AZP beyond the horizon), so a wide field
-    /// routinely mixes valid and invalid pixels; failing the batch
-    /// would throw away every good result for one bad point. Use
-    /// [`Self::pixel_to_celestial`] on a single point when you want
-    /// the diagnostic message instead.
+    /// Points outside the projection's domain get
+    /// `(f64::NAN, f64::NAN)` rather than failing the call, as in
+    /// `wcslib` and `astropy.wcs`: most projections cover only part of
+    /// the plane, so a wide field routinely mixes valid and invalid
+    /// pixels. Call [`Self::pixel_to_celestial`] on a single point for
+    /// the error message instead.
     ///
-    /// An `Err` here means the *whole* WCS cannot transform: no
-    /// celestial axis pair, or unresolved `-TAB` axes.
+    /// An `Err` means the whole WCS cannot transform: no celestial
+    /// pair, or unresolved `-TAB` axes.
     pub fn pixel_to_celestial_many(&self, pixels: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
         self.batch_precheck()?;
         Ok(pixels
@@ -488,10 +480,9 @@ impl Wcs {
             .collect())
     }
 
-    /// 2D celestial pixel -> (RA, Dec) in degrees. Convenience for the
-    /// overwhelmingly common case of a 2-axis celestial image. Returns
-    /// `Err` if the WCS has no celestial pair. Non-celestial axes (if
-    /// any) are evaluated at their reference pixel, which is the only
+    /// 2D celestial pixel -> (RA, Dec) in degrees, for the common case
+    /// of a 2-axis image. `Err` if the WCS has no celestial pair. Any
+    /// other axes are evaluated at their reference pixel, the only
     /// well-defined choice when the caller has not supplied them.
     ///
     /// `(px, py)` are 0-based -- see [`pixel_to_world`](Self::pixel_to_world).
@@ -552,16 +543,13 @@ impl Wcs {
         Ok((pix[lon], pix[lat]))
     }
 
-    /// Local pixel scale at pixel `(px, py)`, in **arcseconds per
-    /// pixel** along the longitude and latitude axes respectively.
-    /// Computed by finite difference on the unit sphere, so the
-    /// figures account for `cos(dec)` foreshortening, distortion
-    /// (SIP/TPV/TNX), and any local skew of the projection.
+    /// Local pixel scale at `(px, py)`, in **arcseconds per pixel**
+    /// along the longitude and latitude axes. Measured by finite
+    /// difference on the sphere, so it includes `cos(dec)`
+    /// foreshortening, distortion and any local skew.
     ///
-    /// Returns the magnitude of the great-circle distance per pixel
-    /// along each axis, *not* the signed `CDELT` value: a
-    /// flipped-RA image still reports a positive scale. Callers
-    /// asking "what's the pixel scale of this image?" want this.
+    /// This is the great-circle distance per pixel, not the signed
+    /// `CDELT`: a flipped-RA image still reports a positive scale.
     pub fn pixel_scale_at(&self, px: f64, py: f64) -> Result<(f64, f64)> {
         let (ra0, dec0) = self.pixel_to_celestial(px, py)?;
         let (ra_x, dec_x) = self.pixel_to_celestial(px + 1.0, py)?;

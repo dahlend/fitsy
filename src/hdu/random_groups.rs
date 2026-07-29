@@ -7,9 +7,9 @@
 //! 1. `PCOUNT` *parameter* values (BITPIX-typed, big-endian);
 //! 2. `NAXIS2 x NAXIS3 x ... x NAXISn` *data array* values.
 //!
-//! Random Groups was originally devised for radio interferometry
-//! visibilities. Its use is discouraged for new files (Standard
-//! Sec.6.4) but a substantial corpus of legacy data still uses it.
+//! Random Groups was devised for radio interferometry visibilities.
+//! Sec.6.4 discourages it for new files, but a lot of legacy data
+//! still uses it.
 
 use crate::data::encoding::{Bitpix, Pixel};
 use crate::error::{FitsError, Result};

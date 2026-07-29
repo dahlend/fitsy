@@ -36,11 +36,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RandomGroups.group()` arrays are frozen, like the table accessors.
 - Unscaled image reads decode into numpy's buffer: ~3x faster, half the
   peak memory. Adds `bytemuck`, behind the `python` feature.
+- `FitsFile::wcs` and `fitsy info` / `checksum` read headers only,
+  instead of every HDU's data section.
+- `fitsy header` prints reals as the shortest round-tripping decimal.
+- SIP evaluation no longer allocates, and its Newton inverse uses the
+  analytic Jacobian.
 - Breaking (Rust): `Projection` implementors must supply `pv2`.
 - Breaking (Rust): new `BinValue::StrArray` for `A` columns with `TDIMn`.
+- Breaking (Rust): `CelestialRotation::new` takes `phi0`;
+  `LinearTransform::from_crota` takes the rotated axis pair.
 
 ### Fixed
 
+- `CROTAi` was read only from `CROTA2` and only for `NAXIS = 2`, so
+  every cube came back with its rotation dropped (Sec.8.2).
+- `PVi_1`/`PVi_2`/`PVi_3`/`PVi_4` on the longitude axis were ignored,
+  so a relocated fiducial point changed nothing (Sec.8.2).
+- `yzLN`/`yzLT` and generic `xLON`/`xLAT` CTYPE pairs parsed as
+  non-celestial, returning unprojected values (Sec.8.4). A fitted
+  `CelestialFrame::Other` WCS also lost its celestial block on a
+  `to_header` round trip.
+- A non-finite linear matrix, and `CDELTi = 0` with `CROTA`, built a
+  WCS that answered every query with `Ok(NaN)` (Sec.8.2).
+- Reading an empty (`NAXIS = 0`) image HDU failed instead of returning
+  an empty array.
+- `Wcs::world_to_pixel` on a DSS plate solution returned 0 for every
+  non-celestial axis.
+- `FitsAppender::open` truncated trailing bytes that `FitsFile::open`
+  tolerates, even when nothing was appended; `finish` trims now.
+- The `-`/`_` keyword-lookup fallback ran both ways, so `first("CD1_1")`
+  could answer with an unrelated `CD1-1` card (Sec.4.1.2.1).
 - Unsigned `I`/`J` table columns read the lower half of their range
   2^16 / 2^32 too high.
 - Tile-compressed headers stripped the leading `Z` off every keyword,

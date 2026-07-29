@@ -10,18 +10,13 @@
 //!
 //! # Memory model
 //!
-//! `FitsFile::open` does **not** read pixel/table bytes up front.
-//! It scans the file's headers (small, bounded by the FITS 2880-byte
-//! block size) and records the byte offset and length of each HDU's
-//! data section. The data bytes for HDU `i` are loaded from disk on
-//! the first call to `hdu(i)` (or related accessors) via positional
-//! reads (`pread`) and cached in memory until the file is dropped.
-//! Files opened with [`FitsFile::from_bytes`] keep the entire buffer
-//! in memory (suited to tests and small in-memory workflows).
+//! `FitsFile::open` does **not** read pixel or table bytes up front.
+//! It scans the headers and records where each HDU's data section
+//! starts and ends. Those bytes are `pread` on the first `hdu(i)` and
+//! cached until the file is dropped, so opening a 50-GB mosaic costs
+//! only the headers and reading HDU 3 costs only HDU 3.
 //!
-//! This is critical for very large multi-extension files: opening a
-//! 50-GB mosaic costs only the headers, and a caller that only reads
-//! HDU 3 only pays for HDU 3's data section.
+//! [`FitsFile::from_bytes`] keeps the whole buffer in memory instead.
 
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -51,8 +46,8 @@ use crate::io::block::pad_to_block;
 use crate::io::block::BLOCK_SIZE;
 use crate::io::source::ByteSource;
 
-/// Top-level FITS file. `Send` but not `Sync`; for concurrent access
-/// each thread or task should open its own handle.
+/// Top-level FITS file. `Send` and `Sync`: the lazy data cache is a
+/// `OnceLock`, so `&FitsFile` can be shared across threads.
 #[derive(Debug)]
 pub struct FitsFile {
     backing: Backing,
@@ -95,14 +90,12 @@ struct HduSpan {
 }
 
 impl FitsFile {
-    /// Open `path` and parse its HDU headers. Pixel/table data
-    /// sections are **not** read up front; each HDU's data is loaded
-    /// on demand the first time it is accessed.
+    /// Open `path` and parse its HDU headers. Data sections are read
+    /// on first access, not here.
     ///
-    /// Headers are parsed **leniently** by default (see
-    /// [`FitsFile::open_with`]): common non-conforming header content is
-    /// tolerated so real-world files load. To require strict FITS
-    /// conformance instead, use `FitsFile::open_with(path, false)`.
+    /// Headers are parsed **leniently** by default so real-world files
+    /// load; use `FitsFile::open_with(path, false)` to require strict
+    /// conformance.
     ///
     /// # Examples
     ///
@@ -120,19 +113,16 @@ impl FitsFile {
 
     /// Open `path` with explicit control over lenient parsing.
     ///
-    /// When `lenient` is `true` (the default used by [`FitsFile::open`]),
-    /// common non-conforming header content is tolerated: `SIMPLE = F`
-    /// headers, non-ASCII bytes in string values (sanitized to spaces),
-    /// lower-case keywords (folded to upper case), value fields that parse
-    /// as no standard type (preserved verbatim as
-    /// [`crate::header::Value::Unparsed`]), and some structural defects
-    /// (stray bytes after `END`, a lower-case `end`, broken `CONTINUE`
-    /// chains). A present `END` card, block alignment, and the declared
-    /// data-section size are always enforced.
+    /// When `lenient` is `true` (what [`FitsFile::open`] uses), these
+    /// are tolerated: `SIMPLE = F`, non-ASCII bytes in string values
+    /// (sanitized to spaces), lower-case keywords (folded up), values
+    /// matching no standard type (kept as
+    /// [`crate::header::Value::Unparsed`]), stray bytes after `END`, a
+    /// lower-case `end`, and broken `CONTINUE` chains. A present `END`,
+    /// block alignment and the declared data size are always enforced.
     ///
-    /// When `lenient` is `false`, any of the above is an error. The flag is
-    /// retained on the resulting [`FitsFile`] so per-HDU re-parses stay
-    /// consistent.
+    /// When `false`, any of those is an error. The flag is kept on the
+    /// [`FitsFile`] so per-HDU re-parses stay consistent.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with(path: impl AsRef<Path>, lenient: bool) -> Result<Self> {
         let path = path.as_ref();
@@ -390,16 +380,12 @@ impl FitsFile {
         }
     }
 
-    /// Read the unpadded data section for HDU `i` into a freshly
-    /// allocated owned `Vec<u8>`, **bypassing the per-HDU cache**.
-    /// Use this when the caller will consume the bytes once and
-    /// then drop them -- it avoids holding the data resident in
-    /// the cache for the lifetime of the [`FitsFile`].
+    /// Read the unpadded data section for HDU `i` into an owned
+    /// `Vec<u8>`, **bypassing the per-HDU cache** -- for bytes the
+    /// caller consumes once and drops.
     ///
-    /// For in-memory backings this still copies (to keep the
-    /// return type uniform); callers that hold a [`FitsFile`]
-    /// opened with [`FitsFile::from_bytes`] can use
-    /// [`FitsFile::hdu`] instead to avoid the copy.
+    /// In-memory backings still copy, to keep the return type
+    /// uniform; use [`FitsFile::hdu`] there to avoid it.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_owned(&self, i: usize) -> Result<Vec<u8>> {
         let span = self.hdu_spans.get(i).ok_or_else(|| {
@@ -479,19 +465,15 @@ impl FitsFile {
         }
     }
 
-    /// Read a contiguous rectangular sub-region of the pixel array
-    /// for image HDU `i` directly from disk into a freshly allocated
-    /// big-endian byte buffer. **Does not touch the cache.**
+    /// Read a rectangular sub-region of image HDU `i` straight from
+    /// disk into a big-endian buffer. **Does not touch the cache.**
     ///
-    /// `axes` is the full image shape in FITS order (NAXIS1 fastest).
-    /// `start` and `shape` describe the region to read in the same
-    /// FITS order. The returned bytes are big-endian, length =
-    /// `prod(shape) * bitpix.byte_size()`. Caller is responsible for
-    /// byteswapping into native order.
+    /// `axes`, `start` and `shape` are in FITS order (NAXIS1 fastest).
+    /// The result is `prod(shape) * bitpix.byte_size()` big-endian
+    /// bytes; the caller byteswaps.
     ///
-    /// Used by the lazy `section[a:b]` Python read path so that
-    /// reading a small tile out of a huge image only pays for the
-    /// tile bytes, not the whole HDU.
+    /// Backs the Python `section[a:b]` read, so a small tile out of a
+    /// huge image costs only the tile.
     #[cfg(feature = "python")]
     pub(crate) fn read_image_subarray_be(
         &self,
@@ -688,9 +670,8 @@ impl FitsFile {
         }
     }
 
-    /// Iterator over all HDUs. Errors produced while parsing HDU
-    /// `i` are wrapped in [`FitsError::InHdu`] so callers can
-    /// identify the offending HDU without re-walking the file.
+    /// Iterator over all HDUs. Parse errors are wrapped in
+    /// [`FitsError::InHdu`] so the caller knows which HDU failed.
     ///
     /// # Examples
     ///
@@ -748,10 +729,10 @@ impl FitsFile {
         crate::wcs::Wcs::from_header(&header, alt)
     }
 
-    /// Look up an extension by `EXTNAME`, optionally restricting to a
-    /// specific `EXTVER`. Returns the first matching HDU. Per the
-    /// FITS standard Sec.4.4.2.6, `EXTNAME` is case-sensitive after
-    /// trimming trailing spaces; `EXTVER` defaults to 1 when absent.
+    /// Look up an extension by `EXTNAME`, optionally restricting to an
+    /// `EXTVER`, and return the first match. Sec.4.4.2.6 makes
+    /// `EXTNAME` case-sensitive after trimming trailing spaces;
+    /// `EXTVER` defaults to 1.
     ///
     /// # Examples
     ///
@@ -802,11 +783,9 @@ impl FitsFile {
 
     /// Re-serialize every HDU and write the result to `path`.
     ///
-    /// The output is valid FITS but is **not** guaranteed to be
-    /// byte-identical to the source: number formatting, comment
-    /// padding, and the order of `CONTINUE` chunks may differ. For
-    /// a byte-exact copy use [`std::fs::copy`] (or read the original
-    /// bytes via your own `std::fs::read`).
+    /// The output is valid FITS but not byte-identical to the source:
+    /// number formatting, comment padding and `CONTINUE` chunking may
+    /// differ. Use [`std::fs::copy`] for an exact copy.
     ///
     /// `overwrite = false` returns [`std::io::ErrorKind::AlreadyExists`]
     /// if the destination already exists.
@@ -849,23 +828,30 @@ impl FitsFile {
         }
     }
 
-    /// Parse the WCS for HDU `i`, alternate code `alt` (`' '` for
-    /// the primary). Resolves any `-TAB` axes by loading their
-    /// referenced binary-table extensions from this file. The
-    /// returned `Wcs` is fully self-contained: forward and inverse
-    /// maps work with no further setup.
+    /// Parse the WCS for HDU `i`, alternate `alt` (`' '` for the
+    /// primary), loading any `-TAB` lookup extensions from this file
+    /// so the result works with no further setup.
     ///
-    /// Returns `Ok(None)` when the HDU has no WCS for that
-    /// alternate. Errors when the HDU is not image-shaped.
+    /// `Ok(None)` when the HDU has no WCS for that alternate; an error
+    /// when the HDU is not image-shaped.
     pub fn wcs(&self, i: usize, alt: char) -> Result<Option<crate::wcs::Wcs>> {
-        let header = match self.hdu(i)? {
-            Hdu::Image(img) => img.header().clone(),
+        // A WCS is entirely in the header, and headers are already
+        // loaded; `hdu(i)` would read the data section too. Tile
+        // compression is the exception: the real header is only
+        // recovered by decoding the image.
+        let header = self.parsed_header(i)?;
+        let header = match hdu_kind(&header, i) {
+            HduKind::Image => header,
             #[cfg(feature = "compression")]
-            Hdu::CompressedImage(c) => c.as_image()?.header().clone(),
-            other => {
+            HduKind::CompressedImage => match self.hdu(i)? {
+                Hdu::CompressedImage(c) => c.as_image()?.header().clone(),
+                // `ZIMAGE = T` but not decodable: use the raw header.
+                _ => header,
+            },
+            HduKind::Other(kind) => {
                 return Err(FitsError::HduMismatch {
                     expected: "IMAGE",
-                    found: format!("{other:?}").chars().take(64).collect(),
+                    found: kind,
                 });
             }
         };
@@ -878,14 +864,11 @@ impl FitsFile {
         Ok(Some(wcs))
     }
 
-    /// Verify `CHECKSUM` and `DATASUM` for every HDU that carries
-    /// them. HDUs without either keyword are skipped. Returns the
-    /// per-HDU verdicts in HDU order.
+    /// Verify `CHECKSUM` and `DATASUM` for every HDU that has them,
+    /// in HDU order. HDUs with neither are skipped.
     ///
-    /// Streams each data section through the checksum accumulator
-    /// in 1-MiB chunks (for on-disk backings) without populating
-    /// the per-HDU data cache, so verifying a 50-GB file does not
-    /// pin the entire file in RAM.
+    /// On-disk data is streamed in 1-MiB chunks and not cached, so
+    /// verifying a 50-GB file does not pin it in RAM.
     pub fn verify_checksums(&self) -> Result<Vec<ChecksumReport>> {
         // Streaming chunk size for the on-disk path. 1 MiB is a
         // good balance between syscall overhead and peak RSS.
@@ -1003,6 +986,37 @@ pub enum Decompressed<'a> {
     Image(crate::compression::OwnedImage),
 }
 
+/// HDU kind, decided from the header alone.
+#[derive(Debug)]
+enum HduKind {
+    Image,
+    #[cfg(feature = "compression")]
+    CompressedImage,
+    Other(String),
+}
+
+fn hdu_kind(header: &Header, index: usize) -> HduKind {
+    if index == 0 {
+        return if is_random_groups(header) {
+            HduKind::Other("RANDOM-GROUPS".into())
+        } else {
+            HduKind::Image
+        };
+    }
+    match header.first("XTENSION") {
+        Some(Value::String(s)) if s == "IMAGE" => HduKind::Image,
+        Some(Value::String(s)) if s == "BINTABLE" => {
+            #[cfg(feature = "compression")]
+            if matches!(header.first("ZIMAGE"), Some(Value::Logical(true))) {
+                return HduKind::CompressedImage;
+            }
+            HduKind::Other(s.clone())
+        }
+        Some(Value::String(s)) => HduKind::Other(s.clone()),
+        _ => HduKind::Other("unknown".into()),
+    }
+}
+
 fn require_simple_t(h: &Header, lenient: bool) -> Result<()> {
     match h.first("SIMPLE") {
         Some(Value::Logical(true)) => Ok(()),
@@ -1045,11 +1059,8 @@ fn is_random_groups(h: &Header) -> bool {
     matches!(h.first("GROUPS"), Some(Value::Logical(true)))
 }
 
-/// Read FITS header blocks from a file starting at `cursor`. Reads
-/// 2880-byte blocks one at a time until an `END` card is found, then
-/// returns the entire block-aligned header buffer (including the
-/// terminating block, with whatever trailing space padding it
-/// contained).
+/// Read 2880-byte blocks from `cursor` until an `END` card appears,
+/// and return the whole block-aligned header buffer.
 ///
 /// A missing `END` card is a hard error, matching [`Header::parse_with`]:
 /// `END` is the only header/data delimiter, so it is required in every

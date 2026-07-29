@@ -20,12 +20,10 @@ use crate::header::{CommentaryKind, Header, Value};
 ///
 /// # Unsigned-integer images
 ///
-/// FITS `BITPIX` values are signed (16/32/64); unsigned data is stored
-/// per Standard Sec.4.4.2.5 as the offset-encoded signed value plus a
-/// `BZERO` card (with `BSCALE = 1`). Use the dtype-specific
-/// constructors [`from_u16`](Self::from_u16), [`from_u32`](Self::from_u32),
-/// and [`from_u64`](Self::from_u64) -- they encode the offset and
-/// emit the required `BSCALE`/`BZERO` cards automatically.
+/// `BITPIX` is always signed, so Sec.4.4.2.5 stores unsigned data as
+/// an offset signed value plus a `BZERO` card. [`from_u16`](Self::from_u16),
+/// [`from_u32`](Self::from_u32) and [`from_u64`](Self::from_u64) apply
+/// the offset and emit the cards for you.
 #[derive(Debug, Clone)]
 pub struct ImageBuilder<T: Pixel> {
     axes: Vec<u64>,
@@ -555,15 +553,13 @@ struct AsciiColSpec {
 
 /// Builder for an `ASCII TABLE` HDU (Standard Sec.7.2).
 ///
-/// Columns are described once and packed contiguously (no inter-field
-/// padding). The builder generates `XTENSION = 'TABLE   '`,
-/// `BITPIX = 8`, `NAXIS{,1,2}`, `PCOUNT = 0`, `GCOUNT = 1`, `TFIELDS`,
-/// plus per-column `TFORMn`, `TBCOLn`, `TTYPEn`, optional `TUNITn`,
-/// and `TNULLn` (for `I` columns with a configured null sentinel).
+/// Columns are packed contiguously, with no padding between fields.
+/// The builder writes the mandatory keywords plus per-column `TFORMn`,
+/// `TBCOLn`, `TTYPEn`, and optional `TUNITn` and `TNULLn`.
 ///
-/// All columns must report the same row count. Use
-/// [`AsciiFormat`](crate::AsciiFormat) variants matching the data
-/// kind: `I` for integers, `F`/`E`/`D` for floats, `A` for strings.
+/// Every column must report the same row count. Pick the
+/// [`AsciiFormat`](crate::AsciiFormat) matching the data: `I` for
+/// integers, `F`/`E`/`D` for floats, `A` for strings.
 #[derive(Debug, Clone, Default)]
 pub struct AsciiTableBuilder {
     columns: Vec<AsciiColSpec>,

@@ -61,26 +61,20 @@ impl Header {
         Self::parse_with(bytes, start, false)
     }
 
-    /// Parse a header. Non-conforming bytes in free-text *comments* and
-    /// commentary cards (Latin-1, tabs, other control bytes) are always
-    /// sanitized to spaces, in both modes -- a stray byte in a comment
-    /// never fails the parse.
+    /// Parse a header. Stray bytes in free-text comments and commentary
+    /// cards are sanitized to spaces in both modes, so they never fail
+    /// the parse.
     ///
-    /// When `lenient` is true, tolerance extends to non-conforming
-    /// *values*: the card scanner sanitizes non-ASCII bytes and folds
-    /// lower-case keywords (see
-    /// [`Card::parse_with`](crate::header::card::Card::parse_with)), and a
-    /// value field that matches no standard type is kept as
-    /// [`Value::Unparsed`] rather than aborting the load. It also recovers
-    /// from some structural defects: stray bytes after the `END` card,
-    /// broken `CONTINUE` chains, and an `END` keyword written in any case
-    /// (folded to `END`).
+    /// When `lenient` is true the same tolerance covers *values*: the
+    /// card scanner sanitizes non-ASCII bytes and folds lower-case
+    /// keywords, and an unrecognizable value field is kept as
+    /// [`Value::Unparsed`]. Some structural defects are recovered too:
+    /// stray bytes after `END`, broken `CONTINUE` chains, and an `END`
+    /// written in any case.
     ///
-    /// A present `END` card is required in **both** modes: it is the only
-    /// thing that marks the header/data boundary, so a header without it
-    /// cannot be delimited and is always an error. The buffer may extend
-    /// past the header and need not be a whole number of 2880-byte blocks;
-    /// only full blocks are scanned for cards.
+    /// An `END` card is required in **both** modes -- it is the only
+    /// marker of the header/data boundary. The buffer may run past the
+    /// header and end mid-block; only whole blocks are scanned.
     pub fn parse_with(bytes: &[u8], start: u64, lenient: bool) -> Result<(Self, u64)> {
         let start_usize = start as usize;
         if start_usize > bytes.len() {
@@ -191,22 +185,17 @@ impl Header {
         self.blocks
     }
 
-    /// Return `keyword` with `_` and `-` swapped, for use as a fallback query
-    /// key. Returns `None` when the keyword contains neither character.
+    /// Return `keyword` with each `-` replaced by `_`, so a lookup for
+    /// `MJD-OBS` also finds the `MJD_OBS` some writers emit. `None`
+    /// when the keyword has no `-`.
+    ///
+    /// One direction only: Sec.4.1.2.1 makes `-` and `_` distinct, so
+    /// `CD1_1` must not match a `CD1-1` card.
     pub(crate) fn alt_key(keyword: &str) -> Option<String> {
-        if !keyword.contains(['-', '_']) {
+        if !keyword.contains('-') {
             return None;
         }
-        Some(
-            keyword
-                .chars()
-                .map(|c| match c {
-                    '-' => '_',
-                    '_' => '-',
-                    c => c,
-                })
-                .collect(),
-        )
+        Some(keyword.replace('-', "_"))
     }
 
     /// Find the value of the first occurrence of `keyword`.
@@ -359,18 +348,16 @@ impl Header {
         removed
     }
 
-    /// Append every value card from `parent` whose keyword is not
-    /// already present in `self`. Implements the (Goddard / IRAF)
-    /// `INHERIT` convention: an extension header that carries
-    /// `INHERIT = T` is meant to inherit non-structural keywords from
-    /// the primary HDU.
+    /// Append every value card from `parent` not already in `self`.
+    /// This is the Goddard/IRAF `INHERIT` convention: an extension
+    /// with `INHERIT = T` takes the primary HDU's non-structural
+    /// keywords.
     ///
-    /// Mandatory structural keywords (`SIMPLE`, `XTENSION`, `BITPIX`,
-    /// `NAXIS`, `NAXISn`, `PCOUNT`, `GCOUNT`, `EXTEND`, `END`,
-    /// `INHERIT` itself) and `CHECKSUM`/`DATASUM` are never inherited
-    /// -- the extension must carry its own. Commentary cards
-    /// (`COMMENT`/`HISTORY`/blank) are also not inherited to avoid
-    /// duplicating provenance.
+    /// Structural keywords (`SIMPLE`, `XTENSION`, `BITPIX`, `NAXIS`,
+    /// `NAXISn`, `PCOUNT`, `GCOUNT`, `EXTEND`, `END`, `INHERIT`) and
+    /// `CHECKSUM`/`DATASUM` are never inherited; the extension carries
+    /// its own. Commentary cards are skipped so provenance is not
+    /// duplicated.
     pub fn merge_inherited(&mut self, parent: &Self) {
         for entry in &parent.cards {
             if !matches!(entry.kind, CardKind::Value) {
@@ -475,12 +462,9 @@ fn card_to_entry(card: Card, _offset: u64, lenient: bool) -> Result<HeaderEntry>
 /// itself a string (Sec.4.2.1.2). We merge each chain into the parent
 /// card and remove the merged `CONTINUE` entries.
 ///
-/// In strict mode a malformed chain is an error. In `lenient` mode each
-/// defect is recovered instead: a parent string missing its trailing `&`
-/// is still concatenated (a common writer omission), and a `CONTINUE`
-/// with no usable string parent (orphaned, or following a non-string
-/// value) is left in place as a standalone card rather than aborting the
-/// whole header.
+/// Strict mode rejects a malformed chain. Lenient mode recovers: a
+/// parent missing its trailing `&` is concatenated anyway, and a
+/// `CONTINUE` with no string parent is kept as a standalone card.
 fn merge_continuations(
     cards: &mut Vec<HeaderEntry>,
     continuations: &[usize],

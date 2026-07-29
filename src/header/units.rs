@@ -204,14 +204,22 @@ mod tests {
         assert!(h.keyword_unit("FOO").is_none());
     }
 
+    /// The Standard spells these with `-`, so the standard name also
+    /// finds the `_` misspelling. See `Header::alt_key` for why the
+    /// reverse is not allowed.
     #[test]
-    fn underscore_and_hyphen_are_interchangeable() {
+    fn hyphenated_keyword_also_matches_the_underscore_misspelling() {
         let mut h = Header::empty();
-        h.push("MJD-OBS", 57754.0_f64, None).unwrap();
-        assert!(h.optional_real("MJD_OBS").is_some());
+        h.push("MJD_OBS", 57754.0_f64, None).unwrap();
+        assert!(h.optional_real("MJD-OBS").is_some());
+        assert!(h.contains("MJD-OBS"));
+    }
 
-        let mut h2 = Header::empty();
-        h2.push("MJD_OBS", 57754.0_f64, None).unwrap();
-        assert!(h2.optional_real("MJD-OBS").is_some());
+    #[test]
+    fn underscore_lookup_does_not_reach_a_hyphenated_card() {
+        let mut h = Header::empty();
+        h.push("CD1-1", 1.0_f64, None).unwrap();
+        assert!(h.optional_real("CD1_1").is_none());
+        assert!(!h.contains("CD1_1"));
     }
 }

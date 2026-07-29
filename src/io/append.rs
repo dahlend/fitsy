@@ -1,14 +1,10 @@
 //! Streaming HDU appender (Standard Sec.3.1, Sec.4.4).
 //!
-//! [`FitsAppender`] opens an existing FITS file in read/write mode,
-//! seeks past the last HDU's padded data section, and exposes a
-//! [`FitsWriter`]-style `append_hdu` method that writes additional
-//! extension HDUs in place. No bytes from the existing file are
-//! copied or rewritten.
+//! [`FitsAppender`] seeks past the last HDU of an existing file and
+//! writes further extension HDUs in place, copying nothing.
 //!
-//! The first appended HDU is required to be an extension
-//! (`XTENSION` must be present); attempting to append a primary
-//! HDU returns an error.
+//! Every appended HDU must be an extension: appending a primary HDU
+//! is an error.
 //!
 //! # Example
 //!
@@ -36,6 +32,10 @@ use crate::io::writer::FitsWriter;
 
 /// Streaming appender that adds HDUs to the end of an existing
 /// FITS file without copying its contents.
+///
+/// Call [`finish`](Self::finish) when done: it is what syncs the
+/// writes and trims any tail the new HDUs did not cover. Dropping the
+/// appender instead flushes but does neither.
 #[derive(Debug)]
 pub struct FitsAppender {
     inner: FitsWriter<BufWriter<std::fs::File>>,
@@ -47,6 +47,9 @@ impl FitsAppender {
     /// validate it and to locate the byte offset just after the
     /// last HDU's padded data; the file is then re-opened in
     /// read/write mode for streaming writes.
+    ///
+    /// Opening does not modify the file. Any bytes after the last HDU
+    /// are kept until something is appended over them.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         // Parse the file to discover its HDU count and end-of-data
@@ -57,9 +60,6 @@ impl FitsAppender {
         drop(f);
 
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        // Trim any trailing garbage so the file always ends on a
-        // 2880-byte boundary at the right HDU end.
-        file.set_len(end)?;
         file.seek(SeekFrom::Start(end))?;
 
         let inner = FitsWriter::with_hdu_count(BufWriter::new(file), initial_hdu_count);
@@ -91,12 +91,21 @@ impl FitsAppender {
 
     /// Flush, sync, and close. Returns the number of HDUs now in
     /// the file.
+    ///
+    /// If anything was appended the file is truncated to the end of
+    /// the last HDU, so no fragment of the old tail survives. If
+    /// nothing was, the file is left untouched.
     pub fn finish(self) -> Result<usize> {
         let n = self.inner.hdu_count();
+        let appended = n > self.initial_hdu_count;
         let buf = self.inner.finish().map_err(FitsError::Io)?;
-        let file = buf
+        let mut file = buf
             .into_inner()
             .map_err(|e| FitsError::Io(e.into_error()))?;
+        if appended {
+            let end = file.stream_position()?;
+            file.set_len(end)?;
+        }
         file.sync_data().map_err(FitsError::Io)?;
         Ok(n)
     }

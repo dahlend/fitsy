@@ -1,25 +1,21 @@
 //! Header construction and serialisation (Standard Sec.4).
 //!
-//! [`Header`] is parsed by [`Header::parse`]; this module adds the
-//! complementary write side: builder methods to append cards
-//! programmatically, and [`Header::to_bytes`] to render a valid,
-//! block-padded byte stream that ends with `END`.
+//! [`Header::parse`] reads; this module writes -- builder methods to
+//! append cards, and [`Header::to_bytes`] to render a block-padded
+//! byte stream ending in `END`.
 //!
-//! Serialisation rules (Standard Sec.4):
+//! Serialisation rules (Sec.4):
 //!
-//! * Standard keywords up to 8 chars use the `KEYWORD = VALUE / COMMENT`
-//!   form with the value indicator `"= "` in columns 9-10.
-//! * Long string values (those that don't fit in 68 chars between the
-//!   opening and closing quote) are emitted as a chain of `CONTINUE`
-//!   cards (Sec.4.2.1.2). Each chunk except the last ends in `&`.
-//! * `HIERARCH key1 key2 ...` cards place the `=` after the longest
-//!   possible name; long-string `CONTINUE` for HIERARCH is not
-//!   emitted (rare in practice).
-//! * Commentary cards (`COMMENT`, `HISTORY`, blank keyword) carry up
-//!   to 72 bytes of free text in columns 9-80; longer text is split
-//!   across multiple cards verbatim (commentary is order-preserved).
-//! * The output is always padded with ASCII spaces to the next
-//!   2880-byte boundary (Standard Sec.3.1).
+//! * Keywords up to 8 chars use `KEYWORD = VALUE / COMMENT`, with the
+//!   value indicator in columns 9-10.
+//! * A string too long for the 68 chars between the quotes becomes a
+//!   chain of `CONTINUE` cards, each but the last ending in `&`
+//!   (Sec.4.2.1.2).
+//! * `HIERARCH key1 key2 ...` puts the `=` after the longest name that
+//!   fits. `CONTINUE` is not emitted for HIERARCH.
+//! * Commentary cards carry up to 72 bytes in columns 9-80; longer
+//!   text splits across cards in order.
+//! * Output is space-padded to the next 2880-byte boundary (Sec.3.1).
 
 use crate::error::{FitsError, Result};
 use crate::header::card::{CARD_SIZE, KEYWORD_LEN, VALUE_INDICATOR_LEN};

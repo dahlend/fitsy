@@ -96,6 +96,10 @@ impl Wcs {
             return Ok(None);
         }
 
+        // Needed before the linear transform: the legacy CROTAi form
+        // below attaches its rotation to the latitude axis.
+        let celestial_pair = identify_celestial_pair(&ctype);
+
         // Build linear transform: prefer CDi_j, then PCi_j+CDELT, then
         // CROTAi (legacy), else identity*CDELT.
         let cd = read_matrix(header, "CD", &alt_suffix, naxis)?;
@@ -109,14 +113,10 @@ impl Wcs {
             LinearTransform::from_cd(crpix.clone(), cd)?
         } else if let Some(pc) = pc {
             LinearTransform::from_pc(crpix.clone(), cdelt.clone(), pc)?
-        } else if naxis == 2
-            && let Some(crota) = header.first("CROTA2").and_then(|v| match v {
-                Value::Integer(i) => Some(*i as f64),
-                Value::Real(r) => Some(*r),
-                _ => None,
-            })
+        } else if let Some((crota, lon, lat)) =
+            read_crota(header, &alt_suffix, celestial_pair, naxis)
         {
-            LinearTransform::from_crota([crpix[0], crpix[1]], [cdelt[0], cdelt[1]], crota)?
+            LinearTransform::from_crota(crpix.clone(), cdelt.clone(), crota, lon, lat)?
         } else {
             // Identity PC with CDELT scaling.
             let mut id = vec![0.0; naxis * naxis];
@@ -126,14 +126,12 @@ impl Wcs {
             LinearTransform::from_pc(crpix.clone(), cdelt.clone(), id)?
         };
 
-        // IRAF subimage convention (`LTVn`, `LTMi_j`): the WCS as
-        // written refers to original (physical) detector pixels, but
-        // the array on disk is a subimage in logical pixels with
-        // `phys = LTM*log + LTV`. Absorb into the linear pipeline so
-        // downstream code keeps working in logical pixel space. Only
-        // applied when at least one LTV/LTM keyword is present
-        // (otherwise `LTM` defaults to identity and `LTV` to zero,
-        // which is a no-op).
+        // IRAF subimage convention (`LTVn`, `LTMi_j`): the WCS refers
+        // to original detector pixels, but the array on disk is a
+        // subimage with `phys = LTM*log + LTV`. Fold it into the
+        // linear pipeline so the rest of the code stays in subimage
+        // pixels. Skipped when neither keyword is present, where the
+        // defaults make it a no-op.
         let (ltv, ltm, ltv_ltm_present) = read_iraf_subimage(header, naxis)?;
         let linear = if ltv_ltm_present {
             linear.compose_with_input_affine(&ltm, &ltv)?
@@ -141,12 +139,10 @@ impl Wcs {
             linear
         };
 
-        // Identify celestial axis pair from CTYPE prefixes. Then,
-        // if present, build every dependent piece (projection,
-        // rotation, optional SIP, optional TPV) as a single
-        // `CelestialBlock` so the type system enforces the
+        // With the celestial axis pair known, build every dependent
+        // piece (projection, rotation, optional SIP, optional TPV) as
+        // a single `CelestialBlock` so the type system enforces the
         // all-or-nothing rule (Paper II Sec.2).
-        let celestial_pair = identify_celestial_pair(&ctype);
         let celestial = if let Some(pair) = celestial_pair {
             Some(build_celestial_block(
                 header,
@@ -159,17 +155,11 @@ impl Wcs {
             None
         };
 
-        // `Wcs::crval` keeps the as-parsed reference values on every
-        // axis, including the celestial pair (whose values are also
-        // mirrored into `celestial.rotation.alpha0/delta0`) and any
-        // spectral axes (also mirrored into `SpectralAxis::crval_si`).
-        // The pixel<->world pipeline overwrites those slots from the
-        // rotation/spectral algorithm unconditionally, so `crval`
-        // itself is never consulted for them there -- but it must
-        // still report the true reference value to callers (e.g.
-        // `Wcs::to_header`, or bindings that expose `crval` directly)
-        // for a WCS built via `Wcs::from_header` to match one built
-        // via `fit_celestial_wcs`, which never zeroes it.
+        // `Wcs::crval` keeps the as-parsed value on every axis. The
+        // pipeline reads celestial and spectral axes from their own
+        // structs instead, but callers -- `to_header`, the Python
+        // bindings -- still need the real reference value here, and
+        // `fit_celestial_wcs` never zeroes it either.
         let crval_for_struct = crval.clone();
 
         // Frame metadata (Paper II Sec.3.1).
@@ -248,13 +238,11 @@ impl Wcs {
                 ));
             }
             tab_specs.push(read_tab_spec(header, &alt_suffix, i)?);
-            // Note: `crval` on a -TAB axis is left in `crval_for_struct`
-            // (never zeroed) because Paper III Sec.6 specifies that the
-            // lookup operates on the full intermediate world coordinate
-            // `xi = CRVAL + (PC * (p - CRPIX)) * CDELT`, so the
-            // pixel<->world pipeline actually consults it, unlike the
-            // celestial/spectral cases above where it's overwritten
-            // unconditionally and only kept in the struct for callers.
+            // Unlike the celestial and spectral axes above, the
+            // pipeline really does read `crval` for a -TAB axis: the
+            // lookup takes the full intermediate world coordinate
+            // `xi = CRVAL + (PC * (p - CRPIX)) * CDELT`
+            // (Paper III Sec.6).
         }
 
         Ok(Some(Self {
@@ -327,15 +315,38 @@ fn build_celestial_block(
     } else {
         projection::build(kind, &pv2[..pv_count.min(20)])?
     };
-    let lonpole = read_optional_real(header, &format!("LONPOLE{alt_suffix}"));
-    let latpole = read_optional_real(header, &format!("LATPOLE{alt_suffix}"));
+    // Sec.8.2 puts four parameters on the *longitude* axis: `PVi_1`
+    // and `PVi_2` are the fiducial point, `PVi_3`/`PVi_4` spell
+    // LONPOLE/LATPOLE. TPV, TNX and ZPX reuse `PV<lon>_m` for
+    // polynomial coefficients, so skip them there.
+    let lon_pv = if is_tpv || is_tnx || is_zpx {
+        [None; 4]
+    } else {
+        let lon_axis = pair.lon + 1;
+        std::array::from_fn(|k| {
+            read_optional_real(header, &format!("PV{lon_axis}_{}{alt_suffix}", k + 1))
+        })
+    };
+    let phi0 = lon_pv[0].unwrap_or(0.0);
+    let theta0 = lon_pv[1].unwrap_or_else(|| projection.theta0());
+    let lonpole = read_optional_real(header, &format!("LONPOLE{alt_suffix}")).or(lon_pv[2]);
+    let latpole = read_optional_real(header, &format!("LATPOLE{alt_suffix}")).or(lon_pv[3]);
     let rotation = CelestialRotation::new(
         crval[pair.lon],
         crval[pair.lat],
         lonpole,
         latpole,
-        projection.theta0(),
+        phi0,
+        theta0,
     )?;
+    // Intermediate coordinates are zero at the reference point but
+    // the projection measures from its own origin, so a moved
+    // fiducial point leaves a constant offset between them.
+    let fiducial_offset = if lon_pv[0].is_some() || lon_pv[1].is_some() {
+        projection.s2x(phi0, theta0)?
+    } else {
+        (0.0, 0.0)
+    };
     let tpv = if is_tpv {
         let pv1_pairs = collect_pv_pairs(header, pair.lon + 1, alt_suffix);
         let pv2_pairs = collect_pv_pairs(header, pair.lat + 1, alt_suffix);
@@ -373,7 +384,32 @@ fn build_celestial_block(
         sip,
         tpv,
         tnx,
+        fiducial_offset,
     })
+}
+
+/// Read the deprecated `CROTAi` rotation (Sec.8.2, Table 22) and the
+/// two axes it rotates.
+///
+/// `CROTAi` is indexed and attached to the latitude axis, so it
+/// rotates the celestial pair -- not necessarily axes 1 and 2, and not
+/// only in 2-D images. Falls back to `CROTA2` on the first two axes
+/// when the header has no celestial pair.
+fn read_crota(
+    header: &Header,
+    alt_suffix: &str,
+    pair: Option<CelestialPair>,
+    naxis: usize,
+) -> Option<(f64, usize, usize)> {
+    let (lon, lat) = match pair {
+        Some(p) if p.lon < naxis && p.lat < naxis => (p.lon, p.lat),
+        _ if naxis >= 2 => (0, 1),
+        _ => return None,
+    };
+    let value = read_optional_real(header, &format!("CROTA{}{alt_suffix}", lat + 1))
+        // Some writers put the rotation on the longitude axis instead.
+        .or_else(|| read_optional_real(header, &format!("CROTA{}{alt_suffix}", lon + 1)))?;
+    Some((value, lon, lat))
 }
 
 fn read_real(header: &Header, key: &str, default: f64, hit: &mut bool) -> f64 {
@@ -605,27 +641,32 @@ fn read_optional_uint(header: &Header, key: &str) -> Option<u32> {
 fn identify_celestial_pair(ctype: &[String]) -> Option<CelestialPair> {
     // Find a longitude axis and a matching latitude axis. Per Sec.8.3
     // both CTYPE values share the same projection code in chars 5-8.
-    for (i, ct) in ctype.iter().enumerate() {
-        let p = first4(ct);
-        // Skip non-longitude axes (e.g. FREQ, WAVE, linear): they are
-        // not the celestial pair. A bare `?` here would have the
-        // disastrous effect of aborting the whole search the moment
-        // any axis fails the longitude prefix test.
-        let Some((frame, _, lat_pref)) =
-            CelestialFrame::named_with_prefixes().find(|(_, lon, _)| *lon == p)
-        else {
-            continue;
-        };
-        for (j, ct2) in ctype.iter().enumerate() {
-            if i == j {
+    //
+    // Registered frames first, then the generic Sec.8.4 forms:
+    // otherwise `GLON`/`GLAT` matches the generic rule and reports
+    // `CelestialFrame::Other`.
+    for named_only in [true, false] {
+        for (i, ct) in ctype.iter().enumerate() {
+            let p = first4(ct);
+            // Skip non-longitude axes (FREQ, WAVE, linear): a `?` here
+            // would abort the search on the first one instead.
+            let Some((frame, lat_pref)) = CelestialFrame::lat_prefix_for(p) else {
+                continue;
+            };
+            if named_only != (frame != CelestialFrame::Other) {
                 continue;
             }
-            if first4(ct2) == lat_pref {
-                return Some(CelestialPair {
-                    lon: i,
-                    lat: j,
-                    frame,
-                });
+            for (j, ct2) in ctype.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                if first4(ct2).eq_ignore_ascii_case(&lat_pref) {
+                    return Some(CelestialPair {
+                        lon: i,
+                        lat: j,
+                        frame,
+                    });
+                }
             }
         }
     }

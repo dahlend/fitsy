@@ -1,12 +1,9 @@
 //! Owning, in-memory FITS byte buffer used by [`crate::FitsFile`].
 //!
-//! FITS stores numeric data big-endian, so on every modern
-//! little-endian host the read path must byteswap to deliver a
-//! native-dtype `numpy.ndarray`. Byteswapping inherently allocates a
-//! fresh buffer, so there is no zero-copy advantage to be had from
-//! mapping file bytes -- the bytes get copied on the way out
-//! regardless. Owning the bytes keeps the I/O layer free of
-//! `unsafe` and immune to SIGBUS from external truncation.
+//! FITS data is big-endian, so a little-endian host has to byteswap
+//! on read, which allocates a fresh buffer anyway. Mapping the file
+//! would buy no zero-copy, and owning the bytes keeps this layer free
+//! of `unsafe` and immune to SIGBUS if the file is truncated.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;

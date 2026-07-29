@@ -131,18 +131,15 @@ impl IsoDateTime {
     ///
     /// # Leap seconds
     ///
-    /// Every day is treated as exactly 86400 seconds, so a UTC day
-    /// carrying a leap second is compressed: `23:59:60` reports the
-    /// same MJD as the following midnight, and stamps earlier that day
-    /// sit one second later than a reader that stretches the day to
-    /// 86401 seconds (`astropy.time` does the latter). This is the
-    /// unavoidable ambiguity of labelling UTC with a real number --
-    /// UTC is not a uniform scale.
+    /// Every day counts as exactly 86400 seconds, so a day with a leap
+    /// second is compressed: `23:59:60` reports the same MJD as the
+    /// following midnight, and earlier stamps that day sit a second
+    /// later than in `astropy.time`, which stretches the day instead.
+    /// Labelling UTC with a real number is ambiguous either way.
     ///
-    /// It affects only the ~27 days in history that carry a leap
-    /// second, and only the *label*: [`Self::mjd_tai`] resolves each
-    /// stamp on those days to the correct, distinct TAI instant.
-    /// Prefer TAI for any arithmetic that crosses one.
+    /// This affects only the ~27 days that carry a leap second, and
+    /// only the label: [`Self::mjd_tai`] still resolves each stamp to
+    /// the right TAI instant. Prefer TAI across one.
     #[must_use]
     pub fn mjd(&self) -> f64 {
         // Fliegel & Van Flandern (1968) algorithm, as cited by the
@@ -167,15 +164,12 @@ impl IsoDateTime {
     /// TAI - UTC offset at this timestamp. See [`tai_minus_utc_at`].
     #[must_use]
     pub fn tai_minus_utc(&self) -> i32 {
-        // A `23:59:60` stamp is *inside* the inserted second. It
-        // belongs to the day it is written on -- the step to the new
-        // offset happens at the following midnight -- but [`Self::mjd`]
-        // necessarily reports it as that midnight, since a real-valued
-        // UTC MJD has no room for a 86401st second. Looking the offset
-        // up at that MJD would pick the post-step value and place the
-        // instant one second late in TAI, so evaluate at the start of
-        // the stamp's own day instead, which is unambiguously before
-        // the step.
+        // A `23:59:60` stamp is inside the inserted second, so it
+        // belongs to its own day -- but `mjd` reports it as the
+        // following midnight, having no room for an 86401st second.
+        // Looking the offset up there would pick the post-step value
+        // and land a second late in TAI, so evaluate at the start of
+        // the stamp's own day, which is before the step.
         let at = if self.second == 60 {
             Self {
                 hour: 0,
@@ -205,16 +199,14 @@ impl IsoDateTime {
 /// `TDB - TT`, in days, at the given TDB MJD.
 ///
 /// TDB and TT differ by a periodic relativistic term of amplitude
-/// ~1.7 ms, dominated by the Earth's orbital eccentricity. Paper IV
-/// Sec.3.1.2 notes the rigorous reduction needs a time ephemeris
-/// (Irwin & Fukushima 1999), which would be a large table for a
-/// library with no other ephemeris need; this is the standard
-/// two-term analytic form from the Astronomical Almanac, good to
-/// ~30 us -- some 50x better than treating TDB as TT outright, which
-/// is what this used to do.
+/// ~1.7 ms, driven by the Earth's orbital eccentricity. Paper IV
+/// Sec.3.1.2 wants a time ephemeris (Irwin & Fukushima 1999) for the
+/// rigorous reduction, which is a large table for a library with no
+/// other use for one. This is the Astronomical Almanac's two-term
+/// analytic form instead, good to ~30 us.
 ///
-/// `g` is defined on TT, but TDB and TT agree to 2 ms, far below the
-/// accuracy of the term itself, so feeding it TDB is harmless.
+/// `g` is defined on TT, but TDB and TT agree to 2 ms -- far below
+/// the term's own accuracy -- so passing TDB is harmless.
 fn tdb_minus_tt_days(mjd_tdb: f64) -> f64 {
     // MJD 51544.5 == JD 2451545.0 == J2000.0.
     let g = (357.53 + 0.985_600_3 * (mjd_tdb - 51544.5)).to_radians();

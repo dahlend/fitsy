@@ -150,8 +150,16 @@ pub struct ImageData<T> {
 
 impl<T> ImageData<T> {
     pub fn new(data: Vec<T>, axes: Vec<u64>) -> Result<Self> {
-        let expected: u64 = axes.iter().product();
-        if expected as usize != data.len() {
+        // `NAXIS = 0` means no data (Sec.4.4.1.1), but the empty
+        // product is 1, which would demand a one-element array.
+        let expected: u64 = if axes.is_empty() {
+            0
+        } else {
+            axes.iter()
+                .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
+                .ok_or_else(|| FitsError::Data("axis product overflows u64".into()))?
+        };
+        if expected != data.len() as u64 {
             return Err(FitsError::Data(format!(
                 "axis product {expected} does not match data length {}",
                 data.len()

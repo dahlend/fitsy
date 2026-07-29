@@ -79,16 +79,13 @@ fn is_layout_card(key: &str) -> bool {
 
 /// Dict-like view of a FITS header.
 ///
-/// A ``Header`` is an owned snapshot that is *shared* with the
-/// parent HDU wrapper. Cloning the Python object yields another
-/// handle to the same underlying header, so a mutation made
-/// through one handle (for example ``hdu.header['FOO'] = 'bar'``)
-/// is visible through every other handle.
+/// A ``Header`` is shared with its parent HDU: copying the Python
+/// object gives another handle to the same header, so an edit through
+/// one is visible through all of them.
 ///
-/// Headers obtained from a read-only :class:`FitsFile`
-/// (:func:`fitsy.open` with ``mode='readonly'``, the default) raise
-/// :class:`ValueError` from every mutating method. Open the file
-/// with ``mode='update'`` to enable in-memory edits.
+/// Headers from a read-only :class:`FitsFile` raise
+/// :class:`ValueError` from every mutating method. Open the file with
+/// ``mode='update'`` to allow in-memory edits.
 ///
 /// Examples
 /// --------
@@ -238,19 +235,17 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// mapping : Header or mapping, optional
-    ///   Initial cards. A :class:`Header` is deep-copied (every card,
-    ///   including commentary and structural keywords). A ``dict`` --
-    ///   or any object exposing ``.items()`` -- is inserted key by key,
-    ///   with keywords folded to upper case and a ``(value, comment)``
-    ///   tuple accepted per entry (as in ``header[key] = (value, comment)``).
+    ///   Initial cards. A :class:`Header` is deep-copied, including
+    ///   commentary and structural keywords. A ``dict`` -- or anything
+    ///   with ``.items()`` -- is inserted key by key, folding keywords
+    ///   to upper case and accepting a ``(value, comment)`` tuple.
     ///   Omit for an empty header.
     ///
     /// Notes
     /// -----
-    /// The result is standalone and writable: attach it to an HDU
-    /// (``fitsy.ImageHdu(data, header=h)`` / ``fitsy.image(...)``) or
-    /// serialize it with :meth:`tostring`. To parse existing card text
-    /// use :meth:`fromstring` / :meth:`frombytes`.
+    /// The result is standalone and writable: attach it to an HDU or
+    /// serialize it with :meth:`tostring`. Use :meth:`fromstring` /
+    /// :meth:`frombytes` to parse existing card text.
     ///
     /// Examples
     /// --------
@@ -287,14 +282,11 @@ impl PyHeader {
     /// Returns
     /// -------
     /// bool, int, float, complex, str, None, or HeaderCommentary
-    ///   Regular value cards return the native Python scalar
-    ///   matching the FITS value type. Undefined values come
-    ///   through as ``None``. Indexing with ``"COMMENT"``,
-    ///   ``"HISTORY"`` or ``""`` returns a list-like
-    ///   :class:`HeaderCommentary` view of every text body.
-    ///   For a value card with multiple occurrences, only the
-    ///   first value is returned -- use ``header[(key, n)]`` or
-    ///   :meth:`cards` to access the rest.
+    ///   The native Python scalar for the card's FITS type, or ``None``
+    ///   for an undefined value. ``"COMMENT"``, ``"HISTORY"`` and
+    ///   ``""`` return a list-like :class:`HeaderCommentary` of every
+    ///   text body. A duplicated keyword returns its first value; use
+    ///   ``header[(key, n)]`` or :meth:`cards` for the rest.
     ///
     /// Raises
     /// ------

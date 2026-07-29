@@ -43,17 +43,13 @@ impl Card {
         Self::parse_with(bytes, offset, false)
     }
 
-    /// Parse a single 80-byte card. `lenient` controls how the *value*
-    /// field of a value card is treated: when true, non-ASCII bytes
-    /// (Latin-1 text, tabs, other control bytes) anywhere in the card are
-    /// sanitized to spaces and lower-case keyword letters are folded to
-    /// upper case, so a corrupted value still loads. When false (strict),
-    /// a non-ASCII byte in the keyword or value field is a hard error.
+    /// Parse a single 80-byte card. When `lenient`, non-ASCII bytes
+    /// anywhere in the card become spaces and lower-case keyword
+    /// letters are folded up, so a corrupted value still loads;
+    /// otherwise such a byte in the keyword or value field is an error.
     ///
-    /// Free-text *comments* are always lenient: the card scanner does not
-    /// reject non-ASCII bytes outright in either mode; commentary bodies
-    /// and the comment portion of a value card are sanitized downstream
-    /// (in `card_to_entry` and `value::split_value_and_comment`).
+    /// Comments are always lenient -- this scanner never rejects them,
+    /// and they are sanitized downstream.
     pub fn parse_with(bytes: &[u8], offset: u64, lenient: bool) -> Result<Self> {
         if bytes.len() != CARD_SIZE {
             return Err(FitsError::Card {
@@ -61,25 +57,17 @@ impl Card {
                 msg: format!("expected {CARD_SIZE} bytes, got {}", bytes.len()),
             });
         }
-        // NUL (0x00) is never a legal byte in a FITS header (Sec.3.2:
-        // headers are ASCII text 0x20..=0x7E). Yet many non-conforming
-        // writers leak NUL into cards -- zero-padding a keyword field,
-        // a quoted string, the value/comment area, the END card body, or
-        // whole post-END fill cards -- the natural artifact of writing
-        // into fixed-width buffers left zero-initialized. Map every NUL to
-        // a space so such cards parse. In `lenient` mode, every non-ASCII
-        // byte is sanitized to a space up front as well (so a corrupted
-        // value field still loads).
+        // Sec.3.2 makes headers ASCII 0x20..=0x7E, so NUL is never
+        // legal -- but writers leak it constantly, from fixed-width
+        // buffers left zero-initialized. Map every NUL to a space so
+        // those cards parse; in `lenient` mode do the same for any
+        // non-ASCII byte.
         //
-        // Non-ASCII bytes are NOT rejected wholesale here. Binary garbage
-        // is still caught downstream: `parse_keyword_field` rejects a
-        // non-keyword byte in the keyword field, the END-card check rejects
-        // a stray byte in an END body, and value parsing rejects a
-        // non-ASCII byte in a value field (strict). What this deliberately
-        // permits is a stray byte in a free-text comment -- which carries
-        // no structural meaning and should not sink an otherwise-valid
-        // file -- to survive into the body and be sanitized when the
-        // comment is extracted.
+        // Non-ASCII is not rejected outright here. Binary garbage is
+        // still caught downstream, in the keyword field, the END body
+        // and the value field. What survives is a stray byte in a
+        // free-text comment, which carries no structural meaning and
+        // should not sink an otherwise-valid file.
         let mut card = [0_u8; CARD_SIZE];
         card.copy_from_slice(bytes);
         for b in &mut card {
@@ -201,12 +189,10 @@ fn is_keyword_char(b: u8) -> bool {
 
 /// Parse a HIERARCH card per the ESO convention
 /// (<https://fits.gsfc.nasa.gov/registry/hierarch_keyword.html>):
-/// `HIERARCH key1 key2 ... keyN = value / comment`. The hierarchical
-/// name is collapsed to a single space-separated string and stored as
-/// the card's `keyword`. Subkeyword characters may include uppercase
-/// letters, digits, hyphen, underscore, and period (`.`); we accept
-/// any printable ASCII other than `=` to remain forgiving of
-/// real-world headers.
+/// `HIERARCH key1 key2 ... keyN = value / comment`. The name is
+/// collapsed to one space-separated string. The convention allows
+/// letters, digits, hyphen, underscore and period; we accept any
+/// printable ASCII but `=`, to stay forgiving of real headers.
 fn parse_hierarch(bytes: &[u8], offset: u64) -> Result<Card> {
     debug_assert_eq!(
         bytes.len(),

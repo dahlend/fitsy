@@ -78,17 +78,41 @@ impl SipPoly {
         Ok(Self { order, coeffs })
     }
 
+    /// Number of coefficient rows, capped at [`SIP_MAX_ORDER`].
+    ///
+    /// [`Self::from_terms`] rejects a higher order, but the fields are
+    /// public, so a hand-built polynomial could exceed it. Clamping
+    /// truncates such a polynomial instead of indexing past the power
+    /// tables below.
+    #[inline]
+    fn dim(&self) -> usize {
+        debug_assert!(
+            self.order <= SIP_MAX_ORDER,
+            "SIP order {} exceeds the maximum {SIP_MAX_ORDER}",
+            self.order
+        );
+        (self.order.min(SIP_MAX_ORDER) as usize) + 1
+    }
+
+    /// Powers `1, x, x^2, ... x^SIP_MAX_ORDER`.
+    ///
+    /// Fixed-size because the order is capped: a `Vec` here would
+    /// allocate twice per Newton iteration in [`Sip::inverse`].
+    #[inline]
+    fn powers(x: f64) -> [f64; SIP_MAX_ORDER as usize + 1] {
+        let mut out = [1.0_f64; SIP_MAX_ORDER as usize + 1];
+        for i in 1..out.len() {
+            out[i] = out[i - 1] * x;
+        }
+        out
+    }
+
     /// Evaluate `Sigma c_{p,q} * u^p * v^q`.
     #[must_use]
     pub fn eval(&self, u: f64, v: f64) -> f64 {
-        let n = (self.order as usize) + 1;
-        // Pre-compute powers.
-        let mut up = vec![1.0_f64; n];
-        let mut vp = vec![1.0_f64; n];
-        for i in 1..n {
-            up[i] = up[i - 1] * u;
-            vp[i] = vp[i - 1] * v;
-        }
+        let n = self.dim();
+        let up = Self::powers(u);
+        let vp = Self::powers(v);
         let mut s = 0.0_f64;
         for p in 0..n {
             let row = p * n;
@@ -101,6 +125,38 @@ impl SipPoly {
             }
         }
         s
+    }
+
+    /// Evaluate the polynomial and both partial derivatives, as
+    /// `(value, d/du, d/dv)`.
+    ///
+    /// Differentiating term by term is exact and costs one pass,
+    /// where a central difference costs four extra evaluations and
+    /// carries a step-size error.
+    #[must_use]
+    pub fn eval_with_derivatives(&self, u: f64, v: f64) -> (f64, f64, f64) {
+        let n = self.dim();
+        let up = Self::powers(u);
+        let vp = Self::powers(v);
+        let (mut s, mut du, mut dv) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for p in 0..n {
+            let row = p * n;
+            let pmax = n - 1 - p;
+            for q in 0..=pmax {
+                let c = self.coeffs[row + q];
+                if c == 0.0 {
+                    continue;
+                }
+                s += c * up[p] * vp[q];
+                if p > 0 {
+                    du += c * (p as f64) * up[p - 1] * vp[q];
+                }
+                if q > 0 {
+                    dv += c * (q as f64) * up[p] * vp[q - 1];
+                }
+            }
+        }
+        (s, du, dv)
     }
 }
 
@@ -151,22 +207,21 @@ impl Sip {
         // sub-pixel accuracy that matters (~1e-8 px even out at |coord|~1e3).
         let scale = 1.0 + up.abs() + vp.abs();
         let tol = 1e-11 * scale;
-        let h = 1e-4_f64.max(1e-8 * scale);
         for _ in 0..32 {
-            let (fu, fv) = self.forward(u, v);
-            let rx = fu - up;
-            let ry = fv - vp;
+            // Residual and exact Jacobian of
+            // F(u,v) = (u + A(u,v), v + B(u,v)) in one pass; the
+            // identity part contributes the 1 on each diagonal.
+            let (a, a_du, a_dv) = self.a.eval_with_derivatives(u, v);
+            let (b, b_du, b_dv) = self.b.eval_with_derivatives(u, v);
+            let rx = (u + a) - up;
+            let ry = (v + b) - vp;
             if rx.abs() < tol && ry.abs() < tol {
                 return Ok((u, v));
             }
-            let (fup, fvp) = self.forward(u + h, v);
-            let (fum, fvm) = self.forward(u - h, v);
-            let (fupe, fvpe) = self.forward(u, v + h);
-            let (fume, fvme) = self.forward(u, v - h);
-            let j11 = (fup - fum) / (2.0 * h);
-            let j21 = (fvp - fvm) / (2.0 * h);
-            let j12 = (fupe - fume) / (2.0 * h);
-            let j22 = (fvpe - fvme) / (2.0 * h);
+            let j11 = 1.0 + a_du;
+            let j12 = a_dv;
+            let j21 = b_du;
+            let j22 = 1.0 + b_dv;
             let det = j11 * j22 - j12 * j21;
             if det.abs() < 1e-15 {
                 return Err(FitsError::Wcs(

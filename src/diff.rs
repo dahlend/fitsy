@@ -1,38 +1,28 @@
 //! FITS diff utilities (parity with `astropy.io.fits.FITSDiff`).
 //!
-//! This module compares two FITS files and reports structural,
-//! header, and data differences in a form suitable for printing.
-//! The output mirrors astropy's `FITSDiff.report()` text format
-//! closely enough that automated tooling can consume either.
+//! Compares two FITS files and reports structural, header and data
+//! differences, in a text format close enough to astropy's
+//! `FITSDiff.report()` that tooling can consume either.
 //!
-//! Comparison policy (matching astropy defaults):
+//! Comparison policy (matching astropy's defaults):
 //!
 //! * HDU count must match.
-//! * For each HDU, the keyword sets are compared (presence,
-//!   ordering not considered).
-//! * Value cards present in both are compared exactly for
-//!   integer/string/logical/undefined; floats use
-//!   `relative_tolerance` / `absolute_tolerance` (both default
-//!   `0.0`, i.e. exact match).
-//! * Image pixels are compared **numerically, in physical units** --
-//!   `BZERO`/`BSCALE` applied, `BLANK` mapped to NaN -- under the
-//!   same tolerances. Reported indices are pixel numbers, and
-//!   reported values are the decoded pixels. Tile-compressed images
-//!   are decompressed first, so two files whose tiles differ byte-wise
-//!   but decode identically compare equal.
-//! * Table data is compared cell by cell, per column, in decoded
-//!   (post-`TSCAL`/`TZERO`) values, with the tolerances applied to
-//!   the floating-point payloads.
-//! * Random-groups HDUs, and HDUs whose `XTENSION` this crate does
-//!   not recognize, have no decoded form and fall back to a single
-//!   byte-level "differs" verdict.
+//! * Keyword sets are compared by presence, not order.
+//! * Shared value cards compare exactly, except floats, which use
+//!   `relative_tolerance` / `absolute_tolerance` (both default `0.0`).
+//! * Image pixels compare **numerically, in physical units** --
+//!   `BZERO`/`BSCALE` applied, `BLANK` as NaN -- under the same
+//!   tolerances, reporting pixel numbers and decoded values.
+//!   Tile-compressed images are decompressed first, so tiles that
+//!   differ byte-wise but decode alike compare equal.
+//! * Table data compares cell by cell in decoded values.
+//! * Random groups, and extensions this crate does not recognize,
+//!   have no decoded form and get one byte-level verdict.
 //!
-//! Byte-identical data whose decoding cards also match short-circuits
-//! before any decoding, which is the common case for files that
-//! match. Otherwise both data sections are decoded, which costs
-//! rather more than reading the files: image pixels are decoded to
+//! Byte-identical data with matching decoding cards short-circuits,
+//! which is the common case. Otherwise both sides are decoded to
 //! `f64`, so comparing two `BITPIX = 16` images holds four times the
-//! on-disk size in memory per side.
+//! on-disk size per side.
 //!
 //! Use [`FitsDiff::open`] to compare two paths or
 //! [`FitsDiff::compare`] to compare two already-loaded files.
@@ -1148,15 +1138,12 @@ mod tests {
         );
     }
 
-    /// An HDU whose `XTENSION` fitsy does not recognize still has to
-    /// get a verdict.
+    /// An unrecognized `XTENSION` still has to get a verdict.
     ///
-    /// Regression: unknown extensions fell through the data-comparison
-    /// match to "no differences", so two files sharing a header but
-    /// holding wholly different bytes reported *"Files are
-    /// identical."* Random groups were given a byte fallback for
-    /// exactly this reason; this is the same hole, and a wider one --
-    /// every extension type the crate has not implemented lands here.
+    /// Regression: unknown extensions fell through to "no
+    /// differences", so two files with matching headers and wholly
+    /// different bytes reported "Files are identical." Random groups
+    /// already had a byte fallback for the same reason.
     #[test]
     fn unknown_extension_data_is_not_assumed_identical() {
         fn card(s: &str) -> Vec<u8> {

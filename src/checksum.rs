@@ -49,16 +49,12 @@ pub fn checksum_bytes(bytes: &[u8]) -> u32 {
     ((hi << 16) | (lo & 0xFFFF)) as u32
 }
 
-/// Combine two FITS 1's-complement sums (`a` and `b`) the same
-/// way [`checksum_is_valid`] combines the header and data sums:
-/// add as `u64`, then fold the carry-out back into the low 32
-/// bits. The result is `checksum_bytes(buf_a ++ buf_b)` for any
-/// concatenation of suitably-aligned `buf_a` and `buf_b`.
+/// Combine two 1's-complement sums: add as `u64`, fold the carry-out
+/// back into the low 32 bits. Equals `checksum_bytes(a ++ b)` for any
+/// aligned buffers.
 ///
-/// Streaming callers (e.g. on-disk checksum verification) can
-/// build up the sum of an arbitrarily long byte sequence by
-/// initialising an accumulator to `0` and folding successive
-/// per-chunk [`checksum_bytes`] results into it.
+/// A streaming caller starts an accumulator at `0` and folds in each
+/// chunk's [`checksum_bytes`].
 #[must_use]
 pub fn checksum_combine(a: u32, b: u32) -> u32 {
     let sum = u64::from(a) + u64::from(b);
@@ -99,15 +95,13 @@ pub fn datasum_string(data_bytes_padded: &[u8]) -> String {
     checksum_bytes(data_bytes_padded).to_string()
 }
 
-/// ASCII-armoured encoding of a 32-bit checksum value
-/// (Pence & Seaman 1995, FITS Standard Sec.4.4.2.7 / Appendix K). The
-/// returned 16 bytes are restricted to printable ASCII (`0x20..=0x7E`)
-/// excluding the FITS-reserved characters in the range
-/// `0x3a..=0x40` (`:;<=>?@`) and `0x5b..=0x60` (`` [\\]^_` ``). When the
-/// 16 bytes are placed in the value field of a `CHECKSUM` card
-/// (columns 11..26 of an 80-byte card, i.e. offset 11 in the card --
-/// which is byte offset 3 modulo 4 inside the FITS checksum stream),
-/// their contribution to the running sum is exactly `value`.
+/// ASCII-armoured encoding of a 32-bit checksum (Pence & Seaman 1995,
+/// Sec.4.4.2.7 / Appendix K).
+///
+/// The 16 bytes are printable ASCII excluding `0x3a..=0x40` and
+/// `0x5b..=0x60`, which FITS reserves. Placed in a `CHECKSUM` card's
+/// value field at column 11, they contribute exactly `value` to the
+/// running sum.
 #[must_use]
 pub fn encode_checksum(value: u32) -> [u8; 16] {
     const OFFSET: i32 = 0x30;

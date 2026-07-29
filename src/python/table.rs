@@ -351,7 +351,9 @@ fn generic_cell_summary(v: &BinValue, tdim: Option<&[usize]>) -> String {
         }
         // `tdim[0]` is the string width; the rest is the array shape.
         // Sliced defensively: a malformed TDIM must not panic here.
-        BinValue::StrArray(v) => format!("str[{}]", shape_str(v.len(), tdim.and_then(|d| d.get(1..)))),
+        BinValue::StrArray(v) => {
+            format!("str[{}]", shape_str(v.len(), tdim.and_then(|d| d.get(1..))))
+        }
         BinValue::C64(x) => format!("c64[{}]", shape_str(x.len(), tdim)),
         BinValue::C128(x) => format!("c128[{}]", shape_str(x.len(), tdim)),
         BinValue::Bits(_, count) => format!("bits[{count}]"),
@@ -670,7 +672,11 @@ fn bin_value_to_py(
 fn reshape_str_cell(py: Python<'_>, list: &Py<PyAny>, target: &[usize]) -> Option<Py<PyAny>> {
     let np = py.import("numpy").ok()?;
     let arr = np.call_method1("array", (list.bind(py),)).ok()?;
-    Some(arr.call_method1("reshape", (target.to_vec(),)).ok()?.unbind())
+    Some(
+        arr.call_method1("reshape", (target.to_vec(),))
+            .ok()?
+            .unbind(),
+    )
 }
 
 fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>) -> Py<PyList> {
