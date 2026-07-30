@@ -22,44 +22,87 @@ use crate::wcs::projections::{
 };
 
 /// Three-letter projection code (Paper II Table 13).
-///
-/// Adding a variant requires updating [`ProjectionKind::code`],
-/// [`ProjectionKind::from_code`], and [`build`]. All three are
-/// exhaustive matches, so the compiler enforces the invariant
-/// directly: omitting any one is a build error, not a runtime panic.
+// Adding a variant requires updating `code`, `from_code` and `build`;
+// all three match exhaustively, so the compiler asks for each one.
+//
+// `non_exhaustive`: Sec.8.2 registers new codes with the IAUFWG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ProjectionKind {
+    /// `AZP` -- zenithal/azimuthal perspective (Paper II Sec.5.1.1).
     Azp,
+    /// `SZP` -- slant zenithal perspective (Sec.5.1.2).
     Szp,
+    /// `TAN` -- gnomonic, the tangent plane (Sec.5.1.3).
     Tan,
+    /// `STG` -- stereographic (Sec.5.1.4).
     Stg,
+    /// `SIN` -- orthographic / slant orthographic, the radio
+    /// interferometry projection (Sec.5.1.5).
     Sin,
+    /// `ARC` -- zenithal equidistant (Sec.5.1.6).
     Arc,
+    /// `ZPN` -- zenithal polynomial (Sec.5.1.7).
     Zpn,
+    /// `ZEA` -- zenithal equal-area (Sec.5.1.8).
     Zea,
+    /// `AIR` -- Airy (Sec.5.1.9).
     Air,
+    /// `CYP` -- cylindrical perspective (Sec.5.2.1).
     Cyp,
+    /// `CEA` -- cylindrical equal-area (Sec.5.2.2).
     Cea,
+    /// `CAR` -- plate carree, the equirectangular projection
+    /// (Sec.5.2.3).
     Car,
+    /// `MER` -- Mercator (Sec.5.2.4).
     Mer,
+    /// `SFL` -- Sanson-Flamsteed, a.k.a. global sinusoidal
+    /// (Sec.5.3.1).
     Sfl,
+    /// `PAR` -- parabolic (Sec.5.3.2).
     Par,
+    /// `MOL` -- Mollweide (Sec.5.3.3).
     Mol,
+    /// `AIT` -- Hammer-Aitoff (Sec.5.3.4).
     Ait,
+    /// `COP` -- conic perspective (Sec.5.4.1).
     Cop,
+    /// `COE` -- conic equal-area (Sec.5.4.2).
     Coe,
+    /// `COD` -- conic equidistant (Sec.5.4.3).
     Cod,
+    /// `COO` -- conic orthomorphic (Sec.5.4.4).
     Coo,
+    /// `BON` -- Bonne's equal-area (Sec.5.5.1).
     Bon,
+    /// `PCO` -- polyconic (Sec.5.5.2).
     Pco,
+    /// `TSC` -- tangential spherical cube (Sec.5.6.1).
     Tsc,
+    /// `CSC` -- COBE quadrilateralized spherical cube (Sec.5.6.2).
+    ///
+    /// The forward map is a polynomial approximation accurate to about
+    /// an arcminute, so a round trip does not return to machine
+    /// precision.
     Csc,
+    /// `QSC` -- quadrilateralized spherical cube (Sec.5.6.3).
     Qsc,
+    /// `HPX` -- `HEALPix` grid (Calabretta & Roukema 2007).
     Hpx,
+    /// `XPH` -- polar `HEALPix`, the "butterfly" layout (Calabretta &
+    /// Roukema 2007 Sec.6).
     Xph,
 }
 
 impl ProjectionKind {
+    /// Parse a three-letter code from a `CTYPEia` value, matched
+    /// case-insensitively.
+    ///
+    /// # Errors
+    ///
+    /// If the code is not in Table 13. The distortion pseudo-codes
+    /// (`TPV`, `TNX`, `ZPX`) are handled a layer up.
     pub fn from_code(code: &str) -> Result<Self> {
         Ok(match code.to_uppercase().as_str() {
             "AZP" => Self::Azp,

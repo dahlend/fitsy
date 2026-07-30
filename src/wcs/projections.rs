@@ -394,6 +394,30 @@ mod tests {
         }
     }
 
+    /// `phi = +180` is the closed end of Paper II's `arg` range
+    /// `(-180, 180]`: the facet index `floor((phi + 180) H / 360)`
+    /// evaluates to `H` there and walked off the ring before the
+    /// facet-centre clamp -- at `H = 4`, `theta = 88` the projected
+    /// `x` came out 223.08 instead of 136.92 (the CHANGELOG's worked
+    /// example).
+    #[test]
+    fn hpx_polar_facet_holds_at_phi_180() {
+        let p = Hpx::from_pv(&[0.0, 4.0, 3.0]).unwrap();
+        for &theta in &[60.0_f64, 88.0, -60.0, -88.0] {
+            let (x, y) = p.s2x(180.0, theta).unwrap();
+            assert!(
+                (90.0..=180.0).contains(&x),
+                "theta {theta}: x = {x} left the last facet"
+            );
+            let (phi2, theta2) = p.x2s(x, y).unwrap();
+            let dphi = ((180.0 - phi2 + 540.0).rem_euclid(360.0)) - 180.0;
+            assert!(dphi.abs() < 1e-9, "HPX phi 180 -> {phi2} (theta {theta})");
+            assert!((theta - theta2).abs() < 1e-9, "theta {theta} -> {theta2}");
+        }
+        let (x, _) = p.s2x(180.0, 88.0).unwrap();
+        assert!((x - 136.92).abs() < 0.01, "x = {x}");
+    }
+
     #[test]
     fn tsc_face_centres_round_trip() {
         let p = Tsc;
@@ -491,5 +515,105 @@ mod tests {
     fn car_identity() {
         let (x, y) = Car.s2x(42.0, -17.5).unwrap();
         assert_eq!((x, y), (42.0, -17.5));
+    }
+
+    /// A dense sweep over *every* registered projection, built the way
+    /// a header would build it, asserting that whatever `s2x` accepts
+    /// `x2s` inverts.
+    ///
+    /// The per-projection tests above walk a 7x7 grid; this walks
+    /// 45x52 and so reaches the domain edges where the fold bugs in
+    /// `AZP`, `SZP` and `COP` lived -- each of those returned a plane
+    /// coordinate belonging to a different latitude.
+    #[test]
+    fn every_registered_projection_inverts_what_it_accepts() {
+        use crate::wcs::D2R;
+        use crate::wcs::projection::{ProjectionKind, build};
+
+        // Representative parameters for the parameterised codes.
+        // One arm per code, mirroring Paper II's parameter tables, even
+        // where two codes happen to take the same numbers.
+        #[allow(
+            clippy::match_same_arms,
+            reason = "one arm per projection documents what each PV2_m means"
+        )]
+        let params = |code: &str| -> Vec<f64> {
+            match code {
+                "AZP" => vec![0.0, 2.0, 30.0],
+                "SZP" => vec![0.0, 2.0, 180.0, 60.0],
+                "SIN" => vec![0.0, 0.0, 0.0],
+                "ZPN" => vec![0.0, 1.0],
+                "AIR" => vec![0.0, 45.0],
+                "CYP" => vec![0.0, 1.0, std::f64::consts::FRAC_1_SQRT_2],
+                "CEA" => vec![0.0, 1.0],
+                "COP" | "COE" | "COD" | "COO" => vec![0.0, 45.0, 25.0],
+                "BON" => vec![0.0, 45.0],
+                _ => vec![],
+            }
+        };
+        // `CSC` is a polynomial *approximation* (Paper II Sec.5.6.2);
+        // its own paper quotes an error near an arcminute, so it gets
+        // a matching tolerance rather than a machine-precision one.
+        // `SIN`'s limb inverts through `acos`, which loses half the
+        // mantissa exactly at `theta = 0`.
+        let tol = |code: &str| match code {
+            "CSC" => 5e-2,
+            "SIN" => 1e-6,
+            _ => 1e-9,
+        };
+
+        let codes = [
+            "AZP", "SZP", "TAN", "STG", "SIN", "ARC", "ZPN", "ZEA", "AIR", "CYP", "CEA", "CAR",
+            "MER", "SFL", "PAR", "MOL", "AIT", "COP", "COE", "COD", "COO", "BON", "PCO", "TSC",
+            "CSC", "QSC", "HPX", "XPH",
+        ];
+        for code in codes {
+            let kind = ProjectionKind::from_code(code)
+                .unwrap_or_else(|e| panic!("{code} is not a registered code: {e}"));
+            let p = build(kind, &params(code))
+                .unwrap_or_else(|e| panic!("{code} failed to build: {e}"));
+            let (mut checked, t) = (0_usize, tol(code));
+            let mut theta = -88.0_f64;
+            while theta <= 88.0 {
+                let mut phi = -179.0_f64;
+                while phi <= 179.0 {
+                    if let Ok((x, y)) = p.s2x(phi, theta)
+                        && x.is_finite()
+                        && y.is_finite()
+                    {
+                        let (p2, t2) = p.x2s(x, y).unwrap_or_else(|e| {
+                            panic!("{code}: x2s failed after s2x accepted ({phi}, {theta}): {e}")
+                        });
+                        // Unit-vector separation: phi is degenerate at
+                        // the poles and wraps at +-180, so comparing the
+                        // angles directly would flag both as errors.
+                        let v = |a: f64, b: f64| {
+                            let (c, s) = ((b * D2R).cos(), (b * D2R).sin());
+                            [c * (a * D2R).cos(), c * (a * D2R).sin(), s]
+                        };
+                        let (u, w) = (v(phi, theta), v(p2, t2));
+                        let dot = u[0] * w[0] + u[1] * w[1] + u[2] * w[2];
+                        let cr = [
+                            u[1] * w[2] - u[2] * w[1],
+                            u[2] * w[0] - u[0] * w[2],
+                            u[0] * w[1] - u[1] * w[0],
+                        ];
+                        let sep = (cr[0].powi(2) + cr[1].powi(2) + cr[2].powi(2))
+                            .sqrt()
+                            .atan2(dot)
+                            / D2R;
+                        assert!(
+                            sep < t,
+                            "{code}: ({phi}, {theta}) -> ({x}, {y}) -> ({p2}, {t2}), \
+                             off by {sep:.3e} deg (tol {t:.0e})"
+                        );
+                        checked += 1;
+                    }
+                    phi += 7.0;
+                }
+                theta += 4.0;
+            }
+            assert!(checked > 100, "{code}: only {checked} points accepted");
+        }
     }
 }

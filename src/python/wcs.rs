@@ -63,7 +63,7 @@ impl PyWcs {
     fn format_summary(&self) -> String {
         use std::fmt::Write as _;
         let w = &self.inner;
-        let n = w.naxis;
+        let n = w.naxis();
         let mut out = String::with_capacity(256);
         out.push_str("WCS Keywords\n\n");
         let _ = writeln!(out, "Number of WCS axes: {n}");
@@ -93,12 +93,14 @@ impl PyWcs {
             s
         };
 
-        let _ = writeln!(out, "CTYPE : {}", quoted(&w.ctype));
-        if !w.cunit.is_empty() && w.cunit.iter().any(|s| !s.is_empty()) {
-            let _ = writeln!(out, "CUNIT : {}", quoted(&w.cunit));
+        let ctype: Vec<String> = w.axes().iter().map(|a| a.ctype.clone()).collect();
+        let cunit: Vec<String> = w.axes().iter().map(|a| a.cunit.clone()).collect();
+        let _ = writeln!(out, "CTYPE : {}", quoted(&ctype));
+        if cunit.iter().any(|s| !s.is_empty()) {
+            let _ = writeln!(out, "CUNIT : {}", quoted(&cunit));
         }
 
-        let _ = writeln!(out, "CRVAL : {}", nums(&w.crval));
+        let _ = writeln!(out, "CRVAL : {}", nums(w.crval()));
         let _ = writeln!(out, "CRPIX : {}", nums(w.linear.crpix()));
 
         // Linear matrix as CD<i>_<j> rows. We don't carry the
@@ -166,25 +168,25 @@ impl PyWcs {
     /// Number of axes (``NAXIS``).
     #[getter]
     fn naxis(&self) -> usize {
-        self.inner.naxis
+        self.inner.naxis()
     }
 
     /// Per-axis ``CTYPE`` strings.
     #[getter]
     fn ctype(&self) -> Vec<String> {
-        self.inner.ctype.clone()
+        self.inner.axes().iter().map(|a| a.ctype.clone()).collect()
     }
 
     /// Per-axis ``CUNIT`` strings.
     #[getter]
     fn cunit(&self) -> Vec<String> {
-        self.inner.cunit.clone()
+        self.inner.axes().iter().map(|a| a.cunit.clone()).collect()
     }
 
     /// Per-axis ``CRVAL`` reference values.
     #[getter]
     fn crval(&self) -> Vec<f64> {
-        self.inner.crval.clone()
+        self.inner.crval().to_vec()
     }
 
     /// True when the WCS has a celestial axis pair.

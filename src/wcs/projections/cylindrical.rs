@@ -33,9 +33,12 @@ impl Projection for Car {
 /// (default 1) is the squash factor.
 #[derive(Debug, Clone, Copy)]
 pub struct Cea {
+    /// `PV2_1` -- `lambda`, the scaling of the latitude axis.
     pub lambda: f64,
 }
 impl Cea {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let lambda = pv2.get(1).copied().unwrap_or(1.0);
         if lambda <= 0.0 || lambda > 1.0 {
@@ -96,10 +99,15 @@ impl Projection for Mer {
 /// (default 1) and `lambda = PV2_2` (default sqrt2/2).
 #[derive(Debug, Clone, Copy)]
 pub struct Cyp {
+    /// `PV2_1` -- `mu`, the projection point's distance from the
+    /// cylinder axis in spherical radii.
     pub mu: f64,
+    /// `PV2_2` -- `lambda`, the cylinder's radius in spherical radii.
     pub lambda: f64,
 }
 impl Cyp {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let mu = pv2.get(1).copied().unwrap_or(1.0);
         let lambda = pv2

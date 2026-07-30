@@ -11,10 +11,14 @@ use crate::wcs::{D2R, R2D};
 /// facets; `K = PV2_2` (default 3, odd integer >= 1) -- polar facets.
 #[derive(Debug, Clone, Copy)]
 pub struct Hpx {
+    /// `PV2_1` -- `H`, the number of equatorial facets. Default 4.
     pub h: f64,
+    /// `PV2_2` -- `K`, the number of polar facets. Default 3.
     pub k: f64,
 }
 impl Hpx {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         // The parsed PV2 slice is zero-filled, so an absent card reads as
         // 0.0; H = 0 or K = 0 is meaningless, so treat it as "use default".
@@ -33,6 +37,16 @@ impl Hpx {
     }
     fn sin_theta_x(&self) -> f64 {
         (self.k - 1.0) / self.k
+    }
+
+    /// Centre longitude of the polar facet holding `phi`.
+    // The index `floor((phi + 180) H / 360)` runs `0..H-1` over
+    // `(-180, 180]` except at the closed endpoint, where `phi = 180`
+    // gives `H` and walks off the ring -- hence the clamp.
+    fn facet_centre(&self, phi: f64) -> f64 {
+        let width = 360.0 / self.h;
+        let idx = ((phi + 180.0) / width).floor().clamp(0.0, self.h - 1.0);
+        idx * width - 180.0 + width / 2.0
     }
 }
 impl Projection for Hpx {
@@ -56,8 +70,7 @@ impl Projection for Hpx {
             let abs_s = s.abs();
             let sigma = (self.k * (1.0 - abs_s)).sqrt();
             let h = self.h;
-            let half = 360.0 / h / 2.0;
-            let phi_c = ((phi + 180.0) / (360.0 / h)).floor() * (360.0 / h) - 180.0 + half;
+            let phi_c = self.facet_centre(phi);
             let x = phi_c + (phi - phi_c) * sigma;
             let y_mag = 90.0 * (self.k + 1.0 - 2.0 * sigma) / h;
             Ok((x, if s >= 0.0 { y_mag } else { -y_mag }))
@@ -83,10 +96,8 @@ impl Projection for Hpx {
             } else {
                 -sin_abs.asin() * R2D
             };
-            let h = self.h;
-            let half = 360.0 / h / 2.0;
-            let n = ((x + 180.0) / (360.0 / h)).floor();
-            let phi_c = n * (360.0 / h) - 180.0 + half;
+            let half = 360.0 / self.h / 2.0;
+            let phi_c = self.facet_centre(x);
             // The polar facets are diamonds: at parameter sigma the facet
             // half-width is (180/H) sigma, so points outside that band are
             // not part of the projection (WCSLIB returns an error there too).

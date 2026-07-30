@@ -127,3 +127,51 @@ fn subtractive_dither_f32_matches_reference() {
         "de-dithered floats differ from the reference decode"
     );
 }
+
+/// Standard Sec.10 Table 10 lists `NOCOMPRESS` as a valid `ZCMPTYPE`
+/// alongside the five real algorithms: the tile bytes are stored
+/// verbatim and the HDU "remains uncompressed".
+///
+/// Regression: fitsy rejected the mnemonic outright, so a file any
+/// astropy user can produce with one kwarg
+/// (`compression_type='NOCOMPRESS'`, which astropy lists in
+/// `COMPRESSION_TYPES`, writes, and reads back) failed at the first
+/// pixel read -- and only there, since the header alone parses fine.
+/// Fixture from `tests/data/gen_nocompress.py`.
+#[test]
+fn nocompress_i16_matches_reference() {
+    let raw = decompress("ref_nocompress.fits");
+    let expected: Vec<i16> = (0..6 * 8_i16).map(|v| v * 37 - 500).collect();
+    assert_eq!(raw.len(), expected.len() * 2, "decoded byte length");
+    let decoded: Vec<i16> = raw
+        .chunks_exact(2)
+        .map(|c| i16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    assert_eq!(
+        decoded, expected,
+        "NOCOMPRESS i16 decode differs from the reference fixture"
+    );
+}
+
+/// The float half of the same fixture. A lossless float image is
+/// normally restricted to `GZIP_1`/`GZIP_2`; `NOCOMPRESS` stores the
+/// IEEE bytes untouched, so it cannot lose anything and has to pass
+/// that guard too.
+#[test]
+fn nocompress_f32_matches_reference() {
+    let f = FitsFile::open(test_data("ref_nocompress.fits")).unwrap();
+    let Hdu::CompressedImage(c) = f.hdu(2).unwrap() else {
+        panic!("HDU 2 is not a compressed image");
+    };
+    let raw = c.decompress().unwrap();
+    let expected: Vec<f32> = (0..6 * 8).map(|v| (v as f32) * 0.25 - 3.5).collect();
+    assert_eq!(raw.len(), expected.len() * 4, "decoded byte length");
+    let decoded: Vec<f32> = raw
+        .chunks_exact(4)
+        .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert_eq!(
+        decoded, expected,
+        "NOCOMPRESS f32 decode differs from the reference fixture"
+    );
+}

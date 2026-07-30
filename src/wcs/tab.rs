@@ -1,44 +1,55 @@
 //! Tabular WCS axes (Greisen et al. 2006, Paper III Sec.6).
 //!
-//! A `-TAB` axis encodes its world coordinates in a separate
-//! `BINTABLE` extension instead of via a closed-form algorithm. The
-//! header carries:
+//! A `-TAB` axis takes its world coordinates from a lookup table in a
+//! separate `BINTABLE` extension instead of a closed-form algorithm.
+//! The header carries:
 //!
 //! - `CTYPE<i><a> = '<kind>-TAB'` -- flags the axis as tabular.
-//! - `PS<i>_0<a>` -- `EXTNAME` of the binary table extension that
-//!   holds the lookup arrays (required).
-//! - `PS<i>_1<a>` -- `TTYPE` of the column carrying the **coordinate
-//!   array** (required).
-//! - `PS<i>_2<a>` -- `TTYPE` of the column carrying the optional
-//!   **index array** (a 1-D mapping from intermediate world
-//!   coordinate to a fractional row index). Absent -> identity.
-//! - `PV<i>_1<a>` -- `EXTVER` of the binary table (default 1).
-//! - `PV<i>_2<a>` -- `EXTLEVEL` (default 1; not used here).
-//! - `PV<i>_3<a>` -- which axis of a multi-dimensional coordinate
-//!   array this WCS axis indexes (1-based, default 1). For the
-//!   single-axis-per-table case this is always 1.
+//! - `PS<i>_0<a>` -- `EXTNAME` of the binary table (required).
+//! - `PS<i>_1<a>` -- `TTYPE` of the **coordinate array** column
+//!   (required; the same value on every axis of a group).
+//! - `PS<i>_2<a>` -- `TTYPE` of this axis's **index vector** column.
+//!   Absent -> the index is `1, 2, ... K`.
+//! - `PV<i>_1<a>` / `PV<i>_2<a>` -- `EXTVER` / `EXTLEVEL` (default 1).
+//! - `PV<i>_3<a>` -- which axis `m` of the coordinate array this WCS
+//!   axis indexes (1-based, default 1).
 //!
-//! ## Scope
+//! ## Separable and non-separable axes
 //!
-//! This implementation supports the **single-axis 1-D `-TAB`** case:
-//! one WCS axis per binary table, coordinate array stored as a
-//! single 1-D column of length *K*. That is by far the most common
-//! real-world use (irregular wavelength / frequency / time grids in
-//! spectra, time-series cubes), and matches what astropy's
-//! `WCS.from_header` accepts without warnings for non-celestial
-//! tabular axes.
+//! The simple case is one WCS axis per table: a coordinate array of
+//! length *K*, optionally addressed through an index vector. An
+//! irregular wavelength or time grid.
 //!
-//! The full multi-dimensional `-TAB` algorithm (one binary table
-//! shared by several WCS axes, *N*-D coordinate array, intervening
-//! `TTYPE` for the per-axis index) is **not** implemented. Such
-//! headers are detected and rejected with a clear error rather than
-//! silently mis-interpreted.
+//! Sec.6.1.1 then generalises to *M* **non-separable** axes -- axes
+//! whose coordinates cannot be computed independently of one another,
+//! the obvious case being a celestial pair whose longitude depends on
+//! both pixel axes. Those share a single `(1 + M)`-dimensional
+//! coordinate array of shape `(M, K_1, ..., K_M)`, one index vector
+//! each, and are interpolated together: `M`-linear interpolation over
+//! `2^M` corners, not *M* separate lookups.
+//!
+//! Both are handled here by [`TabGroup`], which owns every axis
+//! sharing one coordinate array. `M = 1` is simply the one-axis group.
+//!
+//! ## Array layout
+//!
+//! `TDIM` is written fastest-axis-first, so `(M, K_1, ..., K_M)` puts
+//! the coordinate index `m` innermost:
+//!
+//! ```text
+//! offset(m, i_1, ..., i_M) = m + M * (i_1 + K_1 * (i_2 + K_2 * (...)))
+//! ```
+
+#![allow(
+    clippy::needless_range_loop,
+    reason = "the multilinear blend and its Jacobian index several parallel arrays by axis; named indices read closer to the equations than zipped iterators"
+)]
 
 use crate::error::{FitsError, Result};
 
-/// Header-level description of a `-TAB` axis. Populated by the
-/// parser; resolved into a [`TabAxis`] once the binary table is
-/// actually loaded.
+/// Header-level description of one `-TAB` axis. Populated by the
+/// parser; several of these resolve into one [`TabGroup`] once the
+/// binary table is loaded.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TabSpec {
@@ -48,120 +59,474 @@ pub struct TabSpec {
     pub extname: String,
     /// `PS<i>_1<a>` -- column with the coordinate array.
     pub coord_column: String,
-    /// `PS<i>_2<a>` -- optional column with the index array.
+    /// `PS<i>_2<a>` -- optional column with this axis's index vector.
     pub index_column: Option<String>,
     /// `PV<i>_1<a>` -- `EXTVER` (default 1).
     pub extver: i64,
-    /// `PV<i>_3<a>` -- axis number within a multi-D coordinate
-    /// array (1-based; default 1). For single-axis tables this is 1.
+    /// `PV<i>_2<a>` -- `EXTLEVEL` (default 1).
+    pub extlevel: i64,
+    /// `PV<i>_3<a>` -- this axis's slot `m` in the coordinate array
+    /// (1-based; default 1).
     pub coord_axis: u32,
 }
 
-/// A resolved tabular WCS axis: parsed metadata plus the actual
-/// lookup arrays loaded from the referenced binary table.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct TabAxis {
-    /// Zero-based axis index in the WCS pipeline.
-    pub axis: usize,
-    /// Coordinate array (length *K*, monotonic-by-construction or
-    /// not -- we don't enforce monotonicity for the forward map; the
-    /// inverse requires a strictly monotonic array and errors
-    /// otherwise).
-    pub coord: Vec<f64>,
-    /// Optional index array (length *K*). When present, an
-    /// intermediate-world value `psi` is first mapped to a
-    /// fractional array index via `index -> 0..K-1` linear lookup;
-    /// when absent, the intermediate value itself **is** the
-    /// 1-based array index per Paper III Sec.6 eq. 6.
-    pub index: Option<Vec<f64>>,
+impl TabSpec {
+    /// The table this axis reads from. Axes sharing one are one group
+    /// (Sec.6.2: the coordinate array column must be the same for all
+    /// *M* axes).
+    pub(crate) fn group_key(&self) -> (String, i64, i64, String) {
+        (
+            self.extname.clone(),
+            self.extver,
+            self.extlevel,
+            self.coord_column.clone(),
+        )
+    }
 }
 
-impl TabAxis {
-    /// Forward map: intermediate world coordinate -> world coordinate.
-    /// `psi` is the un-shifted intermediate value: Paper III looks up
-    /// the linear-pipeline output directly, and the result is already
-    /// the world coordinate.
+/// A resolved lookup table plus the WCS axes it drives.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct TabGroup {
+    /// WCS axis index for each coordinate-array slot: `axes[m]` is the
+    /// axis whose `PVi_3` is `m + 1`. Length *M*.
+    pub axes: Vec<usize>,
+    /// `K_1 .. K_M`, the extent of each index axis.
+    pub dims: Vec<usize>,
+    /// Index vector per slot, each of length `K_m`. `None` means the
+    /// implicit `1, 2, ... K_m`, where the intermediate coordinate is
+    /// itself the (1-based) array index.
+    pub index: Vec<Option<Vec<f64>>>,
+    /// The coordinate array, flat, `M * K_1 * ... * K_M` long, laid
+    /// out as described in the module docs.
+    pub coord: Vec<f64>,
+}
+
+impl TabGroup {
+    /// Number of coordinate axes sharing this table.
+    #[must_use]
+    pub fn rank(&self) -> usize {
+        self.dims.len()
+    }
+
+    /// Check the pieces agree before anything relies on them.
+    pub(crate) fn validate(&self) -> Result<()> {
+        let m = self.dims.len();
+        if m == 0 {
+            return Err(FitsError::Wcs("-TAB: empty coordinate group".into()));
+        }
+        if self.axes.len() != m || self.index.len() != m {
+            return Err(FitsError::Wcs(format!(
+                "-TAB: {m} index axes but {} WCS axes and {} index vectors",
+                self.axes.len(),
+                self.index.len(),
+            )));
+        }
+        let expect: usize = m * self.dims.iter().product::<usize>();
+        if self.coord.len() != expect {
+            return Err(FitsError::Wcs(format!(
+                "-TAB: coordinate array has {} elements, but TDIM implies {expect} \
+                 ({m} x {:?})",
+                self.coord.len(),
+                self.dims,
+            )));
+        }
+        // Sec.6.1.1 forbids degenerate axes once M > 1; K = 1 stays
+        // legal for a lone separable axis, where Sec.6.1.2 spells out
+        // the extrapolation rule for it.
+        for (d, &k) in self.dims.iter().enumerate() {
+            if k == 0 || (m > 1 && k < 2) {
+                return Err(FitsError::Wcs(format!(
+                    "-TAB: index axis {} has K = {k}; Sec.6.1.1 forbids degenerate \
+                     axes when several coordinates share a table",
+                    d + 1,
+                )));
+            }
+        }
+        for (d, idx) in self.index.iter().enumerate() {
+            if let Some(v) = idx
+                && v.len() != self.dims[d]
+            {
+                return Err(FitsError::Wcs(format!(
+                    "-TAB: index vector {} has {} entries, but its axis has K = {}",
+                    d + 1,
+                    v.len(),
+                    self.dims[d],
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Forward: intermediate world coordinates -> world coordinates.
+    ///
+    /// `psi[d]` is the full intermediate value `CRVAL + x` for the axis
+    /// in slot `d`; the returned vector holds `C_m` in the same order.
     ///
     /// # Domain
     ///
-    /// Paper III Sec.6.1.2 defines the axis over
-    /// `0.5 <= Upsilon_m <= K + 0.5` -- the table plus half a sample
-    /// step at each end, covering the outer halves of the boundary
-    /// pixels. Values inside are interpolated; beyond it the
-    /// coordinate is undefined and this errors, where `wcslib`
-    /// returns NaN.
-    ///
-    /// [`Self::inverse`] does not impose the matching bound; see its
-    /// note.
-    pub fn forward(&self, psi: f64) -> Result<f64> {
-        if self.coord.is_empty() {
+    /// Sec.6.1.2 defines each axis over `0.5 <= Upsilon_m <= K_m + 0.5`
+    /// -- the table plus half a sample step at each end, which covers
+    /// the outer halves of the boundary pixels. Beyond that the
+    /// coordinate is undefined and this errors, where `wcslib` returns
+    /// NaN.
+    pub fn forward(&self, psi: &[f64]) -> Result<Vec<f64>> {
+        let m = self.rank();
+        if psi.len() != m {
             return Err(FitsError::Wcs(format!(
-                "TAB axis {}: coordinate array is empty",
-                self.axis,
+                "-TAB: expected {m} intermediate coordinates, got {}",
+                psi.len()
             )));
         }
-        // Step 1: psi -> fractional row index `c` in 0..K-1.
-        let c = match &self.index {
-            // Index array gives `index_array[c] = psi` for some c.
-            Some(idx) => interp_inverse(idx, psi)?,
-            // No index array: per Paper III eq. 6, the intermediate
-            // coordinate **is** the (1-based) array index. Convert
-            // to our 0-based representation.
-            None => psi - 1.0,
-        };
-        // Paper III Sec.6.1.2: "The value of Upsilon_m derived from
-        // psi_m must lie in the range 0.5 <= Upsilon_m <= K + 0.5."
-        // Extrapolating further invents a coordinate for pixels the
-        // table does not describe. `c` is the 0-based Upsilon_m, so
-        // the bound is [-0.5, K - 0.5].
-        let k = self.coord.len() as f64;
+        if m == 1 {
+            return Ok(vec![self.forward_scalar(psi[0])?]);
+        }
+        let mut upsilon = Vec::with_capacity(m);
+        for (d, &p) in psi.iter().enumerate() {
+            upsilon.push(self.checked_upsilon(d, p)?);
+        }
+        Ok(self.interpolate_value(&upsilon))
+    }
+
+    /// [`Self::forward`] for a separable (`M = 1`) group, without the
+    /// per-point allocation.
+    pub fn forward_scalar(&self, psi: f64) -> Result<f64> {
+        self.require_rank_1("forward_scalar")?;
+        let c = self.checked_upsilon(0, psi)?;
+        // With M = 1 the coordinate array is the plain length-K
+        // vector, so the blend is one segment lookup.
+        Ok(interp_lookup(&self.coord, c))
+    }
+
+    /// `psi -> Upsilon` for slot `d`, enforcing the Sec.6.1.2 domain
+    /// `0.5 <= Upsilon <= K + 0.5` (0-based here: `-0.5..=K - 0.5`).
+    fn checked_upsilon(&self, d: usize, psi: f64) -> Result<f64> {
+        // Sec.6.1.2's degenerate rule: a single-sample axis holds its
+        // one tabulated value for *every* intermediate coordinate, so
+        // there is no domain to fall out of and nothing to look up --
+        // which also keeps a lone index entry away from
+        // `interp_inverse`, whose bracketing needs two samples.
+        if self.dims[d] == 1 {
+            return Ok(0.0);
+        }
+        let c = self.psi_to_upsilon(d, psi)?;
+        let k = self.dims[d] as f64;
         if !(c >= -0.5 && c <= k - 0.5) {
             return Err(FitsError::Wcs(format!(
-                "TAB axis {}: intermediate coordinate {psi} maps to array index {:.6}, \
+                "-TAB axis {}: intermediate coordinate {psi} maps to index {:.6}, \
                  outside the permitted 0.5..={} range (Paper III Sec.6.1.2)",
-                self.axis,
+                self.axes[d] + 1,
                 c + 1.0,
                 k + 0.5,
             )));
         }
-        // Step 2: linear interpolation in the coordinate array.
-        Ok(interp_lookup(&self.coord, c))
+        Ok(c)
     }
 
-    /// Inverse map: world -> intermediate world. Requires the
-    /// coordinate array to be strictly monotonic; binary search is
-    /// then bracketed and finished with one linear interpolation.
+    fn require_rank_1(&self, what: &str) -> Result<()> {
+        if self.rank() == 1 {
+            return Ok(());
+        }
+        Err(FitsError::Wcs(format!(
+            "-TAB: {what} on a group of {} non-separable axes",
+            self.rank()
+        )))
+    }
+
+    /// Inverse: world coordinates -> intermediate world coordinates.
     ///
     /// # Asymmetry with [`Self::forward`]
     ///
-    /// This extrapolates without limit where `forward` refuses past
-    /// the Paper III margin, so a world value off the end of the table
-    /// yields a pixel `forward` would reject. That is deliberate:
-    /// [`Wcs::celestial_to_pixel`](crate::Wcs::celestial_to_pixel)
-    /// fills the other axes with `CRVAL`, which on a `-TAB` axis is
-    /// routinely nowhere near the tabulated range -- bounding here
-    /// would fail every sky-to-pixel call on a `-TAB` cube over an
-    /// axis the caller never asked about.
-    ///
-    /// Check the result with `forward` if you need a closed round
-    /// trip.
-    pub fn inverse(&self, world: f64) -> Result<f64> {
-        if self.coord.len() < 2 {
+    /// This extrapolates without limit, where `forward` refuses past
+    /// the Sec.6.1.2 margin, so a world value off the end of the table
+    /// yields an index `forward` would reject.
+    // Deliberate: `celestial_to_pixel` fills the axes the caller did
+    // not ask about with `CRVAL`, routinely nowhere near a `-TAB`
+    // axis's tabulated range.
+    pub fn inverse(&self, world: &[f64]) -> Result<Vec<f64>> {
+        let m = self.rank();
+        if world.len() != m {
             return Err(FitsError::Wcs(format!(
-                "TAB axis {}: cannot invert with fewer than 2 samples",
-                self.axis,
+                "-TAB: expected {m} world coordinates, got {}",
+                world.len()
             )));
         }
-        let c = interp_inverse(&self.coord, world)?;
-        // c is now a fractional index into the coordinate array.
-        // Map back through the index array if present, else add 1
-        // to recover the 1-based intermediate coordinate.
-        match &self.index {
-            Some(idx) => Ok(interp_lookup(idx, c)),
-            None => Ok(c + 1.0),
+        if m == 1 {
+            return Ok(vec![self.inverse_scalar(world[0])?]);
+        }
+        let upsilon = self.inverse_multi(world)?;
+        Ok((0..m).map(|d| self.upsilon_to_psi(d, upsilon[d])).collect())
+    }
+
+    /// [`Self::inverse`] for a separable group: an exact monotonic
+    /// search rather than Newton, so a non-monotonic table is reported
+    /// instead of silently resolved. Extrapolates without limit, as
+    /// [`Self::inverse`] describes.
+    pub fn inverse_scalar(&self, world: f64) -> Result<f64> {
+        self.require_rank_1("inverse_scalar")?;
+        // A single-sample axis is the constant `coord[0]`; every world
+        // value maps back to the one tabulated position (Sec.6.1.2),
+        // consistent with this function's accept-anything extrapolation
+        // on longer tables.
+        if self.coord.len() == 1 {
+            return Ok(self.upsilon_to_psi(0, 0.0));
+        }
+        Ok(self.upsilon_to_psi(0, interp_inverse(&self.coord, world)?))
+    }
+
+    /// `psi_m -> Upsilon_m` for one slot: interpolate in the index
+    /// vector, or take the intermediate coordinate as the 1-based index
+    /// directly (Sec.6.1.1). Returned 0-based.
+    fn psi_to_upsilon(&self, d: usize, psi: f64) -> Result<f64> {
+        match &self.index[d] {
+            Some(v) => interp_inverse(v, psi),
+            None => Ok(psi - 1.0),
         }
     }
+
+    /// The inverse of [`Self::psi_to_upsilon`].
+    fn upsilon_to_psi(&self, d: usize, upsilon: f64) -> f64 {
+        match &self.index[d] {
+            Some(v) => interp_lookup(v, upsilon),
+            None => upsilon + 1.0,
+        }
+    }
+
+    /// Flat offset of coordinate `m` at grid point `corner`.
+    fn offset(&self, corner: &[usize], m: usize) -> usize {
+        let mut linear = 0_usize;
+        for d in (0..self.rank()).rev() {
+            linear = linear * self.dims[d] + corner[d];
+        }
+        m + self.rank() * linear
+    }
+
+    /// Anchor cell and fractional offsets for the blend at `upsilon`.
+    ///
+    /// The anchor is clamped to the interior so the gradient stays
+    /// defined; the fractional offsets may leave `[0, 1]`, which is
+    /// what makes the half-step extrapolation of Sec.6.1.2 work.
+    fn anchor(&self, upsilon: &[f64], base: &mut [usize], t: &mut [f64]) {
+        for d in 0..self.rank() {
+            if self.dims[d] == 1 {
+                base[d] = 0;
+                t[d] = 0.0;
+                continue;
+            }
+            let a = (upsilon[d].floor() as isize).clamp(0, self.dims[d] as isize - 2);
+            base[d] = a as usize;
+            t[d] = upsilon[d] - a as f64;
+        }
+    }
+
+    /// The `M`-linear blend of [`Self::interpolate`] without its
+    /// Jacobian, for the forward transform, which has no use for one.
+    fn interpolate_value(&self, upsilon: &[f64]) -> Vec<f64> {
+        let m = self.rank();
+        let mut base = vec![0_usize; m];
+        let mut t = vec![0.0_f64; m];
+        self.anchor(upsilon, &mut base, &mut t);
+        let mut value = vec![0.0_f64; m];
+        let mut corner = vec![0_usize; m];
+        for mask in 0..(1_usize << m) {
+            // A degenerate axis has only the lower corner.
+            if (0..m).any(|d| self.dims[d] == 1 && (mask >> d) & 1 == 1) {
+                continue;
+            }
+            let mut weight = 1.0_f64;
+            for d in 0..m {
+                corner[d] = if self.dims[d] == 1 || (mask >> d) & 1 == 0 {
+                    base[d]
+                } else {
+                    base[d] + 1
+                };
+                weight *= if self.dims[d] == 1 {
+                    1.0
+                } else if (mask >> d) & 1 == 1 {
+                    t[d]
+                } else {
+                    1.0 - t[d]
+                };
+            }
+            for mm in 0..m {
+                value[mm] += weight * self.coord[self.offset(&corner, mm)];
+            }
+        }
+        value
+    }
+
+    /// `M`-linear interpolation at `upsilon`, with the Jacobian
+    /// `d C_m / d Upsilon_d` alongside it (row-major `M x M`), for the
+    /// Newton iteration of [`Self::inverse_multi`].
+    fn interpolate(&self, upsilon: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let m = self.rank();
+        let mut base = vec![0_usize; m];
+        let mut t = vec![0.0_f64; m];
+        self.anchor(upsilon, &mut base, &mut t);
+
+        let mut value = vec![0.0_f64; m];
+        let mut jacobian = vec![0.0_f64; m * m];
+        let mut corner = vec![0_usize; m];
+        let mut dweight = vec![0.0_f64; m];
+        for mask in 0..(1_usize << m) {
+            // A degenerate axis has only the lower corner.
+            if (0..m).any(|d| self.dims[d] == 1 && (mask >> d) & 1 == 1) {
+                continue;
+            }
+            // This corner's blend factor per axis: `t` on the upper
+            // side, `1 - t` on the lower, and 1 on a degenerate axis
+            // that has no upper side to blend towards.
+            let factor = |d: usize| {
+                if self.dims[d] == 1 {
+                    1.0
+                } else if (mask >> d) & 1 == 1 {
+                    t[d]
+                } else {
+                    1.0 - t[d]
+                }
+            };
+            let mut weight = 1.0_f64;
+            for d in 0..m {
+                corner[d] = if self.dims[d] == 1 || (mask >> d) & 1 == 0 {
+                    base[d]
+                } else {
+                    base[d] + 1
+                };
+                weight *= factor(d);
+            }
+            // d(weight)/d(upsilon_d) swaps that axis's factor for its
+            // derivative, which is +1 on the upper corner and -1 on the
+            // lower. Written as the product over the *other* axes
+            // rather than `weight / factor(d)`, which is undefined when
+            // this corner sits exactly on a grid line. It does not
+            // depend on the output coordinate, so it is computed once
+            // per corner rather than once per coordinate.
+            for d in 0..m {
+                if self.dims[d] == 1 {
+                    dweight[d] = 0.0;
+                    continue;
+                }
+                let others: f64 = (0..m).filter(|&e| e != d).map(factor).product();
+                dweight[d] = if (mask >> d) & 1 == 1 {
+                    others
+                } else {
+                    -others
+                };
+            }
+            for mm in 0..m {
+                let c = self.coord[self.offset(&corner, mm)];
+                value[mm] += weight * c;
+                for d in 0..m {
+                    jacobian[mm * m + d] += dweight[d] * c;
+                }
+            }
+        }
+        (value, jacobian)
+    }
+
+    /// Solve `C(Upsilon) = world` for `M > 1`.
+    ///
+    /// There is no closed form: the coordinate array is an arbitrary
+    /// tabulated map, so this seeds from the nearest grid point and
+    /// runs Newton on the `M`-linear interpolant. Tables are small
+    /// (Sec.6.2 puts them in a single table cell), so the seed search
+    /// is a plain scan.
+    fn inverse_multi(&self, world: &[f64]) -> Result<Vec<f64>> {
+        let m = self.rank();
+        let total: usize = self.dims.iter().product();
+        let mut corner = vec![0_usize; m];
+        let mut best = vec![0.0_f64; m];
+        let mut best_dist = f64::INFINITY;
+        for flat in 0..total {
+            let mut rest = flat;
+            for d in 0..m {
+                corner[d] = rest % self.dims[d];
+                rest /= self.dims[d];
+            }
+            let dist: f64 = (0..m)
+                .map(|mm| {
+                    let diff = self.coord[self.offset(&corner, mm)] - world[mm];
+                    diff * diff
+                })
+                .sum();
+            if dist < best_dist {
+                best_dist = dist;
+                for d in 0..m {
+                    best[d] = corner[d] as f64;
+                }
+            }
+        }
+
+        let mut upsilon = best;
+        let mut converged = false;
+        for _ in 0..100 {
+            let (value, jacobian) = self.interpolate(&upsilon);
+            let mut residual: Vec<f64> = (0..m).map(|mm| world[mm] - value[mm]).collect();
+            let mut a = jacobian;
+            if solve_in_place(&mut a, &mut residual, m).is_none() {
+                return Err(FitsError::Wcs(
+                    "-TAB inverse: the coordinate array is singular here, so the world \
+                     coordinate does not determine a unique index"
+                        .into(),
+                ));
+            }
+            let mut step = 0.0_f64;
+            for d in 0..m {
+                upsilon[d] += residual[d];
+                step = step.max(residual[d].abs());
+            }
+            if step < 1e-12 {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(FitsError::Wcs(
+                "-TAB inverse: Newton iteration did not converge; the world coordinate \
+                 is probably outside the tabulated region"
+                    .into(),
+            ));
+        }
+        Ok(upsilon)
+    }
+}
+
+/// Gauss-Jordan with partial pivoting, in place. `a` is row-major
+/// `n x n` and `b` length `n`; on success `b` holds the solution.
+/// `None` if the matrix is singular to working precision.
+fn solve_in_place(a: &mut [f64], b: &mut [f64], n: usize) -> Option<()> {
+    for col in 0..n {
+        let (pivot_row, pivot) = (col..n)
+            .map(|r| (r, a[r * n + col].abs()))
+            .max_by(|x, y| x.1.total_cmp(&y.1))?;
+        if pivot < 1e-300 {
+            return None;
+        }
+        if pivot_row != col {
+            for c in 0..n {
+                a.swap(col * n + c, pivot_row * n + c);
+            }
+            b.swap(col, pivot_row);
+        }
+        let diag = a[col * n + col];
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let factor = a[r * n + col] / diag;
+            if factor == 0.0 {
+                continue;
+            }
+            for c in col..n {
+                a[r * n + c] -= factor * a[col * n + c];
+            }
+            b[r] -= factor * b[col];
+        }
+    }
+    for r in 0..n {
+        b[r] /= a[r * n + r];
+    }
+    Some(())
 }
 
 /// Linear interpolation: given an array `a` of length K, return the
@@ -203,9 +568,17 @@ fn interp_inverse(a: &[f64], v: f64) -> Result<f64> {
     let ascending = a[k - 1] >= a[0];
     // Detect non-monotonicity early -- otherwise binary search
     // returns silently wrong answers on a wiggly array.
+    //
+    // Equal neighbours are *not* a break: Paper III Sec.6.1.1 permits
+    // "two adjacent index values in the vector [to] have the same
+    // value", which is how the convention encodes a discontinuity.
+    // Testing `w[1] >= w[0]` against `ascending` rejected exactly that
+    // on a descending vector, since a repeat reads as increasing there.
     for w in a.windows(2) {
-        let increasing = w[1] >= w[0];
-        if increasing != ascending {
+        if w[1] == w[0] {
+            continue;
+        }
+        if (w[1] > w[0]) != ascending {
             return Err(FitsError::Wcs(
                 "TAB inverse: coordinate / index array is not monotonic".into(),
             ));
@@ -243,98 +616,303 @@ mod tests {
         (a - b).abs() < tol
     }
 
+    /// One separable axis: the `M = 1` group.
+    fn one_d(coord: Vec<f64>, index: Option<Vec<f64>>) -> TabGroup {
+        let k = coord.len();
+        TabGroup {
+            axes: vec![0],
+            dims: vec![k],
+            index: vec![index],
+            coord,
+        }
+    }
+
     #[test]
     fn forward_no_index_uses_one_based_pixel_index() {
-        let tab = TabAxis {
-            axis: 0,
-            coord: vec![1.0, 2.0, 4.0, 8.0, 16.0],
-            index: None,
-        };
-        // psi = 1 -> 0-based idx 0 -> coord 1.0
-        assert!(near(tab.forward(1.0).unwrap(), 1.0, 1e-12));
-        // psi = 3.5 -> 0-based idx 2.5 -> midway between 4.0 and 8.0
-        assert!(near(tab.forward(3.5).unwrap(), 6.0, 1e-12));
-        // psi = 5 -> idx 4 -> coord 16
-        assert!(near(tab.forward(5.0).unwrap(), 16.0, 1e-12));
+        let tab = one_d(vec![1.0, 2.0, 4.0, 8.0, 16.0], None);
+        assert!(near(tab.forward(&[1.0]).unwrap()[0], 1.0, 1e-12));
+        assert!(near(tab.forward(&[3.5]).unwrap()[0], 6.0, 1e-12));
+        assert!(near(tab.forward(&[5.0]).unwrap()[0], 16.0, 1e-12));
     }
 
     #[test]
     fn round_trip_no_index() {
-        let tab = TabAxis {
-            axis: 0,
-            coord: vec![100.0, 110.0, 125.0, 150.0, 200.0],
-            index: None,
-        };
+        let tab = one_d(vec![100.0, 110.0, 125.0, 150.0, 200.0], None);
         for psi in [1.0, 1.5, 2.7, 3.0, 4.99] {
-            let w = tab.forward(psi).unwrap();
-            let back = tab.inverse(w).unwrap();
-            assert!(near(back, psi, 1e-9), "psi {psi} -> {w} -> {back}");
+            let w = tab.forward(&[psi]).unwrap();
+            let back = tab.inverse(&w).unwrap()[0];
+            assert!(near(back, psi, 1e-9), "psi {psi} -> {w:?} -> {back}");
         }
     }
 
     #[test]
     fn round_trip_with_index() {
-        // Irregular wavelength grid keyed by integer pixel index.
-        let tab = TabAxis {
-            axis: 0,
-            coord: vec![4000.0, 4500.0, 5500.0, 7000.0, 9000.0],
-            index: Some(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
-        };
+        let tab = one_d(
+            vec![4000.0, 4500.0, 5500.0, 7000.0, 9000.0],
+            Some(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+        );
         for psi in [1.0, 1.25, 2.5, 3.9, 5.0] {
-            let w = tab.forward(psi).unwrap();
-            let back = tab.inverse(w).unwrap();
-            assert!(near(back, psi, 1e-9), "psi {psi} -> {w} -> {back}");
+            let w = tab.forward(&[psi]).unwrap();
+            let back = tab.inverse(&w).unwrap()[0];
+            assert!(near(back, psi, 1e-9), "psi {psi} -> {w:?} -> {back}");
         }
     }
 
     #[test]
     fn descending_array_is_monotonic_too() {
-        let tab = TabAxis {
-            axis: 0,
-            coord: vec![9000.0, 7000.0, 5500.0, 4500.0, 4000.0],
-            index: None,
-        };
-        let w = tab.forward(3.0).unwrap();
-        assert!(near(w, 5500.0, 1e-12));
-        let back = tab.inverse(5500.0).unwrap();
-        assert!(near(back, 3.0, 1e-12));
+        let tab = one_d(vec![9000.0, 7000.0, 5500.0, 4500.0, 4000.0], None);
+        assert!(near(tab.forward(&[3.0]).unwrap()[0], 5500.0, 1e-12));
+        assert!(near(tab.inverse(&[5500.0]).unwrap()[0], 3.0, 1e-12));
     }
 
     #[test]
     fn non_monotonic_inverse_errors() {
-        let tab = TabAxis {
-            axis: 0,
-            coord: vec![1.0, 5.0, 2.0, 8.0],
-            index: None,
-        };
-        assert!(tab.inverse(3.0).is_err());
+        let tab = one_d(vec![1.0, 5.0, 2.0, 8.0], None);
+        assert!(tab.inverse(&[3.0]).is_err());
+    }
+
+    /// Sec.6.1.2's degenerate rule: a lone `K = 1` axis holds its one
+    /// tabulated value for every intermediate coordinate, and every
+    /// world value maps back to the single tabulated position.
+    #[test]
+    fn single_sample_axis_is_a_constant() {
+        let tab = one_d(vec![5000.0], None);
+        for psi in [-50.0, 0.0, 1.0, 1.5, 100.0] {
+            assert!(
+                near(tab.forward(&[psi]).unwrap()[0], 5000.0, 1e-12),
+                "psi {psi}"
+            );
+            assert!(near(tab.forward_scalar(psi).unwrap(), 5000.0, 1e-12));
+        }
+        assert!(near(tab.inverse(&[5000.0]).unwrap()[0], 1.0, 1e-12));
+        assert!(near(tab.inverse_scalar(5000.0).unwrap(), 1.0, 1e-12));
+        // With an index vector, the tabulated position is its single
+        // entry -- and the lookup must not reach `interp_inverse`,
+        // whose bracketing needs two samples.
+        let indexed = one_d(vec![5000.0], Some(vec![3.0]));
+        assert!(near(indexed.forward(&[7.0]).unwrap()[0], 5000.0, 1e-12));
+        assert!(near(indexed.inverse(&[5000.0]).unwrap()[0], 3.0, 1e-12));
     }
 
     /// Paper III Sec.6.1.2 allows half a sample step past each end
     /// (`0.5 <= Upsilon_m <= K + 0.5`) and leaves the coordinate
     /// undefined beyond that.
-    ///
-    /// Regression: extrapolation was unbounded, so a pixel far outside
-    /// the table got a confidently wrong coordinate instead of an
-    /// error.
     #[test]
     fn extrapolates_only_to_the_half_step_limit() {
-        let tab = TabAxis {
-            axis: 0,
-            coord: vec![10.0, 20.0, 30.0],
-            index: None,
+        let tab = one_d(vec![10.0, 20.0, 30.0], None);
+        assert!(near(tab.forward(&[1.0]).unwrap()[0], 10.0, 1e-12));
+        assert!(near(tab.forward(&[2.5]).unwrap()[0], 25.0, 1e-12));
+        assert!(near(tab.forward(&[3.0]).unwrap()[0], 30.0, 1e-12));
+        assert!(near(tab.forward(&[0.5]).unwrap()[0], 5.0, 1e-12));
+        assert!(near(tab.forward(&[3.5]).unwrap()[0], 35.0, 1e-12));
+        assert!(tab.forward(&[0.4999]).is_err(), "below the lower limit");
+        assert!(tab.forward(&[3.5001]).is_err(), "above the upper limit");
+        assert!(tab.forward(&[4.0]).is_err(), "a whole step past the end");
+        assert!(tab.forward(&[-2.0]).is_err(), "far outside");
+    }
+
+    /// Paper III Sec.6.1.1 permits two adjacent index values to be
+    /// equal, in either direction.
+    #[test]
+    fn index_vector_may_repeat_a_value_in_either_direction() {
+        let ascending = TabGroup {
+            axes: vec![0],
+            dims: vec![4],
+            index: vec![Some(vec![1.0, 2.0, 2.0, 3.0])],
+            coord: vec![10.0, 20.0, 30.0, 40.0],
         };
-        // Inside the table.
-        assert!(near(tab.forward(1.0).unwrap(), 10.0, 1e-12));
-        assert!(near(tab.forward(2.5).unwrap(), 25.0, 1e-12));
-        assert!(near(tab.forward(3.0).unwrap(), 30.0, 1e-12));
-        // Exactly at the permitted limits: psi = 0.5 and K + 0.5.
-        assert!(near(tab.forward(0.5).unwrap(), 5.0, 1e-12));
-        assert!(near(tab.forward(3.5).unwrap(), 35.0, 1e-12));
-        // Past them the coordinate is undefined.
-        assert!(tab.forward(0.4999).is_err(), "below the lower limit");
-        assert!(tab.forward(3.5001).is_err(), "above the upper limit");
-        assert!(tab.forward(4.0).is_err(), "a whole step past the end");
-        assert!(tab.forward(-2.0).is_err(), "far outside");
+        assert!(ascending.forward(&[1.5]).is_ok(), "ascending with a repeat");
+
+        let descending = TabGroup {
+            axes: vec![0],
+            dims: vec![4],
+            index: vec![Some(vec![3.0, 2.0, 2.0, 1.0])],
+            coord: vec![40.0, 30.0, 20.0, 10.0],
+        };
+        assert!(
+            descending.forward(&[2.5]).unwrap()[0].is_finite(),
+            "descending with a legal repeat must be accepted"
+        );
+
+        let wiggly = TabGroup {
+            axes: vec![0],
+            dims: vec![4],
+            index: vec![Some(vec![1.0, 3.0, 2.0, 4.0])],
+            coord: vec![10.0, 20.0, 30.0, 40.0],
+        };
+        assert!(
+            wiggly.forward(&[2.5]).is_err(),
+            "non-monotonic must be refused"
+        );
+    }
+
+    /// The allocation-free scalar paths must agree exactly with the
+    /// general form, including at the extrapolation margins.
+    #[test]
+    fn scalar_paths_match_the_general_form() {
+        let tab = one_d(
+            vec![100.0, 110.0, 125.0, 150.0, 200.0],
+            Some(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+        );
+        for psi in [0.5, 1.0, 2.7, 5.0, 5.5] {
+            assert_eq!(
+                tab.forward(&[psi]).unwrap()[0],
+                tab.forward_scalar(psi).unwrap(),
+                "psi {psi}"
+            );
+        }
+        assert!(tab.forward_scalar(0.4).is_err(), "same domain limit");
+        for w in [100.0, 117.0, 200.0, 260.0] {
+            assert_eq!(
+                tab.inverse(&[w]).unwrap()[0],
+                tab.inverse_scalar(w).unwrap(),
+                "world {w}"
+            );
+        }
+        // Both refuse a non-separable group.
+        let tab = two_d();
+        assert!(tab.forward_scalar(1.0).is_err());
+        assert!(tab.inverse_scalar(10.0).is_err());
+    }
+
+    // -- multi-dimensional ----------------------------------------------
+
+    /// `(M, K_1, K_2) = (2, 4, 3)`, coordinate `m` innermost. A
+    /// deliberately *non-separable* map: each coordinate depends on
+    /// both indices, so it cannot be reproduced by two 1-D tables.
+    fn two_d() -> TabGroup {
+        let (k1, k2, m) = (4_usize, 3_usize, 2_usize);
+        let mut coord = vec![0.0; m * k1 * k2];
+        for i2 in 0..k2 {
+            for i1 in 0..k1 {
+                let base = m * (i1 + k1 * i2);
+                coord[base] = 10.0 + 0.1 * i1 as f64 + 0.02 * i2 as f64;
+                coord[base + 1] = 20.0 + 0.03 * i1 as f64 + 0.1 * i2 as f64;
+            }
+        }
+        TabGroup {
+            axes: vec![0, 1],
+            dims: vec![k1, k2],
+            index: vec![None, None],
+            coord,
+        }
+    }
+
+    #[test]
+    fn multi_dimensional_grid_points_read_back_exactly() {
+        let tab = two_d();
+        tab.validate().unwrap();
+        // psi is the 1-based index when there is no index vector.
+        assert_eq!(tab.forward(&[1.0, 1.0]).unwrap(), vec![10.0, 20.0]);
+        let got = tab.forward(&[4.0, 3.0]).unwrap();
+        assert!(near(got[0], 10.34, 1e-12), "{got:?}");
+        assert!(near(got[1], 20.29, 1e-12), "{got:?}");
+    }
+
+    /// The defining property of the non-separable case: the value
+    /// between grid points is the `2^M`-corner blend, so each
+    /// coordinate moves with *both* indices.
+    #[test]
+    fn multi_dimensional_interpolates_bilinearly() {
+        let tab = two_d();
+        let got = tab.forward(&[1.5, 1.5]).unwrap();
+        assert!(near(got[0], 10.0 + 0.05 + 0.01, 1e-12), "{got:?}");
+        assert!(near(got[1], 20.0 + 0.015 + 0.05, 1e-12), "{got:?}");
+        // Moving only the second index still changes the first
+        // coordinate -- that is what "non-separable" means.
+        let a = tab.forward(&[2.0, 1.0]).unwrap()[0];
+        let b = tab.forward(&[2.0, 3.0]).unwrap()[0];
+        assert!((a - b).abs() > 1e-6, "{a} vs {b}");
+    }
+
+    #[test]
+    fn multi_dimensional_round_trips() {
+        let tab = two_d();
+        for psi in [[1.0, 1.0], [2.5, 1.75], [3.25, 2.5], [4.0, 3.0]] {
+            let w = tab.forward(&psi).unwrap();
+            let back = tab.inverse(&w).unwrap();
+            assert!(
+                near(back[0], psi[0], 1e-8) && near(back[1], psi[1], 1e-8),
+                "{psi:?} -> {w:?} -> {back:?}"
+            );
+        }
+    }
+
+    /// Index vectors apply per axis in the multi-dimensional case too.
+    #[test]
+    fn multi_dimensional_honours_index_vectors() {
+        let mut tab = two_d();
+        // Second axis sampled at 1, 3, 5 rather than 1, 2, 3.
+        tab.index = vec![None, Some(vec![1.0, 3.0, 5.0])];
+        tab.validate().unwrap();
+        // psi = 3 on the second axis is its *middle* sample now.
+        let got = tab.forward(&[1.0, 3.0]).unwrap();
+        assert!(near(got[0], 10.02, 1e-12), "{got:?}");
+        assert!(near(got[1], 20.1, 1e-12), "{got:?}");
+        let back = tab.inverse(&got).unwrap();
+        assert!(near(back[1], 3.0, 1e-8), "{back:?}");
+    }
+
+    #[test]
+    fn validate_catches_a_malformed_group() {
+        let mut tab = two_d();
+        tab.dims = vec![4, 4];
+        assert!(
+            tab.validate().is_err(),
+            "TDIM product disagrees with the data"
+        );
+
+        let mut tab = two_d();
+        tab.index = vec![None];
+        assert!(tab.validate().is_err(), "one index vector for two axes");
+
+        let mut tab = two_d();
+        tab.dims = vec![4, 1];
+        tab.coord.truncate(2 * 4);
+        assert!(
+            tab.validate().is_err(),
+            "Sec.6.1.1 forbids a degenerate axis"
+        );
+    }
+
+    /// The Jacobian `interpolate` hands to Newton must be the true
+    /// derivative of the value it returns alongside it -- including
+    /// *on* a grid line, where one axis's blend factor is exactly zero
+    /// and the naive `weight / factor` form is 0/0.
+    #[test]
+    fn interpolate_jacobian_matches_finite_differences() {
+        let tab = two_d();
+        let h = 1e-6;
+        for upsilon in [[0.0, 0.0], [1.0, 1.0], [0.4, 1.7], [2.0, 0.0]] {
+            let (_, jac) = tab.interpolate(&upsilon);
+            for d in 0..2 {
+                let (mut lo, mut hi) = (upsilon, upsilon);
+                lo[d] -= h;
+                hi[d] += h;
+                let (v_lo, _) = tab.interpolate(&lo);
+                let (v_hi, _) = tab.interpolate(&hi);
+                for mm in 0..2 {
+                    let fd = (v_hi[mm] - v_lo[mm]) / (2.0 * h);
+                    assert!(
+                        near(jac[mm * 2 + d], fd, 1e-8),
+                        "d C_{mm} / d U_{d} at {upsilon:?}: {} vs {fd}",
+                        jac[mm * 2 + d],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn small_linear_solve() {
+        // [2 1; 1 3] x = [5; 10]  ->  x = [1; 3]
+        let mut a = vec![2.0, 1.0, 1.0, 3.0];
+        let mut b = vec![5.0, 10.0];
+        solve_in_place(&mut a, &mut b, 2).unwrap();
+        assert!(near(b[0], 1.0, 1e-12) && near(b[1], 3.0, 1e-12), "{b:?}");
+
+        let mut a = vec![1.0, 2.0, 2.0, 4.0];
+        let mut b = vec![1.0, 2.0];
+        assert!(solve_in_place(&mut a, &mut b, 2).is_none(), "singular");
     }
 }

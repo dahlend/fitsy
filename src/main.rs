@@ -141,7 +141,12 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
     let mut lines = Vec::new();
 
     // Header line: "WCS[A]: CTYPE1 / CTYPE2 / ..."
-    let ctypes = wcs.ctype.join(" / ");
+    let ctypes = wcs
+        .axes()
+        .iter()
+        .map(|a| a.ctype.as_str())
+        .collect::<Vec<_>>()
+        .join(" / ");
     let name = wcs
         .wcsname
         .as_deref()
@@ -159,7 +164,10 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
             CelestialFrame::Ecliptic => "Ecliptic",
             CelestialFrame::Supergalactic => "Supergalactic",
             CelestialFrame::HelioEcliptic => "HelioEcliptic",
-            CelestialFrame::Other => "Other",
+            // `CelestialFrame` is `#[non_exhaustive]`, so a frame added
+            // later reaches this arm rather than failing the build of
+            // every downstream consumer.
+            CelestialFrame::Other | _ => "Other",
         };
         // CRPIX
         let crpix = wcs.linear.crpix();
@@ -183,9 +191,8 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
 
         // Projection name comes from the CTYPE string (chars 5..8).
         let proj = wcs
-            .ctype
-            .get(lon_idx)
-            .and_then(|ct| ct.get(5..8))
+            .axis(lon_idx)
+            .and_then(|a| a.ctype.get(5..8))
             .unwrap_or("?");
         let mut extras = Vec::new();
         if cb.sip.is_some() {
@@ -206,7 +213,7 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
     }
 
     for sa in &wcs.spectral {
-        let ct = wcs.ctype.get(sa.axis).map_or("?", String::as_str);
+        let ct = wcs.ctype(sa.axis);
         lines.push(format!("       spectral axis {} = {ct}", sa.axis + 1));
     }
 

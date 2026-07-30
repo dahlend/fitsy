@@ -70,3 +70,109 @@ fn random_groups_round_trip() {
     }
     assert!(rg.group_raw::<f32>(2).is_err());
 }
+
+/// Standard Sec.6.1.2: `physical = PZEROn + PSCALn x stored`, and
+/// repeated `PTYPEn` names name one parameter whose value is the sum of
+/// the slots. Modelled on the UVFITS pattern where a Julian date is
+/// split into a coarse and a fine `DATE` slot so the parameter carries
+/// more precision than `BITPIX` alone allows.
+#[test]
+fn group_parameters_apply_pscal_pzero_and_sum_repeated_ptype() {
+    let cards = [
+        pad_card("SIMPLE  =                    T"),
+        pad_card("BITPIX  =                  -32"),
+        pad_card("NAXIS   =                    2"),
+        pad_card("NAXIS1  =                    0"),
+        pad_card("NAXIS2  =                    1"),
+        pad_card("GROUPS  =                    T"),
+        pad_card("PCOUNT  =                    3"),
+        pad_card("GCOUNT  =                    1"),
+        pad_card("PTYPE1  = 'UU      '"),
+        pad_card("PSCAL1  =                 2.0"),
+        pad_card("PZERO1  =                 0.5"),
+        // Two slots share the name DATE: a whole-day part carried at
+        // full scale and a fraction-of-day part scaled down.
+        pad_card("PTYPE2  = 'DATE    '"),
+        pad_card("PSCAL2  =                 1.0"),
+        pad_card("PZERO2  =         2400000.5"),
+        pad_card("PTYPE3  = 'DATE    '"),
+        pad_card("PSCAL3  =               0.125"),
+        pad_card("PZERO3  =                 0.0"),
+        pad_card("END"),
+    ];
+    let mut buf: Vec<u8> = Vec::new();
+    for c in &cards {
+        buf.extend_from_slice(c);
+    }
+    pad_to_block(&mut buf, b' ');
+    // params [3.0, 100.0, 2.0], one data value.
+    for v in [3.0_f32, 100.0, 2.0, 42.0] {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+    pad_to_block(&mut buf, 0);
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::RandomGroups(rg) = f.hdu(0).unwrap() else {
+        panic!("expected RandomGroups HDU");
+    };
+
+    // Per-slot physical values: eq. 6.1 applied slot by slot.
+    let phys = rg.group_parameters(0).unwrap();
+    assert_eq!(phys, vec![0.5 + 2.0 * 3.0, 2400000.5 + 100.0, 0.125 * 2.0]);
+
+    // Defaults: a slot with no PSCALn/PZEROn is an identity mapping.
+    let params = rg.parameters();
+    assert_eq!(params.len(), 3);
+    assert_eq!(params[0].name, "UU");
+    assert_eq!(params[1].pscal, 1.0);
+    assert_eq!(params[2].pzero, 0.0);
+
+    // Repeated PTYPEn: the two DATE slots sum into one parameter.
+    let date = rg.group_parameter_by_name(0, "DATE").unwrap().unwrap();
+    assert_eq!(date, (2400000.5 + 100.0) + 0.125 * 2.0);
+    // A name appearing once is just its own physical value.
+    assert_eq!(rg.group_parameter_by_name(0, "UU").unwrap(), Some(6.5));
+    // Repeats collapse to a single logical parameter.
+    assert_eq!(rg.parameter_names(), vec!["UU", "DATE"]);
+    assert_eq!(rg.group_parameter_by_name(0, "VV").unwrap(), None);
+    assert!(rg.group_parameters(1).is_err());
+}
+
+/// Sec.6.1.2 scaling must be independent of `BITPIX`: an integer-typed
+/// random-groups HDU is the case where `PSCALn`/`PZEROn` matter most.
+#[test]
+fn group_parameters_scale_integer_bitpix() {
+    let cards = [
+        pad_card("SIMPLE  =                    T"),
+        pad_card("BITPIX  =                   16"),
+        pad_card("NAXIS   =                    2"),
+        pad_card("NAXIS1  =                    0"),
+        pad_card("NAXIS2  =                    1"),
+        pad_card("GROUPS  =                    T"),
+        pad_card("PCOUNT  =                    1"),
+        pad_card("GCOUNT  =                    1"),
+        pad_card("PTYPE1  = 'WW      '"),
+        pad_card("PSCAL1  =              1.0E-3"),
+        pad_card("PZERO1  =                -1.0"),
+        pad_card("END"),
+    ];
+    let mut buf: Vec<u8> = Vec::new();
+    for c in &cards {
+        buf.extend_from_slice(c);
+    }
+    pad_to_block(&mut buf, b' ');
+    for v in [-32768_i16, 7] {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+    pad_to_block(&mut buf, 0);
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::RandomGroups(rg) = f.hdu(0).unwrap() else {
+        panic!("expected RandomGroups HDU");
+    };
+    let phys = rg.group_parameters(0).unwrap();
+    assert!(
+        (phys[0] - (-1.0 + 1.0e-3 * -32768.0)).abs() < 1e-12,
+        "got {phys:?}"
+    );
+}

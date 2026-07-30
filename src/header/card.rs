@@ -29,6 +29,7 @@ pub enum CardKind {
 pub struct Card {
     /// 0..=8 chars, ASCII upper/digit/`-`/`_`, or empty for blank.
     pub keyword: String,
+    /// Which of the Sec.4.1.2 card shapes this is.
     pub kind: CardKind,
     /// Raw bytes of the value-and-comment field (bytes 11..80) for
     /// value cards, or bytes 9..80 for commentary/`END`. Trailing

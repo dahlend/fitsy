@@ -50,6 +50,7 @@ pub const SIP_MAX_ORDER: u32 = 9;
 /// dense lower-triangle stored row-major by `p`.
 #[derive(Debug, Clone)]
 pub struct SipPoly {
+    /// Highest total degree `p + q` the expansion carries.
     pub order: u32,
     /// `coeffs[p * (order+1) + q]`. Entries with `p + q > order`
     /// must remain zero.
@@ -164,9 +165,14 @@ impl SipPoly {
 /// optional inverse `AP`/`BP` polynomials.
 #[derive(Debug, Clone)]
 pub struct Sip {
+    /// `A_p_q` -- forward correction to the first pixel axis.
     pub a: SipPoly,
+    /// `B_p_q` -- forward correction to the second pixel axis.
     pub b: SipPoly,
+    /// `AP_p_q` -- the published inverse of `a`, when the header
+    /// supplies one. Absent means the inverse is solved numerically.
     pub ap: Option<SipPoly>,
+    /// `BP_p_q` -- the published inverse of `b`, when supplied.
     pub bp: Option<SipPoly>,
 }
 

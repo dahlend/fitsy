@@ -22,8 +22,11 @@ use crate::wcs::tpv::Tpv;
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct CelestialPair {
+    /// Zero-based index of the longitude axis.
     pub lon: usize,
+    /// Zero-based index of the latitude axis.
     pub lat: usize,
+    /// Frame inferred from the axis-prefix pair.
     pub frame: CelestialFrame,
 }
 
@@ -47,6 +50,14 @@ pub struct CelestialBlock {
     /// world coordinates (CTYPE projection codes `TNX` / `ZPX`,
     /// encoded in the `WAT1_xxx`/`WAT2_xxx` records).
     pub tnx: Option<Tnx>,
+    /// Factors converting the longitude and latitude `CUNIT` to
+    /// degrees, resolved once at parse time.
+    ///
+    /// Sec.8.1 requires celestial units to *be* degrees, but headers
+    /// do carry `arcsec` and `rad`, so the projection layer needs the
+    /// conversion. Resolving it here keeps the Sec.4.3 unit parse off
+    /// the per-point transform path.
+    pub cunit_to_deg: (f64, f64),
     /// Projection-plane coordinates `(x0, y0)` of the fiducial point,
     /// degrees.
     ///

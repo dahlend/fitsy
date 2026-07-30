@@ -58,6 +58,7 @@ pub enum AsciiFormat {
 
 impl AsciiFormat {
     #[must_use]
+    /// Field width `w` in characters, from `TFORMn`.
     pub fn width(self) -> usize {
         match self {
             Self::A(w) | Self::I(w) | Self::F(w, _) | Self::E(w, _) | Self::D(w, _) => w,
@@ -179,13 +180,19 @@ impl<'a> AsciiTableHdu<'a> {
                 .unwrap_or_default();
             let tscal = header.optional_real(&format!("TSCAL{i}")).unwrap_or(1.0);
             let tzero = header.optional_real(&format!("TZERO{i}")).unwrap_or(0.0);
-            // Sec.7.2.4: TNULL is meaningful only for I-format columns.
-            let tnull = if matches!(format, AsciiFormat::I(_)) {
+            // Sec.7.2.4 puts no type restriction on the ASCII-table
+            // TNULLn -- it is "the character string that represents an
+            // undefined value for field n", full stop. (The integer-only
+            // rule belongs to the *binary* table form, Sec.7.3.4.) It has
+            // to apply to real fields here, because Sec.7.2.5 defines a
+            // blank numeric field as zero, leaving TNULLn as the only
+            // marker for an undefined float.
+            let tnull = if matches!(format, AsciiFormat::A(_)) {
+                None
+            } else {
                 header
                     .optional_string(&format!("TNULL{i}"))
                     .map(String::from)
-            } else {
-                None
             };
             columns.push(AsciiColumn {
                 index: i,
@@ -254,6 +261,7 @@ impl<'a> AsciiTableHdu<'a> {
     }
 
     #[must_use]
+    /// The HDU's header.
     pub fn header(&self) -> &Header {
         &self.header
     }
@@ -263,14 +271,17 @@ impl<'a> AsciiTableHdu<'a> {
         self.data
     }
     #[must_use]
+    /// Bytes per row, from `NAXIS1`.
     pub fn row_size(&self) -> usize {
         self.row_size
     }
     #[must_use]
+    /// Row count, from `NAXIS2`.
     pub fn n_rows(&self) -> usize {
         self.n_rows
     }
     #[must_use]
+    /// Every column, in `TFORMn` order.
     pub fn columns(&self) -> &[AsciiColumn] {
         &self.columns
     }
@@ -303,8 +314,9 @@ impl<'a> AsciiTableHdu<'a> {
         Ok(&row_bytes[start..start + col.width()])
     }
 
-    /// Decoded value of one cell. Returns `None` for `TNULL` matches
-    /// or fields that are entirely whitespace.
+    /// Decoded value of one cell. Returns `None` only for a `TNULLn`
+    /// match -- Sec.7.2.5 gives a blank numeric field the value zero, so
+    /// `TNULLn` is the sole way an ASCII table marks a value undefined.
     pub fn cell_value(&self, row: usize, col: &AsciiColumn) -> Result<Option<AsciiCell>> {
         let raw = self.cell_bytes(row, col)?;
         let s = std::str::from_utf8(raw).map_err(|_| {
@@ -313,25 +325,34 @@ impl<'a> AsciiTableHdu<'a> {
                 col.index
             ))
         })?;
-        // TNULL match: compare the *raw* (non-trimmed) field text.
+        // TNULLn match. Sec.7.2.5 places the sentinel in the field
+        // without saying how it is justified, and writers right-justify
+        // numerics, so compare with surrounding space removed. A TNULLn
+        // that is itself all spaces still matches only a blank field,
+        // which is how a writer opts a column out of the
+        // blank-means-zero rule.
         if let Some(tn) = col.tnull.as_deref()
-            && s.trim_end() == tn.trim_end()
+            && s.trim() == tn.trim()
         {
             return Ok(None);
         }
         match col.format {
             AsciiFormat::A(_) => Ok(Some(AsciiCell::Str(s.to_string()))),
             AsciiFormat::I(_) => {
+                // Sec.7.2.5 "Integer fields": a single optional sign then
+                // decimal digits, surrounding spaces not significant, and
+                // "a blank field has value 0".
                 let t = s.trim();
-                if t.is_empty() {
-                    return Ok(None);
-                }
-                let v: i64 = t.parse().map_err(|_| {
-                    FitsError::Data(format!(
-                        "ASCII table row {row} col {}: not an integer: `{s}`",
-                        col.index
-                    ))
-                })?;
+                let v: i64 = if t.is_empty() {
+                    0
+                } else {
+                    t.parse().map_err(|_| {
+                        FitsError::Data(format!(
+                            "ASCII table row {row} col {}: not an integer: `{s}`",
+                            col.index
+                        ))
+                    })?
+                };
                 let scaled = col.tzero + col.tscal * v as f64;
                 if col.tscal == 1.0 && col.tzero == 0.0 {
                     Ok(Some(AsciiCell::Int(v)))
@@ -339,14 +360,8 @@ impl<'a> AsciiTableHdu<'a> {
                     Ok(Some(AsciiCell::Float(scaled)))
                 }
             }
-            AsciiFormat::F(_, _) | AsciiFormat::E(_, _) | AsciiFormat::D(_, _) => {
-                let t = s.trim();
-                if t.is_empty() {
-                    return Ok(None);
-                }
-                // FITS allows D-exponent; Rust's f64::from_str does not.
-                let normalized = t.replace(['D', 'd'], "E");
-                let v: f64 = normalized.parse().map_err(|_| {
+            AsciiFormat::F(_, d) | AsciiFormat::E(_, d) | AsciiFormat::D(_, d) => {
+                let v = parse_fortran_real(s, d).ok_or_else(|| {
                     FitsError::Data(format!(
                         "ASCII table row {row} col {}: not a real: `{s}`",
                         col.index
@@ -358,11 +373,108 @@ impl<'a> AsciiTableHdu<'a> {
     }
 }
 
+/// Parse one `Fw.d` / `Ew.d` / `Dw.d` field per Standard Sec.7.2.5
+/// "Real fields". `d` is the format's fractional-digit count, needed for
+/// the implicit decimal point of rule 2.
+///
+/// The rules, in order: discard trailing spaces and right-justify; read
+/// an optionally-signed digit string containing at most one decimal
+/// point; if there was no explicit point, place it immediately before
+/// the rightmost `d` digits; then read an exponent introduced by `E`,
+/// `D`, or -- rule 3(a) -- by a bare `+`/`-`. Anything else, including
+/// an embedded space, is forbidden. A blank field is zero.
+///
+/// The two forms that ordinary float parsing gets wrong are the implicit
+/// decimal point (`F10.3` over `12345` is 12.345, not 12345.0) and the
+/// bare-sign exponent (`1.234+05` is 1.234e5). Both are legal and both
+/// occur in older tables; the standard deprecates writing the first but
+/// still defines how to read it.
+fn parse_fortran_real(field: &str, d: usize) -> Option<f64> {
+    let t = field.trim();
+    if t.is_empty() {
+        // "The default exponent is zero and a blank field has value zero."
+        return Some(0.0);
+    }
+    let b = t.as_bytes();
+    let mut i = 0;
+    let negative = match b.first()? {
+        b'-' => {
+            i += 1;
+            true
+        }
+        b'+' => {
+            i += 1;
+            false
+        }
+        _ => false,
+    };
+
+    // Mantissa: decimal digits with at most one embedded point.
+    let mut digits = String::new();
+    let mut fraction_digits: Option<usize> = None;
+    while i < b.len() {
+        match b[i] {
+            c @ b'0'..=b'9' => {
+                digits.push(c as char);
+                if let Some(n) = fraction_digits.as_mut() {
+                    *n += 1;
+                }
+                i += 1;
+            }
+            b'.' if fraction_digits.is_none() => {
+                fraction_digits = Some(0);
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+
+    // Exponent, if the numeric string was terminated rather than ended.
+    // Held as i64 with saturating arithmetic: the field bytes are
+    // untrusted, and `exponent - scale` on i32 overflows for a crafted
+    // exponent near i32::MIN, panicking in debug builds.
+    let mut exponent: i64 = 0;
+    if i < b.len() {
+        let tail = match b[i] {
+            b'E' | b'e' | b'D' | b'd' => {
+                i += 1;
+                &t[i..]
+            }
+            // Rule 3(a): a bare sign introduces the exponent.
+            b'+' | b'-' => &t[i..],
+            _ => return None,
+        };
+        if tail.is_empty() {
+            return None;
+        }
+        exponent = tail.parse::<i64>().ok()?;
+    }
+
+    // Rule 2: with no explicit point the implicit one sits immediately
+    // before the rightmost `d` digits.
+    let scale = fraction_digits.map_or_else(|| i64::try_from(d).unwrap_or(i64::MAX), |n| n as i64);
+    // Let the float parser do the decimal scaling so the result is
+    // correctly rounded rather than accumulated through multiplication.
+    // The float parser saturates an out-of-range exponent to 0/inf, so
+    // the saturating subtraction only ever affects values already far
+    // outside f64 range.
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{digits}e{}", exponent.saturating_sub(scale))
+        .parse::<f64>()
+        .ok()
+}
+
 /// Decoded value of one ASCII-table cell.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsciiCell {
+    /// An `I`-format field with no scaling applied.
     Int(i64),
+    /// An `F`/`E`/`D` field, or an `I` field with `TSCAL`/`TZERO`.
     Float(f64),
+    /// An `A`-format character field, untrimmed.
     Str(String),
 }
 
@@ -382,5 +494,63 @@ mod tests {
         );
         assert!(AsciiFormat::parse("X10").is_err());
         assert!(AsciiFormat::parse("F10").is_err());
+    }
+
+    /// Sec.7.2.5 "Real fields", the whole rule set.
+    ///
+    /// Regression: the field was handed to `f64::from_str` after only
+    /// mapping `D`->`E`, which silently ignored the implicit decimal
+    /// point (rule 2), rejected a bare-sign exponent (rule 3a), and read
+    /// a blank field as undefined instead of zero.
+    #[test]
+    fn fortran_real_fields_follow_sec_7_2_5() {
+        // Rule 2: no explicit point, so it sits before the rightmost d
+        // digits, with leading zeros assumed if the string is short.
+        assert_eq!(parse_fortran_real("     12345", 3), Some(12.345));
+        assert_eq!(parse_fortran_real("        12", 3), Some(0.012));
+        assert_eq!(parse_fortran_real("       -12", 3), Some(-0.012));
+        assert_eq!(parse_fortran_real("     12345", 0), Some(12345.0));
+        // An explicit point wins over d.
+        assert_eq!(parse_fortran_real("    12.345", 3), Some(12.345));
+        assert_eq!(parse_fortran_real("   1234.5  ", 3), Some(1234.5));
+
+        // Rule 3(a): a bare `+`/`-` introduces the exponent.
+        assert_eq!(parse_fortran_real("  1.234+05", 3), Some(1.234e5));
+        assert_eq!(parse_fortran_real("  1.234-05", 3), Some(1.234e-5));
+        // Rule 3(b): `E` or `D`, with an optional sign.
+        assert_eq!(parse_fortran_real(" 1.234E+05", 3), Some(1.234e5));
+        assert_eq!(parse_fortran_real(" 1.234D+05", 3), Some(1.234e5));
+        assert_eq!(parse_fortran_real("  1.234E05", 3), Some(1.234e5));
+        assert_eq!(parse_fortran_real("  1.234E-5", 3), Some(1.234e-5));
+        // The implicit point and an exponent compose.
+        assert_eq!(parse_fortran_real("    1234+2", 3), Some(123.4));
+
+        // "The default exponent is zero and a blank field has value zero."
+        assert_eq!(parse_fortran_real("          ", 3), Some(0.0));
+        assert_eq!(parse_fortran_real("", 3), Some(0.0));
+
+        // "Characters other than those specified above, including
+        // embedded space characters, are forbidden."
+        assert_eq!(parse_fortran_real("  1.2 34  ", 3), None);
+        assert_eq!(parse_fortran_real("      abcd", 3), None);
+        assert_eq!(parse_fortran_real("     1.2.3", 3), None);
+        assert_eq!(parse_fortran_real("         .", 3), None);
+        assert_eq!(parse_fortran_real("    1.2E+ ", 3), None);
+        assert_eq!(parse_fortran_real("       1E ", 3), None);
+    }
+
+    /// The field bytes are untrusted: an exponent near `i32::MIN`, or
+    /// an oversized `d` combined with any negative exponent, must not
+    /// overflow the implicit-point subtraction (a debug-build panic
+    /// before it was widened to saturating i64 arithmetic). Values far
+    /// outside f64 range saturate the way float parsing always does.
+    #[test]
+    fn extreme_exponents_saturate_instead_of_overflowing() {
+        assert_eq!(parse_fortran_real("1.0E-2147483648", 1), Some(0.0));
+        assert_eq!(
+            parse_fortran_real("1.0E+2147483647", 1),
+            Some(f64::INFINITY)
+        );
+        assert_eq!(parse_fortran_real("       5-2", 4_000_000_000), Some(0.0));
     }
 }

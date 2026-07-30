@@ -18,11 +18,24 @@ pub enum Level {
 #[non_exhaustive]
 pub enum Fix {
     /// Rename every occurrence of a keyword, preserving value and comment.
-    RenameKeyword { from: String, to: String },
+    RenameKeyword {
+        /// Keyword to rename.
+        from: String,
+        /// Its replacement.
+        to: String,
+    },
     /// Remove all value cards with the given keyword.
-    RemoveKeyword { keyword: String },
+    RemoveKeyword {
+        /// Keyword to drop.
+        keyword: String,
+    },
     /// Replace the string value of an existing keyword.
-    SetStringValue { keyword: String, value: String },
+    SetStringValue {
+        /// Keyword to rewrite.
+        keyword: String,
+        /// The new string value.
+        value: String,
+    },
 }
 
 /// A single header diagnostic produced by [`Header::validate`].

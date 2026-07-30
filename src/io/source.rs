@@ -44,6 +44,7 @@ impl ByteSource {
     }
 
     #[must_use]
+    /// The whole buffer, zero-padded to a block boundary.
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf
     }

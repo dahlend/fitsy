@@ -45,9 +45,13 @@ pub struct Header {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HeaderEntry {
+    /// Keyword name, trimmed and upper-cased.
     pub keyword: String,
+    /// Which of the Sec.4.1.2 card shapes this is.
     pub kind: CardKind,
+    /// Parsed value, or `None` for a commentary card or a null field.
     pub value: Option<Value>,
+    /// Inline comment following the `/`, trimmed.
     pub comment: Option<String>,
     /// Raw body bytes for commentary cards.
     pub commentary: Option<String>,
@@ -146,7 +150,7 @@ impl Header {
         }
 
         // Resolve CONTINUE long-string concatenation (Sec.4.2.1.2).
-        merge_continuations(&mut cards, &continuations, lenient)?;
+        merge_continuations(&mut cards, &continuations);
 
         // Build index.
         let mut index = BTreeMap::new();
@@ -430,12 +434,18 @@ fn card_to_entry(card: Card, _offset: u64, lenient: bool) -> Result<HeaderEntry>
             } else {
                 value::parse(&card.keyword, &card.body)?
             };
+            // Sec.4.2.1.2 lets a `CONTINUE` that attaches to nothing fall
+            // back to commentary, so keep its raw text alongside the
+            // parsed value; `merge_continuations` needs it to demote the
+            // card rather than discard it.
+            let commentary = matches!(card.kind, CardKind::Continue)
+                .then(|| value::sanitize_free_text(&card.body).trim_end().to_string());
             Ok(HeaderEntry {
                 keyword: card.keyword,
                 kind: card.kind,
                 value: Some(val),
                 comment,
-                commentary: None,
+                commentary,
             })
         }
         CardKind::Commentary => {
@@ -462,18 +472,21 @@ fn card_to_entry(card: Card, _offset: u64, lenient: bool) -> Result<HeaderEntry>
 /// itself a string (Sec.4.2.1.2). We merge each chain into the parent
 /// card and remove the merged `CONTINUE` entries.
 ///
-/// Strict mode rejects a malformed chain. Lenient mode recovers: a
-/// parent missing its trailing `&` is concatenated anyway, and a
-/// `CONTINUE` with no string parent is kept as a standalone card.
-fn merge_continuations(
-    cards: &mut Vec<HeaderEntry>,
-    continuations: &[usize],
-    lenient: bool,
-) -> Result<()> {
+/// A `CONTINUE` that cannot attach -- no preceding value card, a
+/// non-string parent, or a parent whose string does not end in `&` --
+/// is *orphaned*. Sec.4.2.1.2 is explicit that this does not invalidate
+/// the file: such records "should be interpreted as containing
+/// commentary text in bytes 9 -- 80 (similar to a `COMMENT` keyword)",
+/// and an unmatched trailing `&` "should be interpreted as the literal
+/// last character in the string". So an orphan is demoted to a
+/// commentary card, in strict and lenient mode alike, and the parent is
+/// left exactly as written.
+fn merge_continuations(cards: &mut Vec<HeaderEntry>, continuations: &[usize]) {
     if continuations.is_empty() {
-        return Ok(());
+        return;
     }
     let mut to_remove: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut to_demote: Vec<usize> = Vec::new();
     // Walk forwards: for each CONTINUE, find the most recent prior
     // value card whose String ends in `&`, and append.
     for &cont_idx in continuations {
@@ -487,43 +500,29 @@ fn merge_continuations(
             break;
         }
         let Some(parent_idx) = parent_idx else {
-            if lenient {
-                continue; // orphan CONTINUE: keep as a standalone card.
-            }
-            return Err(FitsError::Header(
-                "CONTINUE card without preceding value card".into(),
-            ));
+            to_demote.push(cont_idx);
+            continue;
         };
 
         // Mutate parent string.
-        let cont_text = match &cards[cont_idx].value {
-            Some(Value::String(s)) => s.clone(),
-            _ if lenient => continue,
-            _ => {
-                return Err(FitsError::Header(
-                    "CONTINUE card value is not a string".into(),
-                ));
-            }
+        let Some(Value::String(cont_text)) = cards[cont_idx].value.clone() else {
+            to_demote.push(cont_idx);
+            continue;
         };
         let cont_comment = cards[cont_idx].comment.clone();
         let parent = &mut cards[parent_idx];
         let Some(Value::String(parent_str)) = parent.value.as_mut() else {
-            if lenient {
-                continue; // no string parent to extend: keep CONTINUE as-is.
-            }
-            return Err(FitsError::Header(
-                "CONTINUE follows a non-string value".into(),
-            ));
+            to_demote.push(cont_idx);
+            continue;
         };
-        if parent_str.ends_with('&') {
-            // Drop the trailing `&` continuation marker.
-            parent_str.pop();
-        } else if !lenient {
-            return Err(FitsError::Header(
-                "CONTINUE follows a string that does not end with `&`".into(),
-            ));
+        if !parent_str.ends_with('&') {
+            // The `&` is what licenses the join; without it the parent's
+            // value is already complete and this card is commentary.
+            to_demote.push(cont_idx);
+            continue;
         }
-        // In lenient mode a missing `&` is tolerated: concatenate anyway.
+        // Drop the trailing `&` continuation marker.
+        parent_str.pop();
         parent_str.push_str(&cont_text);
         if let Some(c) = cont_comment {
             match parent.comment.as_mut() {
@@ -537,6 +536,16 @@ fn merge_continuations(
         to_remove.insert(cont_idx);
     }
 
+    for idx in to_demote {
+        let entry = &mut cards[idx];
+        entry.kind = CardKind::Commentary;
+        entry.value = None;
+        entry.comment = None;
+        if entry.commentary.is_none() {
+            entry.commentary = Some(String::new());
+        }
+    }
+
     // Drop only the CONTINUE entries that were successfully merged.
     let mut i = 0_usize;
     cards.retain(|_| {
@@ -544,7 +553,6 @@ fn merge_continuations(
         i += 1;
         keep
     });
-    Ok(())
 }
 
 #[cfg(test)]
@@ -643,9 +651,11 @@ mod tests {
     }
 
     #[test]
-    fn continue_missing_ampersand_concatenates_lenient() {
-        // A parent string that omits the trailing `&` is a common writer
-        // defect. Strict rejects it; lenient concatenates anyway.
+    fn continue_without_ampersand_is_commentary_not_an_error() {
+        // Sec.4.2.1.2: the `&` is what licenses the join. Without it the
+        // parent's value is complete and the CONTINUE is an orphan, which
+        // the standard says to read as commentary -- in both modes, since
+        // it explicitly does not invalidate the file.
         let bytes = make_header(&[
             "SIMPLE  =                    T",
             "BITPIX  =                    8",
@@ -654,18 +664,27 @@ mod tests {
             "CONTINUE  ' and second'",
             "END",
         ]);
-        assert!(Header::parse(&bytes, 0).is_err());
-        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
-        match h.first("OBJECT").unwrap() {
-            Value::String(s) => assert_eq!(s, "first part and second"),
-            other => panic!("not a string: {other:?}"),
+        for lenient in [false, true] {
+            let (h, _) = Header::parse_with(&bytes, 0, lenient)
+                .unwrap_or_else(|e| panic!("lenient={lenient}: {e}"));
+            match h.first("OBJECT").unwrap() {
+                Value::String(s) => assert_eq!(s, "first part", "lenient={lenient}"),
+                other => panic!("not a string: {other:?}"),
+            }
+            // Demoted to commentary: it must not be indexed as a value.
+            let orphan = h
+                .entries()
+                .iter()
+                .find(|e| e.keyword == "CONTINUE")
+                .expect("orphan card is kept");
+            assert!(matches!(orphan.kind, CardKind::Commentary));
+            assert!(orphan.value.is_none());
         }
     }
 
     #[test]
-    fn continue_with_non_string_parent_kept_lenient() {
-        // A CONTINUE that cannot attach to a string value must not abort
-        // the header in lenient mode; it is kept as a standalone card.
+    fn continue_with_non_string_parent_is_commentary() {
+        // Same rule when there is no value card to attach to at all.
         let bytes = make_header(&[
             "SIMPLE  =                    T",
             "BITPIX  =                    8",
@@ -673,9 +692,32 @@ mod tests {
             "CONTINUE  'dangling'",
             "END",
         ]);
-        assert!(Header::parse(&bytes, 0).is_err());
-        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
-        assert_eq!(h.naxis().unwrap(), 0);
+        for lenient in [false, true] {
+            let (h, _) = Header::parse_with(&bytes, 0, lenient)
+                .unwrap_or_else(|e| panic!("lenient={lenient}: {e}"));
+            assert_eq!(h.naxis().unwrap(), 0);
+            assert!(h.first("CONTINUE").is_none(), "not a value card");
+        }
+    }
+
+    #[test]
+    fn continue_chain_still_joins_and_drops_the_marker() {
+        // The valid case must keep working: each `&` is consumed and the
+        // substrings concatenate in order.
+        let bytes = make_header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "STRKEY  = 'This keyword value is continued &'",
+            "CONTINUE  ' over multiple keyword records.&'",
+            "CONTINUE  ''",
+            "END",
+        ]);
+        let (h, _) = Header::parse(&bytes, 0).unwrap();
+        assert_eq!(
+            h.optional_string("STRKEY"),
+            Some("This keyword value is continued  over multiple keyword records.")
+        );
     }
 
     #[test]

@@ -616,14 +616,20 @@ impl AsciiTableBuilder {
         Ok(self)
     }
 
-    /// Set `TNULLn` on the most recently added column. Only legal for
-    /// `I` columns; the sentinel string is padded/truncated to the
-    /// field width when written.
+    /// Set `TNULLn` on the most recently added column: the character
+    /// string that marks an undefined value. The sentinel is
+    /// padded/truncated to the field width when written.
+    ///
+    /// Legal on any numeric column. Sec.7.2.5 puts no type restriction
+    /// on the ASCII-table `TNULLn` -- only the *binary* table form of
+    /// the keyword (Sec.7.3.4) is integer-only. It is the only way an
+    /// ASCII table marks a value undefined, because a blank numeric
+    /// field is defined to be zero, not null.
     pub fn tnull(&mut self, tnull: impl Into<String>) -> Result<&mut Self> {
         let last = self.last_mut("tnull")?;
-        if !matches!(last.format, crate::hdu::ascii_table::AsciiFormat::I(_)) {
+        if matches!(last.format, crate::hdu::ascii_table::AsciiFormat::A(_)) {
             return Err(FitsError::Data(
-                "AsciiTableBuilder::tnull: TNULL is only meaningful for `I` columns".into(),
+                "AsciiTableBuilder::tnull: TNULL is not meaningful for `A` columns".into(),
             ));
         }
         last.tnull = Some(tnull.into());
@@ -755,6 +761,30 @@ fn format_ascii_tform(f: crate::hdu::ascii_table::AsciiFormat) -> String {
     }
 }
 
+/// Render an undefined numeric cell as the column's `TNULLn` sentinel,
+/// erroring when the column has none.
+// Sec.7.2.5 reads a blank numeric field as zero, so a blank cannot
+// stand for "undefined": writing one would turn a NaN into 0.0.
+fn render_ascii_null(c: &AsciiColSpec, row: usize, w: usize) -> Result<String> {
+    let Some(tn) = c.tnull.as_deref() else {
+        return Err(FitsError::Data(format!(
+            "AsciiTableBuilder: column `{}` row {row} is undefined but no TNULL is set; \
+             Sec.7.2.5 reads a blank numeric field as zero, so an undefined value needs \
+             a TNULLn sentinel",
+            c.name
+        )));
+    };
+    if tn.len() > w {
+        return Err(FitsError::Data(format!(
+            "AsciiTableBuilder: column `{}`: TNULL `{tn}` exceeds the {w}-character field",
+            c.name
+        )));
+    }
+    // Sec.7.2.4: the sentinel "is implicitly space filled to the width
+    // of the field", i.e. left-justified.
+    Ok(format!("{tn:<w$}"))
+}
+
 fn render_ascii_cell(c: &AsciiColSpec, row: usize, dst: &mut [u8]) -> Result<()> {
     use crate::hdu::ascii_table::AsciiFormat;
     let w = c.format.width();
@@ -778,28 +808,12 @@ fn render_ascii_cell(c: &AsciiColSpec, row: usize, dst: &mut [u8]) -> Result<()>
         }
         (AsciiFormat::I(_), AsciiColumnData::Int(rows)) => match rows[row] {
             Some(v) => format!("{v:>w$}"),
-            None => match c.tnull.as_deref() {
-                Some(tn) => {
-                    if tn.len() > w {
-                        return Err(FitsError::Data(format!(
-                            "AsciiTableBuilder: column `{}`: TNULL `{tn}` exceeds I{w}",
-                            c.name
-                        )));
-                    }
-                    format!("{tn:>w$}")
-                }
-                None => {
-                    return Err(FitsError::Data(format!(
-                        "AsciiTableBuilder: column `{}` row {row} is None but no TNULL set",
-                        c.name
-                    )));
-                }
-            },
+            None => render_ascii_null(c, row, w)?,
         },
         (AsciiFormat::F(_, d), AsciiColumnData::Float(rows)) => {
             let v = rows[row];
             if v.is_nan() {
-                " ".repeat(w)
+                render_ascii_null(c, row, w)?
             } else {
                 format!("{v:>w$.d$}", w = w, d = *d)
             }
@@ -807,7 +821,7 @@ fn render_ascii_cell(c: &AsciiColSpec, row: usize, dst: &mut [u8]) -> Result<()>
         (AsciiFormat::E(_, d), AsciiColumnData::Float(rows)) => {
             let v = rows[row];
             if v.is_nan() {
-                " ".repeat(w)
+                render_ascii_null(c, row, w)?
             } else {
                 let raw = format!("{v:.d$E}", d = *d);
                 format!("{raw:>w$}")
@@ -816,7 +830,7 @@ fn render_ascii_cell(c: &AsciiColSpec, row: usize, dst: &mut [u8]) -> Result<()>
         (AsciiFormat::D(_, d), AsciiColumnData::Float(rows)) => {
             let v = rows[row];
             if v.is_nan() {
-                " ".repeat(w)
+                render_ascii_null(c, row, w)?
             } else {
                 // Standard Sec.7.2.5: D-format uses `D` exponent.
                 let raw = format!("{v:.d$E}", d = *d).replace('E', "D");
@@ -1175,6 +1189,10 @@ mod tests {
         )
         .unwrap()
         .unit("Jy")
+        .unwrap()
+        // Sec.7.2.5: a blank numeric field reads back as zero, so an
+        // undefined float needs a TNULLn sentinel of its own.
+        .tnull("NULL")
         .unwrap();
         bt.add_column(
             "NAME",

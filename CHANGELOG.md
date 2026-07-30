@@ -9,12 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ZCMPTYPE = 'NOCOMPRESS'` (Sec.10 Table 10): tiles hold the pixel
+  bytes verbatim. Verified against an astropy fixture; Table 10 is done.
+- Binary-table WCS (Sec.8.2 Table 22), both the pixel-list and
+  BINTABLE-vector forms, via `TableWcs`; wcslib-validated to 1e-11 deg.
+- `Wcs` carries `SSYSSRCa`/`ZSOURCEa`/`VELANGLa` and per-axis `CNAMEia`,
+  and `to_header` now writes the whole spectral-frame group.
+- Random-groups parameter scaling (Sec.6.1.2): `group_parameters`, and
+  `group_parameter_by_name`, which sums repeated `PTYPEn` slots.
+- Air-wavelength axes: `AWAV` and the `A2F`/`A2W`/`A2V`/`F2A`/`W2A`/
+  `V2A` codes, on the Cox (2000) index, matching wcslib and astropy.
+- Grism axes: `-GRI`/`-GRA` (Paper III Sec.5.1), the disperser carried
+  in `PVk_0..6`; validated against wcslib and the Paper III headers.
+- Time axes (Sec.9.5.3): `Wcs::time` resolves the scale per Sec.9.2.1,
+  plus `TREFPOS`/`TREFDIR`/`PLEPHEM` and `CZPHS`/`CPERI`/`CRDER`/`CSYER`.
+- Multi-dimensional `-TAB` (Paper III Sec.6.1.1): axes sharing one
+  coordinate array interpolate together M-linearly; wcslib-validated.
+- `fitsy::units`: a Sec.4.3 unit parser returning scale and dimensions,
+  a lenient mode for informal spellings, and `mag`/`dB`/`Np` as levels.
 - `atol` on `fitsy.diff` / `DiffOptions::absolute_tolerance`.
 - `Wcs.pixel_shape` and `Wcs.footprint()`.
 - `Clone` on `Wcs`, `WcsFit`, the HDU views, and the builders.
 
 ### Changed
 
+- Breaking: `Wcs` keeps only keywords its description uses; the
+  round-trip contract is `from_header(to_header(w)) == w`, not bytes.
+- `Wcs::from_header` rejects an alternate code outside `' '` and
+  `'A'`-`'Z'` (Sec.8.2); it previously accepted any ASCII character.
 - `Wcs::to_header` round-trips: it now writes the projection
   parameters, pole conventions, TPV, TNX/ZPX, DSS, spectral and `-TAB`
   cards it used to drop.
@@ -41,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fitsy header` prints reals as the shortest round-tripping decimal.
 - SIP evaluation no longer allocates, and its Newton inverse uses the
   analytic Jacobian.
+- Breaking (Rust): `header::units::si_factor` is gone (see
+  `fitsy::units`); `real_in_unit` refuses a dimension mismatch.
+- Breaking (Rust): `TabAxis` becomes `TabGroup`, owning every axis that
+  shares a coordinate array; `Wcs` gains `celestial_pair`.
+- Breaking (Rust): `wcs::units` is gone, folded into `units::factor_to`.
+- `rust.missing_docs = "deny"`: every public item carries a doc comment.
+- Breaking (Rust): the parallel `naxis`/`ctype`/`cunit`/`crval` fields
+  become accessors on `Axis`/`LinearTransform`; desync is impossible.
+- Breaking (Rust): registry-tracking enums (`ProjectionKind`,
+  `SpectralKind`, `BinValue`, ...) are `#[non_exhaustive]`.
+- Breaking (Rust): `Grism` is exhaustive again -- Paper III Table 7
+  fixes the disperser at exactly seven parameters.
 - Breaking (Rust): `Projection` implementors must supply `pv2`.
 - Breaking (Rust): new `BinValue::StrArray` for `A` columns with `TDIMn`.
 - Breaking (Rust): `CelestialRotation::new` takes `phi0`;
@@ -48,6 +82,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ASCII table real fields follow Sec.7.2.5 in full: the implicit
+  decimal point (`F10.3` over `12345` is 12.345) and `1.234+05` forms.
+- A blank ASCII table numeric field reads as zero (Sec.7.2.5), not
+  `None`.
+- `TNULLn` applies to any ASCII table column, not just `I` (Sec.7.2.4),
+  and `AsciiTableBuilder` refuses `NaN` in a float column without it.
+- An orphaned `CONTINUE` is commentary (Sec.4.2.1.2), not an error; an
+  unmatched trailing `&` is the literal last character.
+- The Sec.4.3.1 numeric multiplier may abut its units: `10**(46)erg/s`
+  and `10-3m` now parse; `m1.5` is still refused.
+- `CUNIT` fell back to a factor of 1.0 when unrecognized (`'km s-1'`
+  read as m/s); units are now parsed and checked dimensionally.
+- Python `Header.value_in_si` could never convert: its blank internal
+  target made every annotated lookup a mismatch. It now converts.
+- `RESTFRQa`/`RESTWAVa` ignored the alternate version code on both
+  read and write (Table 22 footnote 4).
+- `PVi_m` was collected only to `m = 19`, dropping ZPN's `PV2_20`
+  (Sec.8.2 allows `m` up to 99).
+- A linear velocity axis without `RESTFRQ`/`RESTWAV` failed the whole
+  parse; Paper III needs a rest quantity only for the `*2V`/`V2*` codes.
+- An unrecognized spectral algorithm code fell through to the linear
+  pipeline; codes outside Sec.8.4 Table 26 are now rejected.
+- A spectral code disagreeing with its type (`ZOPT-F2V`, Paper III
+  Sec.3.3.1) was accepted and silently reinterpreted; now rejected.
+- `TIMESYS` values carrying a realization (`TT(TAI)`, Sec.9.2.1)
+  matched nothing; the Sec.9.3 units `cy`/`ta`/`Ba` parse too.
+- A descending `-TAB` index vector with a legal repeated value
+  (Sec.6.1.1) was rejected; `PVi_2` (`EXTLEVEL`) is parsed and written.
+- `Wcs::from_header` panicked on a CTYPE whose fourth byte fell inside
+  a multi-byte character.
+- A negative `PCOUNT`/`GCOUNT` was cast straight to `u64`; Sec.7.1.3
+  makes both non-negative, and the error now says so.
+- ISO-8601 dates were range-checked only against 31, so `2024-02-31`
+  parsed and rolled forward.
+- A lone `MJDREFI`/`MJDREFF` was ignored; Sec.9.2.2 defaults each half
+  to zero.
+- Signed five-digit years (Sec.9.1.1, `-04713-11-24T12:00:00`) failed
+  to parse.
+- `TIMEOFFS` was never applied to `TSTART`/`TSTOP`-derived times
+  (Sec.9.4.1).
+- `AZP`, `SZP` and `COP` projected points past their own fold, placing
+  far-side sources inside the image; each forward errors, like wcslib.
+- `HPX` put the polar facet one facet too far at exactly `phi = +180`
+  (`x` was 223.08 instead of 136.92 at `H = 4`, `theta = 88`).
+- Native longitude was normalised to `[-180, 180)` where Paper II
+  defines `(-180, 180]`, mirroring the antipodal meridian.
+- The three projection-domain fixes lift wcslib agreement over a
+  280-point sweep of all 28 projections from 174/224 to 275/280.
 - `CROTAi` was read only from `CROTA2` and only for `NAXIS = 2`, so
   every cube came back with its rotation dropped (Sec.8.2).
 - `PVi_1`/`PVi_2`/`PVi_3`/`PVi_4` on the longitude axis were ignored,

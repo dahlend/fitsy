@@ -1080,13 +1080,14 @@ impl PyHeader {
         self.lock().keyword_unit(key)
     }
 
-    /// Value of `key` converted to the SI base unit for its dimension.
+    /// Value of `key` converted to the canonical unit for its dimension
+    /// (SI base units, with angles in degrees).
     ///
     /// Reads the unit from the `[unit]` comment annotation and applies the
     /// conversion factor. Returns ``None`` if the keyword is absent,
     /// non-numeric, unannotated, or the unit is unrecognized.
     fn value_in_si(&self, key: &str) -> Option<f64> {
-        self.lock().real_in_unit(key, "")
+        self.lock().real_in_canonical(key)
     }
 
     /// Check the header for deprecated, non-standard, or missing keywords.

@@ -26,13 +26,24 @@ use crate::wcs::{D2R, R2D};
 
 /// Frame of reference attached to the celestial axis pair (Paper II
 /// Sec.3.1, Standard Sec.8.4 Table 26).
+// `non_exhaustive`: a frame now falling into `Other` may later get its
+// own variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CelestialFrame {
+    /// `RA`/`DEC` -- equatorial, the frame `RADESYSa` qualifies.
     Equatorial,
+    /// `GLON`/`GLAT` -- galactic.
     Galactic,
+    /// `ELON`/`ELAT` -- ecliptic.
     Ecliptic,
+    /// `SLON`/`SLAT` -- supergalactic.
     Supergalactic,
+    /// `HLON`/`HLAT` -- helioecliptic.
     HelioEcliptic,
+    /// Any other pair, including the generic `xLON`/`xLAT` and
+    /// `yzLN`/`yzLT` forms of Sec.8.2 that name a frame this enum has
+    /// no variant for.
     Other,
 }
 
@@ -116,10 +127,14 @@ impl CelestialFrame {
 
 /// Equatorial reference system identifier (Standard Sec.8.4, Paper II
 /// Sec.3.1, RADESYS keyword). Only meaningful for [`CelestialFrame::Equatorial`].
+// `non_exhaustive`: new realizations of the equatorial system keep
+// appearing, each one promoted out of `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum RadeSys {
-    /// International Celestial Reference System (default for
-    /// EQUINOX absent or >= 1984.0).
+    /// International Celestial Reference System. The default when
+    /// `EQUINOX` is absent; with `EQUINOX` present the default is
+    /// FK4 below 1984.0 and FK5 at or above it (Sec.8.3).
     #[default]
     Icrs,
     /// FK5 (default if EQUINOX >= 1984.0 with no RADESYS).
@@ -287,8 +302,13 @@ impl CelestialRotation {
         let x = sin_delta * dp.cos() - cos_delta * dp.sin() * dalpha.cos();
         let phi = phi_p + y.atan2(x);
 
-        let mut phi_deg = phi * R2D;
-        phi_deg = ((phi_deg + 180.0).rem_euclid(360.0)) - 180.0;
+        // Paper II Sec.2.1 computes phi with `arg`, whose range is
+        // **(-180, 180]** -- closed at the top, open at the bottom. The
+        // obvious `(phi + 180) mod 360 - 180` gives [-180, 180) instead
+        // and so sends a point exactly on the antipodal meridian to
+        // -180, mirroring it to the far edge of an all-sky map;
+        // `wcslib` puts it at +180.
+        let phi_deg = 180.0 - (180.0 - phi * R2D).rem_euclid(360.0);
         (phi_deg, theta * R2D)
     }
 }
@@ -479,7 +499,9 @@ mod tests {
     #[test]
     fn round_trip_off_pole() {
         let rot = CelestialRotation::new(83.633, 22.0145, None, None, 0.0, 90.0).unwrap();
-        for &phi in &[0.0_f64, 45.0, 90.0, 200.0, 350.0] {
+        // 180 exactly: `arg` is defined over `(-180, 180]`, and the
+        // antipodal meridian used to come back mirrored to -180.
+        for &phi in &[0.0_f64, 45.0, 90.0, 180.0, 200.0, 350.0] {
             for &theta in &[10.0_f64, 45.0, 80.0] {
                 let (a, d) = rot.native_to_celestial(phi, theta);
                 let (phi2, theta2) = rot.celestial_to_native(a, d);

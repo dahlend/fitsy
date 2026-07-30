@@ -80,7 +80,9 @@ impl From<&str> for Value {
 /// Component returned by [`split_value_and_comment`].
 #[derive(Debug, Clone)]
 pub struct ValueAndComment {
+    /// Bytes 11..80 up to the comment separator, trimmed.
     pub value_field: String,
+    /// Text after the `/`, trimmed. `None` when there is no comment.
     pub comment: Option<String>,
 }
 

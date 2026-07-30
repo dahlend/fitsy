@@ -88,7 +88,7 @@ impl Wcs {
     /// Batched [`pixel_to_world`](Self::pixel_to_world). `pix` has shape
     /// `(naxis, n)` -- one point per column. Returns the same shape.
     pub fn pixel_to_world_na(&self, pix: &DMatrix<f64>) -> Result<DMatrix<f64>> {
-        let n = self.naxis;
+        let n = self.naxis();
         if pix.nrows() != n {
             return Err(FitsError::Wcs(format!(
                 "pixel_to_world_na: matrix has {} rows, expected naxis = {n}",
@@ -113,7 +113,7 @@ impl Wcs {
     /// Batched [`world_to_pixel`](Self::world_to_pixel). Same shape
     /// convention as [`pixel_to_world_na`](Self::pixel_to_world_na).
     pub fn world_to_pixel_na(&self, world: &DMatrix<f64>) -> Result<DMatrix<f64>> {
-        let n = self.naxis;
+        let n = self.naxis();
         if world.nrows() != n {
             return Err(FitsError::Wcs(format!(
                 "world_to_pixel_na: matrix has {} rows, expected naxis = {n}",

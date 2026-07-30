@@ -12,9 +12,12 @@ use crate::wcs::{D2R, R2D};
 /// PV2_1` is required and non-zero (`theta_1 = 0` degenerates to SFL).
 #[derive(Debug, Clone, Copy)]
 pub struct Bon {
+    /// `PV2_1` -- `theta_1`, the reference latitude in degrees.
     pub theta_1: f64,
 }
 impl Bon {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let theta_1 = pv2
             .get(1)

@@ -3,6 +3,12 @@
 use std::fmt;
 use std::io;
 
+/// Every way reading or writing a FITS file can fail.
+///
+/// Variants are grouped by the level of the format they belong to --
+/// block, card, value, header, data -- so a caller can tell a
+/// structural violation from a semantic one without matching on the
+/// message text.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FitsError {
@@ -11,27 +17,50 @@ pub enum FitsError {
 
     /// Block-level violation (e.g., file size not a multiple of 2880,
     /// truncated block, padding not space/zero).
-    Block { offset: u64, msg: String },
+    Block {
+        /// Byte offset of the offending block from the start of the file.
+        offset: u64,
+        /// What was wrong with it.
+        msg: String,
+    },
 
     /// Card-level violation (80-byte structure, keyword name).
-    Card { offset: u64, msg: String },
+    Card {
+        /// Byte offset of the offending 80-byte card.
+        offset: u64,
+        /// What was wrong with it.
+        msg: String,
+    },
 
     /// Value parsing failed for a card.
-    Value { keyword: String, msg: String },
+    Value {
+        /// Keyword whose value could not be read.
+        keyword: String,
+        /// Why the value was rejected.
+        msg: String,
+    },
 
     /// Generic header-level violation.
     Header(String),
 
     /// A mandatory keyword is missing or has the wrong type/value.
-    MissingMandatory { keyword: String },
+    MissingMandatory {
+        /// The keyword the structure required.
+        keyword: String,
+    },
 
     /// `END` card not in the last header block of the HDU, or block
     /// after `END` not entirely ASCII spaces.
-    EndCardMisplaced { offset: u64 },
+    EndCardMisplaced {
+        /// Byte offset of the block where `END` was found.
+        offset: u64,
+    },
 
     /// HDU type mismatch (e.g., expected IMAGE got BINTABLE).
     HduMismatch {
+        /// The HDU kind the caller asked for.
         expected: &'static str,
+        /// The kind actually present.
         found: String,
     },
 
@@ -51,7 +80,12 @@ pub enum FitsError {
     /// it. Emitted by [`crate::FitsFile::iter`] (and friends) so a
     /// failure deep inside multi-HDU traversal can be located
     /// without rewinding the iterator.
-    InHdu { index: usize, source: Box<Self> },
+    InHdu {
+        /// Zero-based index of the HDU that produced `source`.
+        index: usize,
+        /// The underlying failure.
+        source: Box<Self>,
+    },
 }
 
 impl fmt::Display for FitsError {
@@ -96,4 +130,5 @@ impl From<io::Error> for FitsError {
     }
 }
 
+/// `Result` with this crate's error type.
 pub type Result<T> = std::result::Result<T, FitsError>;

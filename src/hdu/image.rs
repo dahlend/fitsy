@@ -53,16 +53,19 @@ impl<'a> ImageHdu<'a> {
     }
 
     #[must_use]
+    /// The HDU's header.
     pub fn header(&self) -> &Header {
         &self.header
     }
 
     #[must_use]
+    /// Pixel encoding, from `BITPIX`.
     pub fn bitpix(&self) -> Bitpix {
         self.bitpix
     }
 
     #[must_use]
+    /// `NAXISn` in FITS order, fastest-varying axis first.
     pub fn axes(&self) -> &[u64] {
         &self.axes
     }
@@ -301,11 +304,17 @@ fn bitpix_name(b: Bitpix) -> &'static str {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ImagePixels {
+    /// `BITPIX = 8`.
     U8(ImageData<u8>),
+    /// `BITPIX = 16`.
     I16(ImageData<i16>),
+    /// `BITPIX = 32`.
     I32(ImageData<i32>),
+    /// `BITPIX = 64`.
     I64(ImageData<i64>),
+    /// `BITPIX = -32`.
     F32(ImageData<f32>),
+    /// `BITPIX = -64`.
     F64(ImageData<f64>),
 }
 

@@ -48,6 +48,14 @@ fn open_image(cards: &[String]) -> fitsy::Wcs {
 /// `open_image` for a 4x4x16 cube, so tests can exercise a third
 /// (e.g. spectral) axis.
 fn open_image_3d(cards: &[String]) -> fitsy::Wcs {
+    wcs_3d_result(cards)
+        .expect("header should describe a valid WCS")
+        .expect("wcs present")
+}
+
+/// [`open_image_3d`] keeping the error, for tests that assert a
+/// non-conforming header is *rejected*.
+fn wcs_3d_result(cards: &[String]) -> Result<Option<fitsy::Wcs>, fitsy::FitsError> {
     let mut buf = Vec::new();
     for c in [
         "SIMPLE  =                    T",
@@ -75,7 +83,7 @@ fn open_image_3d(cards: &[String]) -> fitsy::Wcs {
     let Hdu::Image(img) = file.hdu(0).unwrap() else {
         panic!("not image");
     };
-    img.wcs(' ').unwrap().expect("wcs present")
+    img.wcs(' ')
 }
 
 /// `open_image` for callers sweeping parameter combinations, some of
@@ -122,7 +130,7 @@ fn tan_reference_pixel_maps_to_crval() {
 /// value after parsing a header, matching what `fit_celestial_wcs`
 /// produces directly. Regression test: the parser used to zero this
 /// field out (the value lived only in `celestial.rotation`), which a
-/// downstream consumer reading `wcs.crval` directly (rather than
+/// downstream consumer reading `wcs.crval()` directly (rather than
 /// calling `pixel_to_celestial`) would silently see as `(0.0, 0.0)`.
 #[test]
 fn crval_field_matches_header_on_celestial_pair() {
@@ -140,19 +148,19 @@ fn crval_field_matches_header_on_celestial_pair() {
     ];
     let wcs = open_image(&cards);
     assert!(
-        near(wcs.crval[0], 83.6331, 1e-9),
+        near(wcs.crval()[0], 83.6331, 1e-9),
         "crval[0] = {} (expected 83.6331, not zeroed)",
-        wcs.crval[0]
+        wcs.crval()[0]
     );
     assert!(
-        near(wcs.crval[1], 22.0145, 1e-9),
+        near(wcs.crval()[1], 22.0145, 1e-9),
         "crval[1] = {} (expected 22.0145, not zeroed)",
-        wcs.crval[1]
+        wcs.crval()[1]
     );
     // Must also agree with the rotation block it's mirrored into.
     let cb = wcs.celestial.as_ref().unwrap();
-    assert!(near(wcs.crval[0], cb.rotation.alpha0, 1e-12));
-    assert!(near(wcs.crval[1], cb.rotation.delta0, 1e-12));
+    assert!(near(wcs.crval()[0], cb.rotation.alpha0, 1e-12));
+    assert!(near(wcs.crval()[1], cb.rotation.delta0, 1e-12));
 }
 
 #[test]
@@ -388,6 +396,106 @@ fn radesys_and_equinox_parsed() {
     assert_eq!(wcs.mjd_obs, Some(58849.0));
 }
 
+/// `EQUINOX` is retained only where a frame defines it. Paper II
+/// Sec.3.1 makes it "not applicable to ICRS or GAPPT", yet
+/// `EQUINOX = 2000.0` beside `RADESYS = 'ICRS'` is ubiquitous in real
+/// headers -- the interpreted `Wcs` drops the redundant value, and the
+/// source `Header` keeps the card.
+#[test]
+fn equinox_is_gated_on_a_frame_that_defines_it() {
+    let base: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CRPIX1  =                  1.0".into(),
+        "CRPIX2  =                  1.0".into(),
+        "CRVAL1  =                  0.0".into(),
+        "CRVAL2  =                  0.0".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+        "EQUINOX =               2000.0".into(),
+    ];
+    // ICRS defines the equinox away.
+    let mut cards = base.clone();
+    cards.push("RADESYS = 'ICRS'".into());
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.radesys, fitsy::wcs::RadeSys::Icrs);
+    assert_eq!(wcs.equinox, None);
+    // ... and to_header emits no EQUINOX card for it.
+    let written = wcs.to_header(' ').unwrap();
+    assert!(written.first("EQUINOX").is_none());
+
+    // A bare EQUINOX still drives the Sec.8.3 frame default -- the
+    // value is read before the gate, so FK5 resolves and keeps it.
+    let wcs = open_image(&base);
+    assert_eq!(wcs.radesys, fitsy::wcs::RadeSys::Fk5);
+    assert_eq!(wcs.equinox, Some(2000.0));
+    let mut cards = base.clone();
+    cards[8] = "EQUINOX =               1950.0".into();
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.radesys, fitsy::wcs::RadeSys::Fk4);
+    assert_eq!(wcs.equinox, Some(1950.0));
+
+    // No celestial pair: no frame for either keyword to describe.
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'FREQ'".into(),
+        "CRPIX1  =                  1.0".into(),
+        "CRVAL1  =               1.0E+9".into(),
+        "CDELT1  =               1.0E+6".into(),
+        "CUNIT1  = 'Hz'".into(),
+        "EQUINOX =               2000.0".into(),
+        "RADESYS = 'FK5'".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.equinox, None);
+    assert_eq!(wcs.radesys, fitsy::wcs::RadeSys::default());
+}
+
+/// `Wcs::axes` is the per-axis metadata table and is always exactly
+/// `naxis` long, populated or not -- the invariant that used to span
+/// five parallel vectors.
+#[test]
+fn axes_metadata_is_always_naxis_long() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CRPIX1  =                  1.0".into(),
+        "CRPIX2  =                  1.0".into(),
+        "CRVAL1  =                  0.0".into(),
+        "CRVAL2  =                  0.0".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.axes().len(), wcs.naxis());
+    // No CNAME/CRDER/CSYER cards, so every axis carries only the
+    // CTYPE/CUNIT it was parsed from and no metadata.
+    assert!(
+        wcs.axes()
+            .iter()
+            .all(|a| a.cname.is_none() && a.crder.is_none() && a.csyer.is_none())
+    );
+
+    let fitted = fitsy::wcs::fit_celestial_wcs(
+        &[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (0.0, 10.0),
+            (10.0, 10.0),
+            (5.0, 3.0),
+        ],
+        &[
+            (150.0, 2.0),
+            (150.01, 2.0),
+            (150.0, 2.01),
+            (150.01, 2.01),
+            (150.005, 2.003),
+        ],
+        &fitsy::wcs::WcsFitOptions::default(),
+    )
+    .expect("fit");
+    assert_eq!(fitted.wcs.axes().len(), fitted.wcs.naxis());
+}
+
 /// No `RADESYS` keyword: default depends on `EQUINOX` per Paper II/// Sec.3.1 -- pre-1984 => FK4, post-1984 => FK5, missing => ICRS.
 #[test]
 fn radesys_defaults() {
@@ -547,14 +655,14 @@ fn celestial_pair_after_spectral_axis() {
     assert!((world[2] - 20.0).abs() < 1e-9);
 }
 
-/// `wcs.crval` must be usable as a "hold every other axis at its
+/// `wcs.crval()` must be usable as a "hold every other axis at its
 /// reference value" filler for `world_to_pixel` -- exactly the pattern
 /// `Wcs::celestial_to_pixel` uses internally (`let mut world =
-/// self.crval.clone(); world[lon] = ra; world[lat] = dec;`), and the
+/// self.crval().clone(); world[lon] = ra; world[lat] = dec;`), and the
 /// natural thing for any external caller to do.
 ///
 /// Regression test: before the parser stopped zeroing `crval` on the
-/// celestial/spectral axes, feeding `wcs.crval` straight back into
+/// celestial/spectral axes, feeding `wcs.crval()` straight back into
 /// `world_to_pixel` did not merely give a wrong spectral-axis pixel --
 /// for this fixture (celestial axes zeroed to RA=0/Dec=0, nowhere near
 /// the true tangent point at RA=100/Dec=20) it made the TAN projection
@@ -578,13 +686,13 @@ fn crval_is_a_valid_reference_point_filler_with_spectral_axis() {
         "CUNIT1  = 'Hz'".into(),
     ];
     let wcs = open_image(&cards);
-    assert!(near(wcs.crval[0], 1.42e9, 1.0));
-    assert!(near(wcs.crval[1], 100.0, 1e-9));
-    assert!(near(wcs.crval[2], 20.0, 1e-9));
+    assert!(near(wcs.crval()[0], 1.42e9, 1.0));
+    assert!(near(wcs.crval()[1], 100.0, 1e-9));
+    assert!(near(wcs.crval()[2], 20.0, 1e-9));
 
     let pix = wcs
-        .world_to_pixel(&wcs.crval.clone())
-        .expect("world_to_pixel(wcs.crval) must succeed: it's the reference point");
+        .world_to_pixel(wcs.crval())
+        .expect("world_to_pixel(wcs.crval()) must succeed: it's the reference point");
     // CRPIX = 1.0 (1-based) on every axis -> 0-based reference pixel = 0.
     for (i, &p) in pix.iter().enumerate() {
         assert!(near(p, 0.0, 1e-6), "axis {i}: pix = {p}, expected ~0.0");
@@ -1033,11 +1141,13 @@ fn wcsname_is_surfaced() {
     assert_eq!(wcs.wcsname.as_deref(), Some("IDC distortion-corrected"));
 }
 
-/// `SPECSYS`, `SSYSOBS`, `VELOSYS` (Paper III Sec.7) are surfaced
-/// verbatim on the parsed `Wcs`.
+/// `SPECSYS`, `SSYSOBS`, `VELOSYS` (Paper III Sec.7) are retained on
+/// the parsed `Wcs` -- but only when there is a spectral axis for them
+/// to describe. `Wcs` is the interpreted layer; a header carrying them
+/// without one keeps them in its `Header` alone.
 #[test]
-fn spectral_reference_frame_keywords_surfaced() {
-    let cards: Vec<String> = vec![
+fn spectral_reference_frame_keywords_gated_on_a_spectral_axis() {
+    let celestial: Vec<String> = vec![
         "CTYPE1  = 'RA---TAN'".into(),
         "CTYPE2  = 'DEC--TAN'".into(),
         "CRPIX1  =                 50.0".into(),
@@ -1050,10 +1160,22 @@ fn spectral_reference_frame_keywords_surfaced() {
         "SSYSOBS = 'TOPOCENT'".into(),
         "VELOSYS =              12345.0".into(),
     ];
-    let wcs = open_image(&cards);
-    assert_eq!(wcs.specsys.as_deref(), Some("BARYCENT"));
-    assert_eq!(wcs.ssysobs.as_deref(), Some("TOPOCENT"));
-    assert_eq!(wcs.velosys, Some(12345.0));
+    // No spectral axis: the frame describes nothing and is dropped.
+    let wcs = open_image(&celestial);
+    assert!(wcs.spectral_frame.is_none());
+
+    // A spectral axis -- even a bare linear one -- retains it.
+    let mut cards = celestial;
+    cards.insert(2, "CTYPE3  = 'FREQ'".into());
+    cards.push("CRPIX3  =                  1.0".into());
+    cards.push("CRVAL3  =               1.0E+09".into());
+    cards.push("CDELT3  =               1.0E+06".into());
+    cards.push("CUNIT3  = 'Hz'".into());
+    let wcs = open_image_3d(&cards);
+    let frame = wcs.spectral_frame.expect("frame retained");
+    assert_eq!(frame.specsys.as_deref(), Some("BARYCENT"));
+    assert_eq!(frame.ssysobs.as_deref(), Some("TOPOCENT"));
+    assert_eq!(frame.velosys, Some(12345.0));
 }
 
 /// `WCSAXES` may differ from `NAXIS` (Paper I Sec.2.1): the WCS engine
@@ -1080,7 +1202,7 @@ fn wcsaxes_overrides_naxis() {
         "CUNIT3  = 'Hz'".into(),
     ];
     let wcs = open_image(&cards);
-    assert_eq!(wcs.naxis, 3);
+    assert_eq!(wcs.naxis(), 3);
     assert!(wcs.celestial.is_some(), "celestial pair (axes 1,2) found");
     assert_eq!(wcs.spectral.len(), 1, "FREQ axis recognized");
     assert_eq!(wcs.spectral[0].axis, 2);
@@ -1580,6 +1702,71 @@ fn wave_tab_axis_resolved_from_bintable() {
     }
 }
 
+/// `PVi_2` (`EXTLEVEL`) must survive `to_header`: the resolver checks
+/// it against the table HDU, so dropping it breaks the round trip for
+/// any file whose lookup table carries `EXTLEVEL != 1`.
+#[test]
+fn tab_extlevel_round_trips() {
+    use fitsy::{BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder, Value};
+
+    let mut primary = ImageBuilder::<f32>::new(vec![2, 2, 5], vec![0.0_f32; 20])
+        .unwrap()
+        .primary(true);
+    for (k, v) in [
+        ("CTYPE1", Value::String("X".into())),
+        ("CTYPE2", Value::String("Y".into())),
+        ("CTYPE3", Value::String("WAVE-TAB".into())),
+        ("CRPIX3", Value::Real(1.0)),
+        ("CRVAL3", Value::Real(1.0)),
+        ("CDELT3", Value::Real(1.0)),
+        ("CUNIT3", Value::String("m".into())),
+        ("PS3_0", Value::String("WCS-TAB".into())),
+        ("PS3_1", Value::String("WAVELEN".into())),
+        ("PV3_1", Value::Integer(1)),
+        ("PV3_2", Value::Integer(7)), // EXTLEVEL
+    ] {
+        primary = primary.card(k, v, None);
+    }
+    let primary = primary.build().unwrap();
+
+    let mut bt = BinTableBuilder::new();
+    bt.add_column("WAVELEN", BinFieldKind::F64, 5, Some("m"), None)
+        .unwrap();
+    let mut row = Vec::with_capacity(5 * 8);
+    for w in [4e-7_f64, 4.5e-7, 5.5e-7, 7e-7, 9e-7] {
+        row.extend_from_slice(&w.to_bits().to_be_bytes());
+    }
+    let (mut bh, bd) = bt.build(1, row).unwrap();
+    bh.push("EXTNAME", Value::String("WCS-TAB".into()), None)
+        .unwrap();
+    bh.push("EXTVER", Value::Integer(1), None).unwrap();
+    bh.push("EXTLEVEL", Value::Integer(7), None).unwrap();
+
+    let mut buf = Vec::new();
+    let mut w = FitsWriter::new(&mut buf);
+    w.write_hdu(&primary.0, &primary.1).unwrap();
+    w.write_hdu(&bh, &bd).unwrap();
+    w.finish().unwrap();
+    let file = FitsFile::from_bytes(buf).unwrap();
+
+    let wcs = file.wcs(0, ' ').unwrap().expect("WCS present");
+    assert_eq!(wcs.tab_specs[0].extlevel, 7);
+
+    let serialized = wcs.to_header(' ').unwrap();
+    let mut reparsed = fitsy::Wcs::from_header(&serialized, ' ')
+        .unwrap()
+        .expect("serialized header still describes a WCS");
+    assert_eq!(
+        reparsed.tab_specs[0].extlevel, 7,
+        "PV3_2 dropped by to_header"
+    );
+    // ... and the reparsed WCS still resolves against the same file.
+    assert_eq!(reparsed.resolve_tab(&file).unwrap(), 1);
+    let a = wcs.pixel_to_world(&[0.0, 0.0, 2.0]).unwrap();
+    let b = reparsed.pixel_to_world(&[0.0, 0.0, 2.0]).unwrap();
+    assert!((a[2] - b[2]).abs() < 1e-15, "{} vs {}", a[2], b[2]);
+}
+
 /// Header that declares a `-TAB` axis but is opened via the
 /// header-only path (`ImageHdu::wcs`) without resolution must error
 /// loudly on first forward map. Silently dropping the lookup would
@@ -1959,6 +2146,141 @@ fn batch_transforms_still_error_without_a_celestial_pair() {
     let wcs = open_image(&cards);
     assert!(wcs.pixel_to_celestial_many(&[(0.0, 0.0)]).is_err());
     assert!(wcs.celestial_to_pixel_many(&[(0.0, 0.0)]).is_err());
+}
+
+/// The descriptive keywords fitsy retains must survive `to_header` ->
+/// re-parse. They are stored rather than applied, so writing them back
+/// *is* their whole contract -- a dropped `SPECSYS` silently changes
+/// which frame the coordinates claim to be in. The round-trip contract
+/// is `from_header(to_header(w)) == w`, so the header here carries a
+/// spectral axis for the frame to describe.
+#[test]
+fn to_header_round_trips_frame_and_axis_name_keywords() {
+    let cards: Vec<String> = [
+        "CTYPE1  = 'RA---TAN'",
+        "CTYPE2  = 'DEC--TAN'",
+        "CTYPE3  = 'VOPT-F2W'",
+        "CRVAL1  =                150.0",
+        "CRVAL2  =                  2.5",
+        "CRVAL3  =               1.0E+05",
+        "CRPIX1  =                 10.0",
+        "CRPIX2  =                 20.0",
+        "CRPIX3  =                  1.0",
+        "CDELT1  =                -0.01",
+        "CDELT2  =                 0.01",
+        "CDELT3  =               1.0E+03",
+        "CUNIT3  = 'm/s'",
+        "RESTFRQ =        1.42040575E+09",
+        "CNAME1  = 'Right ascension'",
+        "CNAME2  = 'Declination'",
+        "CNAME3  = 'Optical velocity'",
+        "SPECSYS = 'BARYCENT'",
+        "SSYSOBS = 'TOPOCENT'",
+        "SSYSSRC = 'LSRK    '",
+        "VELOSYS =              -12345.0",
+        "ZSOURCE =                0.0123",
+        "VELANGL =                  75.0",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+
+    let wcs = open_image_3d(&cards);
+    let frame = wcs.spectral_frame.clone().expect("frame retained");
+    assert_eq!(frame.specsys.as_deref(), Some("BARYCENT"));
+    assert_eq!(frame.ssysobs.as_deref(), Some("TOPOCENT"));
+    assert_eq!(frame.velosys, Some(-12345.0));
+    let source = frame.source.expect("ZSOURCE group retained");
+    assert_eq!(source.zsource, 0.0123);
+    assert_eq!(source.ssyssrc.as_deref(), Some("LSRK"));
+    assert_eq!(source.velangl, Some(75.0));
+    assert_eq!(wcs.axes()[0].cname.as_deref(), Some("Right ascension"));
+    assert_eq!(wcs.axes()[1].cname.as_deref(), Some("Declination"));
+    assert_eq!(wcs.axes()[2].cname.as_deref(), Some("Optical velocity"));
+
+    let written = wcs.to_header(' ').unwrap();
+    let reparsed = fitsy::Wcs::from_header(&written, ' ').unwrap().unwrap();
+    assert_eq!(reparsed.spectral_frame, wcs.spectral_frame);
+    assert_eq!(reparsed.axes(), wcs.axes());
+}
+
+/// `SSYSSRC` names the frame `ZSOURCE` is expressed in and `VELANGL`
+/// orients its velocity vector; without `ZSOURCE` neither describes
+/// anything and neither is retained (Sec.8.4.3).
+#[test]
+fn source_frame_satellites_require_zsource() {
+    let cards: Vec<String> = [
+        "CTYPE3  = 'FREQ'",
+        "CRVAL3  =               1.0E+09",
+        "CRPIX3  =                  1.0",
+        "CDELT3  =               1.0E+06",
+        "CUNIT3  = 'Hz'",
+        "SSYSSRC = 'LSRK    '",
+        "VELANGL =                  75.0",
+        "SPECSYS = 'BARYCENT'",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let wcs = open_image_3d(&cards);
+    let frame = wcs.spectral_frame.expect("SPECSYS keeps the frame");
+    assert_eq!(frame.specsys.as_deref(), Some("BARYCENT"));
+    assert!(frame.source.is_none(), "no ZSOURCE, no source group");
+}
+
+/// The same keywords in their table-resident spellings (Table 22):
+/// `SPECna`, `SOBSna`, `SSRCna`, `VSYSna`, `ZSOUna`, `VANGna`,
+/// `TCNAna`.
+#[test]
+fn pixel_list_carries_the_source_frame_keywords() {
+    use fitsy::header::Header;
+    use fitsy::wcs::TableWcs;
+
+    let mut buf = Vec::new();
+    for c in [
+        "XTENSION= 'BINTABLE'",
+        "BITPIX  =                    8",
+        "NAXIS   =                    2",
+        "NAXIS1  =                    8",
+        "NAXIS2  =                    1",
+        "PCOUNT  =                    0",
+        "GCOUNT  =                    1",
+        "TFIELDS =                    1",
+        "TCTYP1  = 'VOPT-F2W'",
+        "TCRVL1  =              1.0E+05",
+        "TCRPX1  =                  1.0",
+        "TCDLT1  =              1.0E+03",
+        "TCUNI1  = 'm/s     '",
+        "TCNA1   = 'Optical velocity'",
+        "RFRQ1   =        1.42040575E+09",
+        "SPEC1   = 'SOURCE  '",
+        "SOBS1   = 'TOPOCENT'",
+        "SSRC1   = 'LSRK    '",
+        "VSYS1   =              -12345.0",
+        "ZSOU1   =                0.0123",
+        "VANG1   =                  75.0",
+        "END",
+    ] {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    while !buf.len().is_multiple_of(BLOCK) {
+        buf.push(b' ');
+    }
+    let h = Header::parse(&buf, 0).unwrap().0;
+    let tw = TableWcs::from_pixel_list(&h, ' ').unwrap().unwrap();
+    let frame = tw
+        .wcs
+        .spectral_frame
+        .clone()
+        .expect("VOPT axis keeps the frame");
+    assert_eq!(frame.specsys.as_deref(), Some("SOURCE"));
+    assert_eq!(frame.ssysobs.as_deref(), Some("TOPOCENT"));
+    assert_eq!(frame.velosys, Some(-12345.0));
+    let source = frame.source.expect("ZSOURCE group");
+    assert_eq!(source.zsource, 0.0123);
+    assert_eq!(source.ssyssrc.as_deref(), Some("LSRK"));
+    assert_eq!(source.velangl, Some(75.0));
+    assert_eq!(tw.wcs.axes()[0].cname.as_deref(), Some("Optical velocity"));
 }
 
 /// Every projection, with its parameters and both pole conventions,
@@ -2416,4 +2738,1001 @@ fn tab_axis_extrapolation_is_bounded() {
         (lo - 3750.0).abs() < 1e-9,
         "lower margin should extrapolate to 3750, got {lo}"
     );
+}
+
+// -- Spectral axis conformance (Paper III Sec.3.3, Standard Sec.8.4) --
+
+fn spectral_cube_cards(ctype3: &str, extra: &[&str]) -> Vec<String> {
+    spectral_cube_cards_at(ctype3, 1000.0, 100.0, extra)
+}
+
+/// [`spectral_cube_cards`] with an explicit reference value and
+/// increment on axis 3, for the codes where the numbers have to be
+/// physically sensible (a wavelength axis cannot sit at 1000 m).
+fn spectral_cube_cards_at(ctype3: &str, crval3: f64, cdelt3: f64, extra: &[&str]) -> Vec<String> {
+    let mut cards = vec![
+        "CTYPE1  = 'RA---TAN'".to_string(),
+        "CTYPE2  = 'DEC--TAN'".to_string(),
+        format!("CTYPE3  = '{ctype3}'"),
+        "CRVAL1  =                  0.0".to_string(),
+        "CRVAL2  =                  0.0".to_string(),
+        format!("CRVAL3  = {crval3:>20E}"),
+        "CRPIX1  =                  1.0".to_string(),
+        "CRPIX2  =                  1.0".to_string(),
+        "CRPIX3  =                  1.0".to_string(),
+        "CDELT1  =                -0.01".to_string(),
+        "CDELT2  =                 0.01".to_string(),
+        format!("CDELT3  = {cdelt3:>20E}"),
+    ];
+    cards.extend(extra.iter().map(|s| (*s).to_string()));
+    cards
+}
+
+/// Paper III Sec.3.3.4 requires RESTFRQ/RESTWAV only for the
+/// `F2V`/`V2F`/`W2V`/`V2W`/`A2V`/`V2A` codes, and Standard Sec.8.4
+/// makes writing one a `should`. A *linear* velocity axis is
+/// `S = CRVAL + x` and needs neither.
+///
+/// Regression: the whole WCS parse failed for a plain `CTYPE3='VRAD'`
+/// cube with no rest quantity, so such files had no WCS at all --
+/// including their perfectly ordinary celestial axes.
+#[test]
+fn linear_velocity_axis_parses_without_rest_frequency() {
+    // `ZOPT` and `BETA` are ratios, so Table 25 gives them no unit;
+    // declaring `m/s` there is a header error the unit check now
+    // catches.
+    for (ctype, cunit) in [
+        ("VRAD", "CUNIT3  = 'm/s'"),
+        ("VOPT", "CUNIT3  = 'm/s'"),
+        ("ZOPT", "CUNIT3  = ' '"),
+        ("VELO", "CUNIT3  = 'm/s'"),
+        ("BETA", "CUNIT3  = ' '"),
+    ] {
+        let cards = spectral_cube_cards(ctype, &[cunit]);
+        let wcs = wcs_3d_result(&cards)
+            .unwrap_or_else(|e| panic!("{ctype} without RESTFRQ was rejected: {e}"))
+            .expect("wcs present");
+        assert!(wcs.is_celestial(), "{ctype}: celestial pair lost");
+        // Linear: CRVAL3 + 3 * CDELT3 at the fourth plane.
+        let world = wcs.pixel_to_world(&[0.0, 0.0, 3.0]).unwrap();
+        assert!(
+            near(world[2], 1300.0, 1e-9),
+            "{ctype}: expected 1300, got {}",
+            world[2]
+        );
+    }
+}
+
+/// The `F2V` family still needs a rest quantity, and the failure must
+/// arrive at parse time rather than on the first transform.
+#[test]
+fn velocity_algorithm_without_rest_quantity_is_rejected() {
+    let cards = spectral_cube_cards("VOPT-F2W", &["CUNIT3  = 'm/s'"]);
+    let err = wcs_3d_result(&cards).expect_err("VOPT-F2W needs RESTWAV");
+    assert!(
+        err.to_string().contains("RESTFRQ or RESTWAV"),
+        "unexpected error: {err}"
+    );
+    // With RESTWAV it parses.
+    let cards = spectral_cube_cards(
+        "VOPT-F2W",
+        &["CUNIT3  = 'm/s'", "RESTWAV =    0.2110611410"],
+    );
+    assert!(wcs_3d_result(&cards).unwrap().is_some());
+}
+
+/// A code that is not in Table 26 at all must be rejected.
+///
+/// Regression: an unrecognized algorithm code fell through to the
+/// linear pipeline, so the axis silently reported a coordinate that
+/// was wrong by orders of magnitude instead of failing.
+#[test]
+fn unregistered_spectral_algorithm_is_rejected_not_linearised() {
+    for ctype in ["FREQ-XYZ", "WAVE-ABC", "AWAV-Q2Q"] {
+        let cards = spectral_cube_cards(ctype, &["CUNIT3  = 'm'"]);
+        let err = wcs_3d_result(&cards)
+            .err()
+            .unwrap_or_else(|| panic!("{ctype} should be rejected, not treated as linear"));
+        assert!(
+            err.to_string().contains("not a spectral algorithm code"),
+            "{ctype}: unexpected error: {err}"
+        );
+    }
+}
+
+/// A `-GRI`/`-GRA` axis carries its disperser in `PVk_m`; without it
+/// there is no coordinate function, so the header must be refused
+/// rather than silently given the Table 7 defaults (which describe no
+/// disperser at all).
+#[test]
+fn grism_without_disperser_parameters_is_rejected() {
+    let cards = spectral_cube_cards("WAVE-GRI", &["CUNIT3  = 'm'"]);
+    let err = wcs_3d_result(&cards).expect_err("no PV3_m present");
+    assert!(
+        err.to_string().contains("denominator") || err.to_string().contains("disperser"),
+        "unexpected error: {err}"
+    );
+}
+
+/// `Wcs::to_header` must carry the grism parameters back out, or a
+/// read/write round trip silently degrades the axis.
+#[test]
+fn to_header_round_trips_grism_parameters() {
+    let cards = spectral_cube_cards_at(
+        "AWAV-GRA",
+        5.0e-7,
+        1.0e-10,
+        &[
+            "CUNIT3  = 'm'",
+            "PV3_0   =              316000.",
+            "PV3_1   =                   1.",
+            "PV3_2   =                 13.9",
+            "PV3_3   =                1.765",
+            "PV3_4   =            -1077000.",
+        ],
+    );
+    let wcs = open_image_3d(&cards);
+    let header = wcs.to_header(' ').expect("to_header");
+    let again = fitsy::Wcs::from_header(&header, ' ')
+        .expect("reparse")
+        .expect("wcs present");
+
+    let a = wcs.spectral.first().expect("spectral axis").grism.unwrap();
+    let b = again
+        .spectral
+        .first()
+        .expect("spectral axis")
+        .grism
+        .unwrap();
+    assert_eq!(a, b, "grism parameters did not survive to_header");
+
+    for px in [0.0_f64, 7.0, 15.0] {
+        let want = wcs.pixel_to_world(&[0.0, 0.0, px]).unwrap()[2];
+        let got = again.pixel_to_world(&[0.0, 0.0, px]).unwrap()[2];
+        assert!(
+            near(got, want, want.abs() * 1e-12),
+            "pixel {px}: {got} != {want}"
+        );
+    }
+}
+
+/// The recognized codes, a bare type code, and `-TAB` (handled by the
+/// table machinery) must all still be accepted.
+#[test]
+fn recognized_spectral_codes_still_parse() {
+    for (ctype, extra) in [
+        ("FREQ", vec!["CUNIT3  = 'Hz'"]),
+        ("WAVE", vec!["CUNIT3  = 'm'"]),
+        ("AWAV", vec!["CUNIT3  = 'm'"]),
+        ("WAVE-F2W", vec!["CUNIT3  = 'm'"]),
+        ("FREQ-W2F", vec!["CUNIT3  = 'Hz'"]),
+        ("FREQ-LOG", vec!["CUNIT3  = 'Hz'"]),
+        (
+            "VELO-F2V",
+            vec!["CUNIT3  = 'm/s'", "RESTFRQ =        1.420e9"],
+        ),
+        (
+            "WAVE-V2W",
+            vec!["CUNIT3  = 'm'", "RESTWAV =    0.2110611410"],
+        ),
+        // Air-wavelength codes (Paper III Sec.4).
+        ("AWAV", vec!["CUNIT3  = 'm'"]),
+        ("AWAV-F2A", vec!["CUNIT3  = 'm'"]),
+        ("WAVE-A2W", vec!["CUNIT3  = 'm'"]),
+        ("FREQ-A2F", vec!["CUNIT3  = 'Hz'"]),
+        // Grisms (Paper III Sec.5.1); PV3_m is the disperser.
+        (
+            "WAVE-GRI",
+            vec![
+                "CUNIT3  = 'm'",
+                "PV3_0   =              316000.",
+                "PV3_1   =                   1.",
+            ],
+        ),
+        (
+            "AWAV-GRA",
+            vec![
+                "CUNIT3  = 'm'",
+                "PV3_0   =              316000.",
+                "PV3_1   =                   1.",
+            ],
+        ),
+    ] {
+        // Reference value and increment matched to the class, so the
+        // grism cases describe a real disperser rather than a 1000 m
+        // wavelength.
+        let (crval, cdelt) = match &ctype[..4] {
+            "FREQ" => (6.0e14, -1.0e11),
+            "WAVE" | "AWAV" => (5.0e-7, 1.0e-10),
+            _ => (0.0, 1.0e3),
+        };
+        let cards = spectral_cube_cards_at(ctype, crval, cdelt, &extra);
+        let wcs = wcs_3d_result(&cards)
+            .unwrap_or_else(|e| panic!("{ctype} should parse: {e}"))
+            .expect("wcs present");
+        // and evaluate: parsing alone would not catch a broken chain.
+        let world = wcs
+            .pixel_to_world(&[0.0, 0.0, 8.0])
+            .unwrap_or_else(|e| panic!("{ctype} should evaluate: {e}"));
+        assert!(world[2].is_finite(), "{ctype}: non-finite world value");
+    }
+}
+
+/// Sec.8.2 allows `PVi_m` up to `m = 99`; ZPN's polynomial runs
+/// `PV2_0..PV2_20`.
+///
+/// Regression: only `m = 0..19` was collected, so a ZPN header's
+/// highest-order term vanished from the transform with no diagnostic.
+#[test]
+fn zpn_uses_its_full_pv2_20_polynomial() {
+    let cards = |extra: &str| {
+        vec![
+            "CTYPE1  = 'RA---ZPN'".to_string(),
+            "CTYPE2  = 'DEC--ZPN'".to_string(),
+            "CRVAL1  =                  0.0".to_string(),
+            "CRVAL2  =                  0.0".to_string(),
+            "CRPIX1  =                 50.0".to_string(),
+            "CRPIX2  =                 50.0".to_string(),
+            // A wide field on purpose: zeta^20 is ~1e-43 over an
+            // arcminute-scale image, so a 20th-order term could only
+            // be seen out at tens of degrees.
+            "CDELT1  =                 -0.5".to_string(),
+            "CDELT2  =                  0.5".to_string(),
+            "PV2_1   =                   1.".to_string(),
+            extra.to_string(),
+        ]
+    };
+    let with = open_image(&cards("PV2_20  =                 500."));
+    let without = open_image(&cards("PV2_19  =                   0."));
+
+    let pv = with.celestial.as_ref().unwrap().projection.pv2();
+    assert!(
+        pv.iter()
+            .any(|&(m, v)| m == 20 && (v - 500.0).abs() < 1e-12),
+        "PV2_20 missing from the parsed projection: {pv:?}"
+    );
+    // And it must actually move the sky, not just be stored.
+    let a = with.pixel_to_celestial(0.0, 0.0).unwrap();
+    let b = without.pixel_to_celestial(0.0, 0.0).unwrap();
+    assert!(
+        (a.1 - b.1).abs() > 1e-6,
+        "PV2_20 = 500 changed nothing: {a:?} vs {b:?}"
+    );
+}
+
+/// Table 22 (and its footnote 4) give `RESTFRQ`/`RESTWAV` the alternate
+/// version code.
+///
+/// Regression: only the bare spelling was read, so an alternate
+/// description could not carry its own rest quantity -- and the writer
+/// emitted an unsuffixed card that wcslib reads as the primary's.
+#[test]
+fn rest_quantity_honours_the_alternate_code() {
+    let cards = vec![
+        "CTYPE1  = 'RA---TAN'".to_string(),
+        "CTYPE2  = 'DEC--TAN'".to_string(),
+        "CTYPE3  = 'VOPT-F2W'".to_string(),
+        "CTYPE1A = 'RA---TAN'".to_string(),
+        "CTYPE2A = 'DEC--TAN'".to_string(),
+        "CTYPE3A = 'VOPT-F2W'".to_string(),
+        "CRVAL1  =                  0.0".to_string(),
+        "CRVAL2  =                  0.0".to_string(),
+        "CRVAL3  =                  0.0".to_string(),
+        "CRVAL1A =                  0.0".to_string(),
+        "CRVAL2A =                  0.0".to_string(),
+        "CRVAL3A =                  0.0".to_string(),
+        "CRPIX1  =                  1.0".to_string(),
+        "CRPIX2  =                  1.0".to_string(),
+        "CRPIX3  =                  1.0".to_string(),
+        "CRPIX1A =                  1.0".to_string(),
+        "CRPIX2A =                  1.0".to_string(),
+        "CRPIX3A =                  1.0".to_string(),
+        "CDELT1  =                -0.01".to_string(),
+        "CDELT2  =                 0.01".to_string(),
+        "CDELT3  =               1000.0".to_string(),
+        "CDELT1A =                -0.01".to_string(),
+        "CDELT2A =                 0.01".to_string(),
+        "CDELT3A =               1000.0".to_string(),
+        "CUNIT3  = 'm/s'".to_string(),
+        "CUNIT3A = 'm/s'".to_string(),
+        // Different lines for the two descriptions.
+        "RESTWAV =         0.2110611410".to_string(),
+        "RESTWAVA=        0.00260174200".to_string(),
+    ];
+    let primary = open_image_3d(&cards);
+    let alt = {
+        let bytes = {
+            // `open_image_3d` only reads the primary; build and read alt 'A'.
+            let mut buf = Vec::new();
+            for c in [
+                "SIMPLE  =                    T",
+                "BITPIX  =                    8",
+                "NAXIS   =                    3",
+                "NAXIS1  =                    4",
+                "NAXIS2  =                    4",
+                "NAXIS3  =                   16",
+            ] {
+                buf.extend_from_slice(&pad_card(c));
+            }
+            for c in &cards {
+                buf.extend_from_slice(&pad_card(c));
+            }
+            buf.extend_from_slice(&pad_card("END"));
+            while buf.len() % BLOCK != 0 {
+                buf.push(b' ');
+            }
+            let start = buf.len();
+            buf.extend(std::iter::repeat_n(0_u8, 4 * 4 * 16));
+            while (buf.len() - start) % BLOCK != 0 {
+                buf.push(0);
+            }
+            buf
+        };
+        let file = FitsFile::from_bytes(bytes).unwrap();
+        let Hdu::Image(img) = file.hdu(0).unwrap() else {
+            panic!("not image");
+        };
+        img.wcs('A').unwrap().expect("alt A present")
+    };
+
+    let p = primary.spectral.first().expect("primary spectral axis");
+    let a = alt.spectral.first().expect("alt spectral axis");
+    assert!(
+        (p.restwav.unwrap() - 0.211_061_141_0).abs() < 1e-15,
+        "primary took the wrong RESTWAV: {:?}",
+        p.restwav
+    );
+    assert!(
+        (a.restwav.unwrap() - 0.002_601_742_00).abs() < 1e-15,
+        "alternate ignored RESTWAVA: {:?}",
+        a.restwav
+    );
+
+    // And the writer must emit the suffixed card for the alternate.
+    let hdr = alt.to_header('A').expect("to_header");
+    assert!(hdr.first("RESTWAVA").is_some(), "RESTWAVA not written");
+    assert!(
+        hdr.first("RESTWAV").is_none(),
+        "alternate wrote an unsuffixed RESTWAV, which reads as the primary's"
+    );
+}
+
+/// An alternate that gives no rest quantity of its own falls back to
+/// the primary's, rather than failing. Sec.8.2.1 asks writers to repeat
+/// every keyword, but they routinely do not.
+#[test]
+fn alternate_without_its_own_rest_quantity_falls_back() {
+    let mut cards = spectral_cube_cards("VOPT-F2W", &["CUNIT3  = 'm/s'"]);
+    cards.push("RESTWAV =         0.2110611410".to_string());
+    cards.push("CTYPE3A = 'VOPT-F2W'".to_string());
+    cards.push("CRVAL3A =                  0.0".to_string());
+    cards.push("CRPIX3A =                  1.0".to_string());
+    cards.push("CDELT3A =               1000.0".to_string());
+    cards.push("CUNIT3A = 'm/s'".to_string());
+    assert!(wcs_3d_result(&cards).is_ok(), "primary should parse");
+}
+
+/// Sec.4.3 compound unit syntax on a real axis.
+///
+/// Regression: unrecognized `CUNIT` values fell through with a factor
+/// of 1.0, so `'km s-1'` -- a legal spelling of km/s, since a space is
+/// multiplication and `s-1` is `s**-1` -- was read as m/s. Every
+/// spelling below must give the same world value.
+#[test]
+fn compound_cunit_spellings_agree() {
+    let world = |cunit: &str| {
+        let cards = spectral_cube_cards(
+            "VOPT-F2W",
+            &[
+                &format!("CUNIT3  = '{cunit}'"),
+                "RESTWAV =         0.2110611410",
+            ],
+        );
+        let wcs = wcs_3d_result(&cards)
+            .unwrap_or_else(|e| panic!("CUNIT3='{cunit}': {e}"))
+            .expect("wcs present");
+        wcs.pixel_to_world(&[0.0, 0.0, 8.0]).unwrap()[2]
+    };
+    let reference = world("km/s");
+    for spelling in ["km s-1", "km s**-1", "km.s**(-1)", "km*s^-1", "1000 m/s"] {
+        let got = world(spelling);
+        assert!(
+            (got - reference).abs() <= reference.abs() * 1e-12,
+            "CUNIT3='{spelling}' gave {got}, but 'km/s' gives {reference}"
+        );
+    }
+    // ... and the factor is genuinely applied, not defaulted to 1:
+    // describe the *same* physical axis in m/s and the answers must
+    // agree once converted. (`world` returns values in the header's own
+    // CUNIT, so this needs matching CRVAL/CDELT, not the same numbers.)
+    let in_ms = {
+        let cards = spectral_cube_cards_at(
+            "VOPT-F2W",
+            1.0e6,
+            1.0e5,
+            &["CUNIT3  = 'm/s'", "RESTWAV =         0.2110611410"],
+        );
+        wcs_3d_result(&cards)
+            .unwrap()
+            .unwrap()
+            .pixel_to_world(&[0.0, 0.0, 8.0])
+            .unwrap()[2]
+    };
+    let in_kms = {
+        let cards = spectral_cube_cards_at(
+            "VOPT-F2W",
+            1.0e3,
+            1.0e2,
+            &["CUNIT3  = 'km/s'", "RESTWAV =         0.2110611410"],
+        );
+        wcs_3d_result(&cards)
+            .unwrap()
+            .unwrap()
+            .pixel_to_world(&[0.0, 0.0, 8.0])
+            .unwrap()[2]
+    };
+    assert!(
+        (in_kms * 1000.0 - in_ms).abs() < in_ms.abs() * 1e-12,
+        "the same axis in km/s and m/s disagree: {in_kms} km/s vs {in_ms} m/s"
+    );
+}
+
+/// A `CUNIT` of the wrong dimension is a broken header, not something
+/// to rescale. `FREQ`, `ENER` and `WAVN` all linearise through
+/// frequency but are `s^-1`, `J` and `m^-1`, and used to share one
+/// lookup table.
+#[test]
+fn cunit_of_the_wrong_dimension_is_rejected() {
+    for (ctype, bad) in [
+        ("WAVE", "Hz"),
+        ("FREQ", "m"),
+        ("ENER", "Hz"),
+        ("WAVN", "Hz"),
+        ("VELO", "m"),
+    ] {
+        let cards = spectral_cube_cards(ctype, &[&format!("CUNIT3  = '{bad}'")]);
+        let err = wcs_3d_result(&cards)
+            .err()
+            .unwrap_or_else(|| panic!("{ctype} with CUNIT3='{bad}' should be rejected"));
+        assert!(
+            err.to_string().contains("required"),
+            "{ctype}/{bad}: unexpected error: {err}"
+        );
+    }
+    // ... and the matching ones still work.
+    for (ctype, good) in [
+        ("WAVE", "nm"),
+        ("FREQ", "GHz"),
+        ("ENER", "keV"),
+        ("WAVN", "/m"),
+        ("VELO", "km/s"),
+    ] {
+        let cards = spectral_cube_cards(ctype, &[&format!("CUNIT3  = '{good}'")]);
+        assert!(
+            wcs_3d_result(&cards).is_ok(),
+            "{ctype} with CUNIT3='{good}' should parse"
+        );
+    }
+}
+
+/// A celestial axis in arcsec must be honoured, and one declaring a
+/// non-angle must be refused rather than silently treated as degrees.
+#[test]
+fn celestial_cunit_is_checked_and_applied() {
+    let cards = |cunit: &str| {
+        vec![
+            "CTYPE1  = 'RA---TAN'".to_string(),
+            "CTYPE2  = 'DEC--TAN'".to_string(),
+            "CRVAL1  =                 10.0".to_string(),
+            "CRVAL2  =                 20.0".to_string(),
+            "CRPIX1  =                  1.0".to_string(),
+            "CRPIX2  =                  1.0".to_string(),
+            "CDELT1  =                 -1.0".to_string(),
+            "CDELT2  =                  1.0".to_string(),
+            format!("CUNIT1  = '{cunit}'"),
+            format!("CUNIT2  = '{cunit}'"),
+        ]
+    };
+    // 1 arcsec/px against 1 deg/px: the same pixel must land 3600x closer.
+    let deg = open_image(&cards("deg"));
+    let asec = open_image(&cards("arcsec"));
+    let (_, d_deg) = deg.pixel_to_celestial(0.0, 10.0).unwrap();
+    let (_, d_asec) = asec.pixel_to_celestial(0.0, 10.0).unwrap();
+    let off_deg = d_deg - 20.0;
+    let off_asec = d_asec - 20.0;
+    // 10 px at 1 arcsec/px is 10/3600 deg from the reference. Compared
+    // against that directly rather than as a ratio to the degree case:
+    // TAN curvature is negligible over 3 arcsec but is 1% over 10 deg.
+    assert!(
+        (off_asec - 10.0 / 3600.0).abs() < 1e-9,
+        "arcsec CUNIT ignored: latitude offset {off_asec}"
+    );
+    assert!(
+        off_deg > 9.0,
+        "degree CUNIT should move ~10 deg, moved {off_deg}"
+    );
+    assert!(
+        try_open_image(&cards("Hz")).is_none(),
+        "a frequency is not an angle"
+    );
+    assert!(
+        try_open_image(&cards("DEG")).is_none(),
+        "case is significant"
+    );
+}
+
+/// Paper III Sec.3.3.1 fixes one associate variable per spectral type
+/// and names `ZOPT-F2V` as unrecognized, since z goes with lambda, not
+/// v. Accepting it silently reinterpreted the header as `ZOPT-F2W`.
+#[test]
+fn spectral_code_with_the_wrong_associate_is_rejected() {
+    for (ctype, cunit) in [
+        ("ZOPT-F2V", "' '"),
+        ("VRAD-F2W", "'m/s'"),
+        ("WAVE-F2V", "'m'"),
+        ("VELO-F2W", "'m/s'"),
+    ] {
+        let cards = spectral_cube_cards_at(
+            ctype,
+            0.0,
+            1.0,
+            &[
+                &format!("CUNIT3  = {cunit}"),
+                "RESTWAV =         0.2110611410",
+            ],
+        );
+        let err = wcs_3d_result(&cards)
+            .err()
+            .unwrap_or_else(|| panic!("{ctype} should be rejected"));
+        assert!(
+            err.to_string().contains("associate"),
+            "{ctype}: unexpected error: {err}"
+        );
+    }
+    // The matching combinations still parse.
+    for (ctype, crval, cunit) in [
+        ("ZOPT-F2W", 0.0, "' '"),
+        ("VRAD-W2F", 0.0, "'m/s'"),
+        ("WAVE-F2W", 5.0e-7, "'m'"),
+        ("VELO-F2V", 0.0, "'m/s'"),
+    ] {
+        let cards = spectral_cube_cards_at(
+            ctype,
+            crval,
+            1.0e-10,
+            &[
+                &format!("CUNIT3  = {cunit}"),
+                "RESTWAV =         0.2110611410",
+            ],
+        );
+        assert!(wcs_3d_result(&cards).is_ok(), "{ctype} should parse");
+    }
+}
+
+/// A parser must refuse malformed input, not abort on it.
+///
+/// Regression: `CTYPE` handling sliced at byte 4, which panics when
+/// that byte falls inside a multi-byte character. Unreachable from a
+/// file (the card reader keeps non-ASCII out) but reachable through a
+/// programmatically built `Header`.
+#[test]
+fn non_ascii_ctype_errors_instead_of_panicking() {
+    let mut h = fitsy::Header::empty();
+    h.push("NAXIS", 2_i64, None).unwrap();
+    h.push("NAXIS1", 10_i64, None).unwrap();
+    h.push("NAXIS2", 10_i64, None).unwrap();
+    // 'e' with an acute accent spans bytes 3..5, so byte 4 splits it.
+    h.push("CTYPE1", "RAB\u{e9}-TAN".to_string(), None).unwrap();
+    h.push("CTYPE2", "DEC--TAN".to_string(), None).unwrap();
+    // Must return, either way -- the point is that it does not panic.
+    let _ = fitsy::Wcs::from_header(&h, ' ');
+
+    // And the same CTYPE on the latitude axis, which reaches
+    // `projection_code` rather than `first4`.
+    let mut h = fitsy::Header::empty();
+    h.push("NAXIS", 2_i64, None).unwrap();
+    h.push("NAXIS1", 10_i64, None).unwrap();
+    h.push("NAXIS2", 10_i64, None).unwrap();
+    h.push("CTYPE1", "RA---TAN".to_string(), None).unwrap();
+    h.push("CTYPE2", "DEC\u{e9}TAN".to_string(), None).unwrap();
+    let _ = fitsy::Wcs::from_header(&h, ' ');
+}
+
+/// Paper III Sec.6.1.1's non-separable case: a celestial pair whose
+/// longitude and latitude share one `(M, K_1, K_2)` coordinate array
+/// and interpolate together.
+///
+/// Checked against wcslib rather than round-tripped -- the fixture
+/// carries wcslib's own decode in a `REFERENCE` HDU. See
+/// `tests/data/gen_tab_reference.py`.
+#[test]
+fn multi_dimensional_tab_matches_wcslib() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ref_tab_2d.fits");
+    let file = FitsFile::open(&path).unwrap();
+    let wcs = file
+        .wcs(0, ' ')
+        .expect("a celestial -TAB pair must parse")
+        .expect("wcs present");
+
+    // One group drives both axes; neither is a projection.
+    assert_eq!(wcs.tab.len(), 1, "the two axes share one table");
+    assert_eq!(wcs.tab[0].rank(), 2, "M = 2");
+    assert_eq!(wcs.tab[0].axes, vec![0, 1], "PVi_3 places the axes");
+    assert_eq!(wcs.tab[0].dims, vec![5, 4], "K_1, K_2 from TDIM");
+    assert!(wcs.celestial.is_none(), "a -TAB pair carries no projection");
+    assert!(wcs.is_celestial(), "but it is still a celestial pair");
+    assert_eq!(wcs.celestial_axes(), Some((0, 1)));
+
+    // Reference values recorded by wcslib.
+    let Hdu::Image(refhdu) = file.hdu_by_name("REFERENCE", None).unwrap() else {
+        panic!("no REFERENCE hdu");
+    };
+    let h = refhdu.header();
+    let get = |k: &str| -> Vec<f64> {
+        h.entries()
+            .iter()
+            .filter(|e| e.keyword == k)
+            .filter_map(|e| match e.value.as_ref()? {
+                fitsy::header::value::Value::Real(r) => Some(*r),
+                fitsy::header::value::Value::Integer(i) => Some(*i as f64),
+                _ => None,
+            })
+            .collect()
+    };
+    let (px, py, wlon, wlat) = (get("PIXX"), get("PIXY"), get("WLON"), get("WLAT"));
+    assert!(px.len() >= 7, "reference points missing");
+
+    for i in 0..px.len() {
+        let got = wcs.pixel_to_world(&[px[i], py[i]]).unwrap();
+        assert!(
+            (got[0] - wlon[i]).abs() < 1e-10 && (got[1] - wlat[i]).abs() < 1e-10,
+            "pixel ({}, {}): got {got:?}, wcslib [{}, {}]",
+            px[i],
+            py[i],
+            wlon[i],
+            wlat[i],
+        );
+        // And the inverse recovers the pixel wcslib started from. The
+        // map is non-separable, so this is a genuine 2-D solve.
+        let back = wcs.world_to_pixel(&[wlon[i], wlat[i]]).unwrap();
+        assert!(
+            (back[0] - px[i]).abs() < 1e-8 && (back[1] - py[i]).abs() < 1e-8,
+            "inverse of ({}, {}) gave {back:?}",
+            wlon[i],
+            wlat[i],
+        );
+        // The celestial convenience wrappers go through the same path.
+        let (ra, dec) = wcs.pixel_to_celestial(px[i], py[i]).unwrap();
+        assert!((ra - wlon[i]).abs() < 1e-10 && (dec - wlat[i]).abs() < 1e-10);
+    }
+}
+
+/// A celestial pair with only one `-TAB` member has no defined
+/// transform: the tabular side needs the shared coordinate array, the
+/// projected side needs its partner in the spherical rotation, and
+/// Paper III Sec.6.1.1 declares unmet `-TAB` group conditions
+/// undefined. wcslib rejects the same header as "unmatched celestial
+/// axes".
+///
+/// Regression: the pair parsed with no `CelestialBlock`, so the
+/// projected axis ran the bare linear pipeline -- coordinates with no
+/// projection applied, silently.
+#[test]
+fn mixed_tab_celestial_pair_is_rejected() {
+    for (lon, lat) in [("RA---TAB", "DEC--TAN"), ("RA---TAN", "DEC--TAB")] {
+        let mut h = fitsy::Header::empty();
+        h.push("NAXIS", 2_i64, None).unwrap();
+        h.push("NAXIS1", 5_i64, None).unwrap();
+        h.push("NAXIS2", 5_i64, None).unwrap();
+        h.push("CTYPE1", lon.to_string(), None).unwrap();
+        h.push("CTYPE2", lat.to_string(), None).unwrap();
+        h.push("CRVAL1", 1.0_f64, None).unwrap();
+        h.push("CRVAL2", 30.0_f64, None).unwrap();
+        // Pointer cards for whichever axis is tabular, so the header
+        // is complete apart from the mismatch itself.
+        let tab_axis = if lon.ends_with("TAB") { 1 } else { 2 };
+        h.push(format!("PS{tab_axis}_0"), "WCS-TAB".to_string(), None)
+            .unwrap();
+        h.push(format!("PS{tab_axis}_1"), "COORDS".to_string(), None)
+            .unwrap();
+        let err = fitsy::Wcs::from_header(&h, ' ')
+            .err()
+            .unwrap_or_else(|| panic!("{lon}/{lat} must be rejected"));
+        assert!(
+            err.to_string().contains("both axes or neither"),
+            "{lon}/{lat}: unexpected error: {err}"
+        );
+    }
+}
+
+/// The coordinates are genuinely coupled: moving one pixel axis must
+/// change *both* world coordinates. A pair of independent 1-D tables
+/// could not reproduce this, so it pins the multilinear blend.
+#[test]
+fn multi_dimensional_tab_is_non_separable() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ref_tab_2d.fits");
+    let file = FitsFile::open(&path).unwrap();
+    let wcs = file.wcs(0, ' ').unwrap().unwrap();
+
+    let a = wcs.pixel_to_world(&[2.0, 0.0]).unwrap();
+    let b = wcs.pixel_to_world(&[2.0, 3.0]).unwrap();
+    assert!(
+        (a[0] - b[0]).abs() > 1e-6,
+        "longitude ignores the second axis"
+    );
+    let c = wcs.pixel_to_world(&[0.0, 2.0]).unwrap();
+    let d = wcs.pixel_to_world(&[4.0, 2.0]).unwrap();
+    assert!(
+        (c[1] - d[1]).abs() > 1e-6,
+        "latitude ignores the first axis"
+    );
+}
+
+/// Standard Sec.9.5.3: an image time axis *is* the linear transform,
+/// so the numbers must not change -- what the parser adds is the
+/// axis's identity. wcslib draws the same line, classifying the axis
+/// (`axis_types` 4000) while still returning elapsed time.
+#[test]
+fn time_axis_is_recognized_without_changing_the_transform() {
+    let cards = |ctype3: &str, extra: &[&str]| {
+        let mut v = spectral_cube_cards_at(ctype3, 100.0, 30.0, &["CUNIT3  = 's'"]);
+        v.extend(extra.iter().map(|s| (*s).to_string()));
+        v
+    };
+    let wcs = open_image_3d(&cards(
+        "TIME",
+        &["TIMESYS = 'TT'", "MJDREF  =              57754."],
+    ));
+    let time = wcs.time.as_ref().expect("CTYPE3 = 'TIME' is a time axis");
+    assert_eq!(time.axis, 2);
+    assert_eq!(time.scale, "TT", "CTYPE 'TIME' defers to TIMESYS");
+    assert!(wcs.is_celestial(), "the celestial pair is untouched");
+
+    // Elapsed time, exactly as before: CRVAL3 + n * CDELT3. This is
+    // also what wcslib returns -- it does not fold in MJDREF either.
+    for (px, want) in [(0.0, 100.0), (1.0, 130.0), (5.0, 250.0)] {
+        let got = wcs.pixel_to_world(&[0.0, 0.0, px]).unwrap()[2];
+        assert!((got - want).abs() < 1e-9, "pixel {px}: {got} != {want}");
+    }
+
+    // Sec.9.2.1: the axis may name its own scale, overriding TIMESYS.
+    let wcs = open_image_3d(&cards("TDB", &["TIMESYS = 'UTC'"]));
+    assert_eq!(wcs.time.as_ref().unwrap().scale, "TDB");
+
+    // A realization is kept but does not change the scale.
+    let wcs = open_image_3d(&cards("TT(TAI)", &[]));
+    let t = wcs.time.as_ref().unwrap();
+    assert_eq!(
+        (t.scale.as_str(), t.realization.as_deref()),
+        ("TT", Some("TAI"))
+    );
+
+    // TIMESYS itself defaults to UTC (Sec.9.2.1).
+    let wcs = open_image_3d(&cards("TIME", &[]));
+    assert_eq!(wcs.time.as_ref().unwrap().scale, "UTC");
+
+    // And a non-time axis is not mistaken for one.
+    let wcs = open_image_3d(&spectral_cube_cards_at(
+        "FREQ",
+        6.0e14,
+        -1.0e11,
+        &["CUNIT3  = 'Hz'"],
+    ));
+    assert!(wcs.time.is_none());
+}
+
+/// The Sec.9 metadata wcslib keeps on `wcsprm`, surfaced and
+/// round-tripped through `to_header`.
+#[test]
+fn time_reference_frame_keywords_are_surfaced_and_round_trip() {
+    let mut cards = spectral_cube_cards_at("TIME", 0.0, 1.0, &["CUNIT3  = 's'"]);
+    cards.extend(
+        [
+            "TIMESYS = 'TT'",
+            "TREFPOS = 'BARYCENTER'",
+            "TREFDIR = 'RA_NOM,DEC_NOM'",
+            "PLEPHEM = 'DE430'",
+            "CZPHS3  =                 12.5",
+            "CPERI3  =                 0.25",
+            "CRDER3  =                1.E-3",
+            "CSYER3  =                5.E-3",
+        ]
+        .iter()
+        .map(|s| (*s).to_string()),
+    );
+    let wcs = open_image_3d(&cards);
+    let t = wcs.time.clone().expect("time axis");
+    assert_eq!(t.trefpos.as_deref(), Some("BARYCENTER"));
+    assert_eq!(t.trefdir.as_deref(), Some("RA_NOM,DEC_NOM"));
+    assert_eq!(t.plephem.as_deref(), Some("DE430"));
+    // CZPHS/CPERI describe a phase axis (Sec.9.6); on this TIME axis
+    // they describe nothing and are dropped.
+    assert!(wcs.phase.is_empty());
+    // The error pair is per-axis metadata legal on any axis (Sec.8.2).
+    assert_eq!(wcs.axes()[2].crder, Some(1e-3));
+    assert_eq!(wcs.axes()[2].csyer, Some(5e-3));
+    // Absent on the other axes rather than defaulted to zero.
+    assert_eq!(wcs.axes()[0].crder, None);
+
+    let header = wcs.to_header(' ').expect("to_header");
+    let again = fitsy::Wcs::from_header(&header, ' ').unwrap().unwrap();
+    assert_eq!(again.time, wcs.time);
+    assert_eq!(again.axes(), wcs.axes());
+    assert_eq!(again.time.as_ref().map(|t| t.scale.as_str()), Some("TT"));
+}
+
+/// Sec.9.2.1: a CTYPE naming a Table 29 scale overrides `TIMESYS` and
+/// never involves it. `to_header` must not copy that scale into a
+/// `TIMESYS` card the source never had -- `TIMESYS` governs the scale
+/// of the header's *other* time keywords (`DATE-OBS`, `MJD-OBS`),
+/// which would silently be reinterpreted on the axis's scale.
+#[test]
+fn ctype_scale_override_does_not_invent_a_timesys_card() {
+    let cards = spectral_cube_cards_at("TDB", 0.0, 1.0, &["CUNIT3  = 's'"]);
+    let wcs = open_image_3d(&cards);
+    assert_eq!(wcs.time.as_ref().map(|t| t.scale.as_str()), Some("TDB"));
+
+    let header = wcs.to_header(' ').expect("to_header");
+    assert!(
+        header.first("TIMESYS").is_none(),
+        "no TIMESYS in the source header, none may be invented"
+    );
+    // The scale still round-trips, carried by CTYPE itself.
+    let again = fitsy::Wcs::from_header(&header, ' ').unwrap().unwrap();
+    assert_eq!(again.time, wcs.time);
+}
+
+/// A `'PHASE'` axis (Sec.9.6) carries its zero point and period; the
+/// pair round-trips, and a time axis alongside keeps its own trio.
+#[test]
+fn phase_axis_carries_czphs_and_cperi() {
+    let mut cards = spectral_cube_cards_at("PHASE", 0.0, 0.01, &["CUNIT3  = 's'"]);
+    cards.extend(
+        [
+            "CZPHS3  =                 12.5",
+            "CPERI3  =                 0.25",
+        ]
+        .iter()
+        .map(|s| (*s).to_string()),
+    );
+    let wcs = open_image_3d(&cards);
+    assert!(wcs.time.is_none(), "PHASE is not a time axis");
+    assert_eq!(wcs.phase.len(), 1);
+    let p = &wcs.phase[0];
+    assert_eq!((p.axis, p.czphs, p.cperi), (2, Some(12.5), Some(0.25)));
+
+    let header = wcs.to_header(' ').expect("to_header");
+    let again = fitsy::Wcs::from_header(&header, ' ').unwrap().unwrap();
+    assert_eq!(again.phase, wcs.phase);
+}
+
+/// Which `CTYPE` values count as a time axis, checked against wcslib.
+///
+/// The expectations below are wcslib's own (`WCS.wcs.axis_types[0] ==
+/// 4000`), sampled across Table 29 plus the neighbouring axis types.
+/// Two entries deliberately disagree, both places where Sec.9.2.1 is
+/// more permissive than wcslib -- see the second half of the test.
+#[test]
+fn time_axis_classification_matches_wcslib() {
+    let agreed: &[(&str, bool)] = &[
+        ("TIME", true),
+        ("TAI", true),
+        ("TT", true),
+        ("TDT", true),
+        ("ET", true),
+        ("IAT", true),
+        ("UT1", true),
+        ("UTC", true),
+        ("GMT", true),
+        ("GPS", true),
+        ("TCG", true),
+        ("TCB", true),
+        ("TDB", true),
+        ("LOCAL", true),
+        ("PHASE", false),
+        ("TIMELAG", false),
+        ("FREQUENCY", false),
+        ("FREQ", false),
+        ("STOKES", false),
+        ("DETX", false),
+        ("RA---TAN", false),
+    ];
+    for &(ctype, want) in agreed {
+        let got = fitsy::wcs::TimeAxis::recognize(0, ctype, "UTC").is_some();
+        assert_eq!(got, want, "CTYPE = {ctype:?}");
+    }
+
+    // Sec.9.2.1 says a CTYPE "may also assume the value TIME
+    // (case-insensitive)". wcslib matches only upper case; fitsy
+    // follows the standard.
+    assert!(fitsy::wcs::TimeAxis::recognize(0, "time", "TT").is_some());
+
+    // Sec.9.2.1 also permits a realization in parentheses on the
+    // Table 29 values -- "TT(TAI), TT(BIPM08), UTC(NIST)". wcslib does
+    // not classify those as time axes; fitsy does, and keeps the
+    // realization. Harmless either way for the coordinates, since
+    // Sec.9.5.3 makes the transform linear regardless.
+    for ctype in ["TT(TAI)", "UTC(NIST)", "UT(NIST)"] {
+        assert!(
+            fitsy::wcs::TimeAxis::recognize(0, ctype, "UTC").is_some(),
+            "{ctype} is a Table 29 value with a realization"
+        );
+    }
+}
+
+/// The per-axis fields of a `Wcs` used to be public parallel vectors,
+/// and truncating any of them desynchronised the description: four of
+/// five mutations panicked the transform or the serializer, and `naxis`
+/// was a second source of truth alongside `linear.naxis()`.
+///
+/// They are private now, so this pins the replacement surface instead:
+/// the count is *derived*, and the indexed readers are total.
+#[test]
+fn per_axis_reads_are_total_and_the_axis_count_is_derived() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CUNIT1  = 'deg'".into(),
+        "CRVAL1  =                 10.0".into(),
+        "CRVAL2  =                 20.0".into(),
+        "CRPIX1  =                 50.0".into(),
+        "CRPIX2  =                 50.0".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+    ];
+    let wcs = open_image(&cards);
+
+    // Derived, so it cannot disagree with the per-axis data or with
+    // the linear transform.
+    assert_eq!(wcs.naxis(), 2);
+    assert_eq!(wcs.naxis(), wcs.axes().len());
+    assert_eq!(wcs.naxis(), wcs.linear.naxis());
+    assert_eq!(wcs.crval().len(), wcs.naxis());
+
+    assert_eq!(wcs.ctype(0), "RA---TAN");
+    assert_eq!(wcs.ctype(1), "DEC--TAN");
+    assert_eq!(wcs.cunit(0), "deg");
+    // An absent CUNIT reads the same as an out-of-range axis: blank.
+    assert_eq!(wcs.cunit(1), "");
+    assert_eq!(wcs.crval(), &[10.0, 20.0]);
+
+    // Past the end is empty, not a panic.
+    assert_eq!(wcs.ctype(99), "");
+    assert_eq!(wcs.cunit(99), "");
+    assert!(wcs.axis(99).is_none());
+    assert!(wcs.axis(1).is_some());
+}
+
+/// `Wcs::new` range-checks the axis indices the per-axis-type structs
+/// carry, because each one is used to index a `naxis`-long slice.
+///
+/// Reachable from a header: `WCSAXES` sets the axis count, so a
+/// `-TAB` pointer on a higher axis number names an axis that does not
+/// exist. It used to be accepted and panic in the transform.
+#[test]
+fn out_of_range_axis_indices_are_refused() {
+    let mut h = fitsy::Header::empty();
+    h.push("NAXIS", 3_i64, None).unwrap();
+    for i in 1..=3 {
+        h.push(format!("NAXIS{i}"), 4_i64, None).unwrap();
+    }
+    // Two WCS axes declared, but a -TAB pointer on axis 3.
+    h.push("WCSAXES", 2_i64, None).unwrap();
+    h.push("CTYPE1", "RA---TAN".to_string(), None).unwrap();
+    h.push("CTYPE2", "DEC--TAN".to_string(), None).unwrap();
+    h.push("CTYPE3", "WAVE-TAB".to_string(), None).unwrap();
+    h.push("PS3_0", "WCS-TAB".to_string(), None).unwrap();
+    h.push("PS3_1", "COORDS".to_string(), None).unwrap();
+    // Whatever the parser makes of it, it must not build a `Wcs` whose
+    // -TAB spec points past the axis list.
+    if let Ok(Some(w)) = fitsy::Wcs::from_header(&h, ' ') {
+        for s in &w.tab_specs {
+            assert!(
+                s.axis < w.naxis(),
+                "-TAB spec names axis {} of a {}-axis WCS",
+                s.axis + 1,
+                w.naxis()
+            );
+        }
+    }
 }

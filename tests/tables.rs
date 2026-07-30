@@ -438,11 +438,21 @@ fn bintable_negative_pcount_rejected() {
     assert!(res.is_err(), "expected error, got Ok");
 }
 
+/// Standard Sec.7.2.4: the ASCII-table `TNULLn` is "the character
+/// string that represents an undefined value for field n", with no
+/// restriction on the field's type -- the integer-only rule belongs to
+/// the *binary* table form in Sec.7.3.4. And Sec.7.2.5 gives a blank
+/// numeric field the value zero, which makes `TNULLn` the only marker
+/// an ASCII table has for an undefined value.
+///
+/// Regression: `TNULLn` was ignored on `F`/`E`/`D` columns and a blank
+/// numeric field was reported undefined, so a genuine zero and a
+/// missing value were indistinguishable and a `TNULLn` sentinel on a
+/// real column was silently dropped.
 #[test]
-fn ascii_table_tnull_only_for_integer_columns() {
-    // I-column with TNULL="****", F-column with all blanks -> None.
+fn ascii_table_tnull_applies_to_any_numeric_column() {
     let row_size: usize = 12;
-    let n_rows: usize = 2;
+    let n_rows: usize = 3;
     let header_cards = [
         "XTENSION= 'TABLE   '",
         "BITPIX  =                    8",
@@ -457,6 +467,7 @@ fn ascii_table_tnull_only_for_integer_columns() {
         "TNULL1  = '****    '",
         "TFORM2  = 'F8.2    '",
         "TBCOL2  =                    5",
+        "TNULL2  = 'NULL    '",
         "END",
     ];
     let mut buf = empty_primary();
@@ -464,10 +475,12 @@ fn ascii_table_tnull_only_for_integer_columns() {
         buf.extend_from_slice(&pad_card(c));
     }
     pad_to_block(&mut buf, b' ');
-    // Row 0: I=" 123", F="   42.50"
-    // Row 1: I="****", F="        " (all blanks -> undefined for F)
+    // Row 0: I=" 123", F="   42.50"  -- ordinary values.
+    // Row 1: I="****", F="NULL    "  -- both TNULL sentinels.
+    // Row 2: I="    ", F="        "  -- blank, which Sec.7.2.5 reads as 0.
     buf.extend_from_slice(b" 123   42.50");
-    buf.extend_from_slice(b"****        ");
+    buf.extend_from_slice(b"****NULL    ");
+    buf.extend_from_slice(b"            ");
     pad_to_block(&mut buf, b' ');
 
     let f = FitsFile::from_bytes(buf).unwrap();
@@ -476,12 +489,82 @@ fn ascii_table_tnull_only_for_integer_columns() {
     };
     let icol = &t.columns()[0].clone();
     let fcol = &t.columns()[1].clone();
-    assert!(icol.tnull.is_some(), "TNULL must apply to I-format");
-    assert!(fcol.tnull.is_none(), "TNULL must NOT apply to F-format");
-    assert_eq!(t.cell_value(0, icol).unwrap(), Some(AsciiCell::Int(123)),);
-    assert_eq!(t.cell_value(1, icol).unwrap(), None, "TNULL match -> None");
-    assert_eq!(t.cell_value(0, fcol).unwrap(), Some(AsciiCell::Float(42.5)),);
-    assert_eq!(t.cell_value(1, fcol).unwrap(), None, "all blanks -> None");
+    assert!(icol.tnull.is_some(), "TNULL applies to I-format");
+    assert!(fcol.tnull.is_some(), "TNULL also applies to F-format");
+
+    assert_eq!(t.cell_value(0, icol).unwrap(), Some(AsciiCell::Int(123)));
+    assert_eq!(t.cell_value(0, fcol).unwrap(), Some(AsciiCell::Float(42.5)));
+
+    assert_eq!(t.cell_value(1, icol).unwrap(), None, "TNULL1 match");
+    assert_eq!(t.cell_value(1, fcol).unwrap(), None, "TNULL2 match");
+
+    assert_eq!(
+        t.cell_value(2, icol).unwrap(),
+        Some(AsciiCell::Int(0)),
+        "Sec.7.2.5: a blank integer field has value 0"
+    );
+    assert_eq!(
+        t.cell_value(2, fcol).unwrap(),
+        Some(AsciiCell::Float(0.0)),
+        "Sec.7.2.5: a blank real field has value zero"
+    );
+}
+
+/// Sec.7.2.5 "Real fields" rules 2 and 3(a), end to end: the implicit
+/// decimal point taken from `TFORMn`'s `d`, and an exponent introduced
+/// by a bare sign.
+#[test]
+fn ascii_table_reads_implicit_point_and_bare_sign_exponent() {
+    let row_size: usize = 20;
+    let n_rows: usize = 3;
+    let header_cards = [
+        "XTENSION= 'TABLE   '",
+        "BITPIX  =                    8",
+        "NAXIS   =                    2",
+        &format!("NAXIS1  = {row_size:>20}"),
+        &format!("NAXIS2  = {n_rows:>20}"),
+        "PCOUNT  =                    0",
+        "GCOUNT  =                    1",
+        "TFIELDS =                    2",
+        "TFORM1  = 'F10.3   '",
+        "TBCOL1  =                    1",
+        "TFORM2  = 'E10.3   '",
+        "TBCOL2  =                   11",
+        "END",
+    ];
+    let mut buf = empty_primary();
+    for c in &header_cards {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    pad_to_block(&mut buf, b' ');
+    // No explicit point: the point precedes the rightmost d=3 digits.
+    buf.extend_from_slice(b"     12345  1.234+05");
+    // An explicit point overrides d; a `D` exponent is equivalent to `E`.
+    buf.extend_from_slice(b"    12.345 1.234D+05");
+    // Leading zeros assumed when the digit string is shorter than d.
+    buf.extend_from_slice(b"        12  1.234E05");
+    pad_to_block(&mut buf, b' ');
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::AsciiTable(t) = f.hdu(1).unwrap() else {
+        panic!("expected ASCII table");
+    };
+    let fcol = &t.columns()[0].clone();
+    let ecol = &t.columns()[1].clone();
+
+    let real = |row: usize, col: &fitsy::AsciiColumn| match t.cell_value(row, col).unwrap() {
+        Some(AsciiCell::Float(v)) => v,
+        other => panic!("row {row}: {other:?}"),
+    };
+    assert!((real(0, fcol) - 12.345).abs() < 1e-12, "implicit point");
+    assert!((real(1, fcol) - 12.345).abs() < 1e-12, "explicit point");
+    assert!((real(2, fcol) - 0.012).abs() < 1e-12, "leading zeros");
+    assert!((real(0, ecol) - 1.234e5).abs() < 1e-6, "bare-sign exponent");
+    assert!((real(1, ecol) - 1.234e5).abs() < 1e-6, "D exponent");
+    assert!(
+        (real(2, ecol) - 1.234e5).abs() < 1e-6,
+        "unsigned E exponent"
+    );
 }
 
 #[test]

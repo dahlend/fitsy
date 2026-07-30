@@ -3,7 +3,9 @@
 /// Scaling parameters for an image.
 #[derive(Debug, Clone, Copy)]
 pub struct Scaling {
+    /// `BZERO`, the additive offset. Defaults to 0.0.
     pub bzero: f64,
+    /// `BSCALE`, the multiplicative factor. Defaults to 1.0.
     pub bscale: f64,
     /// Integer-image blank sentinel. `None` for floating-point images,
     /// where IEEE NaN serves as the undefined value.
@@ -25,6 +27,11 @@ impl Scaling {
         self.bzero + self.bscale * (raw as f64)
     }
 
+    /// Apply `physical = BZERO + BSCALE * raw` to a float pixel.
+    ///
+    /// There is no `BLANK` check: Sec.4.4.2.4 restricts the keyword to
+    /// integer images, and an undefined float is already a NaN, which
+    /// propagates through the arithmetic.
     #[inline]
     #[must_use]
     pub fn apply_real(&self, raw: f64) -> f64 {

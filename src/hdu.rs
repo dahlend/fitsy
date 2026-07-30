@@ -19,4 +19,4 @@ pub use builder::{AsciiColumnData, AsciiTableBuilder, BinTableBuilder, ImageBuil
 pub use file::FitsFile;
 pub use image::{ImageHdu, ImagePixels};
 pub use kind::{ConformingHdu, Hdu};
-pub use random_groups::RandomGroupsHdu;
+pub use random_groups::{GroupParameter, RandomGroupsHdu};

@@ -62,6 +62,8 @@ fn conic_inverse_xy(x: f64, y: f64, y0: f64, c: f64, theta_a: f64) -> (f64, f64)
 #[derive(Debug, Clone, Copy)]
 pub struct Cop(ConicBase);
 impl Cop {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() < 1e-12 {
@@ -87,7 +89,21 @@ impl Projection for Cop {
     fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let ta = self.0.theta_a * D2R;
         let er = self.0.eta * D2R;
-        let r = R2D * er.cos() * (1.0 / ta.tan() - ((theta - self.0.theta_a) * D2R).tan());
+        // The `tan(theta - theta_a)` of Paper II eq. (27) diverges at
+        // `|theta - theta_a| = 90`, and past it the projection folds
+        // back over itself: two latitudes share one radius, and the
+        // inverse cannot tell them apart. Returning a plane coordinate
+        // there is a confidently wrong answer, so refuse -- `wcslib`
+        // reports the same points as invalid.
+        let dtheta = theta - self.0.theta_a;
+        if dtheta.abs() >= 90.0 {
+            return Err(FitsError::Wcs(format!(
+                "COP: theta = {theta} is {dtheta} deg from theta_a = {}; the \
+                 projection is defined only for |theta - theta_a| < 90",
+                self.0.theta_a,
+            )));
+        }
+        let r = R2D * er.cos() * (1.0 / ta.tan() - (dtheta * D2R).tan());
         let a = self.c() * phi * D2R;
         Ok((r * a.sin(), -r * a.cos() + self.y0()))
     }
@@ -104,6 +120,8 @@ impl Projection for Cop {
 #[derive(Debug, Clone, Copy)]
 pub struct Coe(ConicBase);
 impl Coe {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() < 1e-12 {
@@ -164,6 +182,8 @@ impl Projection for Coe {
 #[derive(Debug, Clone, Copy)]
 pub struct Cod(ConicBase);
 impl Cod {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() < 1e-12 {
@@ -216,6 +236,8 @@ impl Projection for Cod {
 #[derive(Debug, Clone, Copy)]
 pub struct Coo(ConicBase);
 impl Coo {
+    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
+    /// zero-filled where a card is absent.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() >= 90.0 - 1e-12 {
@@ -272,5 +294,75 @@ impl Projection for Coo {
             return Err(FitsError::Wcs("COO: R/psi < 0".into()));
         }
         Ok((phi, 90.0 - 2.0 * ratio.powf(1.0 / self.c()).atan() * R2D))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `COP` is a perspective projection onto a cone, so its radius
+    /// carries a `tan(theta - theta_a)` that diverges at 90 deg from
+    /// the standard parallel and folds back beyond it.
+    ///
+    /// Regression: the forward evaluated the tangent regardless, so a
+    /// latitude past the divergence produced a plane coordinate whose
+    /// inverse named a different latitude -- a wrong answer with no
+    /// error. `wcslib` reports those points as invalid.
+    #[test]
+    fn cop_refuses_beyond_the_divergence() {
+        let cop = Cop::from_pv(&[0.0, 45.0, 25.0]).unwrap();
+        assert!(cop.s2x(0.0, 45.0).is_ok(), "the standard parallel");
+        assert!(cop.s2x(0.0, 90.0).is_ok(), "the pole is 45 deg away");
+        assert!(cop.s2x(0.0, -44.0).is_ok(), "just inside");
+        assert!(cop.s2x(0.0, -45.0).is_err(), "exactly at the divergence");
+        assert!(cop.s2x(0.0, -88.0).is_err(), "well past it");
+        // A negative standard parallel moves the window with it.
+        let south = Cop::from_pv(&[0.0, -45.0, 25.0]).unwrap();
+        assert!(south.s2x(0.0, -88.0).is_ok());
+        assert!(south.s2x(0.0, 46.0).is_err());
+    }
+
+    /// Every conic must invert whatever its forward accepts.
+    #[test]
+    fn conic_projections_round_trip() {
+        let cases: Vec<(&str, Box<dyn Projection>)> = vec![
+            ("COP", Box::new(Cop::from_pv(&[0.0, 45.0, 25.0]).unwrap())),
+            ("COE", Box::new(Coe::from_pv(&[0.0, 45.0, 25.0]).unwrap())),
+            ("COD", Box::new(Cod::from_pv(&[0.0, 45.0, 25.0]).unwrap())),
+            ("COO", Box::new(Coo::from_pv(&[0.0, 45.0, 25.0]).unwrap())),
+            ("COP-", Box::new(Cop::from_pv(&[0.0, -60.0, 15.0]).unwrap())),
+            ("COE-", Box::new(Coe::from_pv(&[0.0, -60.0, 15.0]).unwrap())),
+        ];
+        for (name, p) in &cases {
+            let mut checked = 0_usize;
+            let mut theta = -88.0_f64;
+            while theta <= 88.0 {
+                let mut phi = -179.0_f64;
+                while phi <= 179.0 {
+                    if let Ok((x, y)) = p.s2x(phi, theta)
+                        && x.is_finite()
+                        && y.is_finite()
+                    {
+                        let (p2, t2) = p.x2s(x, y).unwrap_or_else(|e| {
+                            panic!("{name}: x2s failed after s2x accepted ({phi}, {theta}): {e}")
+                        });
+                        assert!(
+                            (t2 - theta).abs() < 1e-9,
+                            "{name}: theta {theta} -> {t2} at phi {phi}"
+                        );
+                        let dphi = ((p2 - phi + 540.0).rem_euclid(360.0)) - 180.0;
+                        assert!(
+                            dphi.abs() < 1e-9,
+                            "{name}: phi {phi} -> {p2} at theta {theta}"
+                        );
+                        checked += 1;
+                    }
+                    phi += 7.0;
+                }
+                theta += 4.0;
+            }
+            assert!(checked > 100, "{name}: only {checked} points accepted");
+        }
     }
 }

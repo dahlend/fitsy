@@ -93,7 +93,7 @@ impl FitsAppender {
     /// the file.
     ///
     /// If anything was appended the file is truncated to the end of
-    /// the last HDU, so no fragment of the old tail survives. If
+    /// the last HDU, so no fragment of the previous tail survives. If
     /// nothing was, the file is left untouched.
     pub fn finish(self) -> Result<usize> {
         let n = self.inner.hdu_count();

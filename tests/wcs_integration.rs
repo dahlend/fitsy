@@ -42,12 +42,19 @@ fn build_minimal_image_with_wcs(cards: &[String]) -> Vec<u8> {
 }
 
 fn open_image(cards: &[String]) -> fitsy::Wcs {
+    open_image_with_header(cards).1
+}
+
+/// [`open_image`] keeping the parsed `Header` too, for tests about the
+/// interpreted-vs-preserved layering.
+fn open_image_with_header(cards: &[String]) -> (fitsy::header::Header, fitsy::Wcs) {
     let bytes = build_minimal_image_with_wcs(cards);
     let file = FitsFile::from_bytes(bytes).unwrap();
     let Hdu::Image(img) = file.hdu(0).unwrap() else {
         panic!("not image");
     };
-    img.wcs(' ').unwrap().expect("wcs present")
+    let wcs = img.wcs(' ').unwrap().expect("wcs present");
+    (img.header().clone(), wcs)
 }
 
 fn near(a: f64, b: f64, tol: f64) -> bool {
@@ -911,10 +918,13 @@ fn wcsname_is_surfaced() {
     assert_eq!(wcs.wcsname.as_deref(), Some("IDC distortion-corrected"));
 }
 
-/// `SPECSYS`, `SSYSOBS`, `VELOSYS` (Paper III Sec.7) are surfaced
-/// verbatim on the parsed `Wcs`.
+/// `SPECSYS`, `SSYSOBS`, `VELOSYS` (Paper III Sec.7) on a header with
+/// no spectral axis are dropped from the interpreted `Wcs`: they
+/// describe spectral coordinates the description does not have. The
+/// `Header` remains the preservation layer -- the cards are still
+/// there, untouched.
 #[test]
-fn spectral_reference_frame_keywords_surfaced() {
+fn spectral_frame_without_a_spectral_axis_stays_in_the_header_only() {
     let cards: Vec<String> = vec![
         "CTYPE1  = 'RA---TAN'".into(),
         "CTYPE2  = 'DEC--TAN'".into(),
@@ -928,10 +938,12 @@ fn spectral_reference_frame_keywords_surfaced() {
         "SSYSOBS = 'TOPOCENT'".into(),
         "VELOSYS =              12345.0".into(),
     ];
-    let wcs = open_image(&cards);
-    assert_eq!(wcs.specsys.as_deref(), Some("BARYCENT"));
-    assert_eq!(wcs.ssysobs.as_deref(), Some("TOPOCENT"));
-    assert_eq!(wcs.velosys, Some(12345.0));
+    let (header, wcs) = open_image_with_header(&cards);
+    assert!(wcs.spectral_frame.is_none());
+    // The layering contract: dropped from the interpretation, kept in
+    // the preservation layer.
+    assert_eq!(header.optional_string("SPECSYS"), Some("BARYCENT"));
+    assert_eq!(header.optional_real("VELOSYS"), Some(12345.0));
 }
 
 /// `WCSAXES` may differ from `NAXIS` (Paper I Sec.2.1): the WCS engine
@@ -958,7 +970,7 @@ fn wcsaxes_overrides_naxis() {
         "CUNIT3  = 'Hz'".into(),
     ];
     let wcs = open_image(&cards);
-    assert_eq!(wcs.naxis, 3);
+    assert_eq!(wcs.naxis(), 3);
     assert!(wcs.celestial.is_some(), "celestial pair (axes 1,2) found");
     assert_eq!(wcs.spectral.len(), 1, "FREQ axis recognized");
     assert_eq!(wcs.spectral[0].axis, 2);

@@ -28,10 +28,18 @@
 use crate::error::{FitsError, Result};
 
 /// Linear transform `x = M (p - crpix)` with both forward and inverse.
+///
+/// Owns the linear stage's per-axis data -- `CRPIX`, `CRVAL`, and the
+/// combined matrix -- so they cannot fall out of step with `naxis`.
+// `CRVAL` is held as data, not folded into the transform: the spectral
+// and celestial stages need the CRVAL-free intermediate coordinate, and
+// only plain linear axes add it back.
 #[derive(Debug, Clone)]
 pub struct LinearTransform {
     naxis: usize,
     crpix: Vec<f64>,
+    /// `CRVALi`, in `CUNITi`. One per axis.
+    crval: Vec<f64>,
     /// Combined linear matrix in row-major order, `naxis x naxis`.
     /// PC form: `m[i][j] = cdelt[i] * pc[i][j]`. CD form: `m[i][j] = cd[i][j]`.
     matrix: Vec<f64>,
@@ -45,11 +53,17 @@ impl LinearTransform {
         clippy::needless_pass_by_value,
         reason = "cdelt and pc are part of the public API; changing to &[f64] would be a breaking change"
     )]
-    pub fn from_pc(crpix: Vec<f64>, cdelt: Vec<f64>, pc: Vec<f64>) -> Result<Self> {
+    pub fn from_pc(
+        crpix: Vec<f64>,
+        crval: Vec<f64>,
+        cdelt: Vec<f64>,
+        pc: Vec<f64>,
+    ) -> Result<Self> {
         let n = crpix.len();
-        if cdelt.len() != n || pc.len() != n * n {
+        if cdelt.len() != n || pc.len() != n * n || crval.len() != n {
             return Err(FitsError::Wcs(format!(
-                "PC dimensions inconsistent: crpix={n}, cdelt={}, pc={}",
+                "PC dimensions inconsistent: crpix={n}, crval={}, cdelt={}, pc={}",
+                crval.len(),
                 cdelt.len(),
                 pc.len()
             )));
@@ -60,19 +74,20 @@ impl LinearTransform {
                 m[i * n + j] = cdelt[i] * pc[i * n + j];
             }
         }
-        Self::from_matrix(crpix, m)
+        Self::from_matrix(crpix, crval, m)
     }
 
-    /// Build from CRPIX and CD matrix (row-major).
-    pub fn from_cd(crpix: Vec<f64>, cd: Vec<f64>) -> Result<Self> {
+    /// Build from CRPIX, CRVAL and CD matrix (row-major).
+    pub fn from_cd(crpix: Vec<f64>, crval: Vec<f64>, cd: Vec<f64>) -> Result<Self> {
         let n = crpix.len();
-        if cd.len() != n * n {
+        if cd.len() != n * n || crval.len() != n {
             return Err(FitsError::Wcs(format!(
-                "CD dimensions inconsistent: crpix={n}, cd={}",
+                "CD dimensions inconsistent: crpix={n}, crval={}, cd={}",
+                crval.len(),
                 cd.len()
             )));
         }
-        Self::from_matrix(crpix, cd)
+        Self::from_matrix(crpix, crval, cd)
     }
 
     /// Legacy `CROTAi` (Sec.8.2, deprecated). Builds the equivalent
@@ -88,6 +103,7 @@ impl LinearTransform {
     /// rotated pair need not be axes 1 and 2, nor the image 2-D.
     pub fn from_crota(
         crpix: Vec<f64>,
+        crval: Vec<f64>,
         cdelt: Vec<f64>,
         crota_deg: f64,
         lon: usize,
@@ -125,23 +141,37 @@ impl LinearTransform {
         pc[lon * n + lat] = -lam * rho.sin();
         pc[lat * n + lon] = rho.sin() / lam;
         pc[lat * n + lat] = rho.cos();
-        Self::from_pc(crpix, cdelt, pc)
+        Self::from_pc(crpix, crval, cdelt, pc)
     }
 
-    fn from_matrix(crpix: Vec<f64>, matrix: Vec<f64>) -> Result<Self> {
+    fn from_matrix(crpix: Vec<f64>, crval: Vec<f64>, matrix: Vec<f64>) -> Result<Self> {
         let n = crpix.len();
+        if crval.len() != n {
+            return Err(FitsError::Wcs(format!(
+                "linear transform: crpix has {n} entries but crval has {}",
+                crval.len()
+            )));
+        }
         let inverse = invert_matrix(&matrix, n)?;
         Ok(Self {
             naxis: n,
             crpix,
+            crval,
             matrix,
             inverse,
         })
     }
 
+    /// Number of axes this transform covers.
     #[must_use]
     pub fn naxis(&self) -> usize {
         self.naxis
+    }
+
+    /// `CRVALi` for every axis, in `CUNITi`.
+    #[must_use]
+    pub fn crval(&self) -> &[f64] {
+        &self.crval
     }
 
     /// Forward: `x = M (p - crpix)`. `pix` is **1-based** (FITS
@@ -287,7 +317,9 @@ impl LinearTransform {
                 new_crpix[i] += a_inv[i * n + j] * diff[j];
             }
         }
-        Self::from_matrix(new_crpix, new_m)
+        // `CRVAL` is a world value: the reference pixel moves, the
+        // coordinate it names does not.
+        Self::from_matrix(new_crpix, self.crval.clone(), new_m)
     }
 }
 
@@ -371,8 +403,13 @@ mod tests {
 
     #[test]
     fn identity_pc_round_trip() {
-        let lt = LinearTransform::from_pc(vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0, 0.0, 0.0, 1.0])
-            .unwrap();
+        let lt = LinearTransform::from_pc(
+            vec![1.0, 1.0],
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
         let p = vec![3.5, 7.25];
         let x = lt.pix_to_intermediate(&p).unwrap();
         let q = lt.intermediate_to_pix(&x).unwrap();
@@ -384,8 +421,12 @@ mod tests {
     #[test]
     fn cd_matrix_round_trip() {
         // CD = [[0.001, 0], [0, 0.001]]
-        let lt =
-            LinearTransform::from_cd(vec![100.0, 200.0], vec![0.001, 0.0, 0.0, 0.001]).unwrap();
+        let lt = LinearTransform::from_cd(
+            vec![100.0, 200.0],
+            vec![0.0, 0.0],
+            vec![0.001, 0.0, 0.0, 0.001],
+        )
+        .unwrap();
         let x = lt.pix_to_intermediate(&[150.0, 250.0]).unwrap();
         assert!((x[0] - 0.05).abs() < 1e-12);
         assert!((x[1] - 0.05).abs() < 1e-12);
@@ -397,7 +438,9 @@ mod tests {
     #[test]
     fn crota_equivalent_to_pc() {
         // CROTA2 = 30deg; check (1,0) pixel offset rotates correctly.
-        let lt = LinearTransform::from_crota(vec![1.0, 1.0], vec![1.0, 1.0], 30.0, 0, 1).unwrap();
+        let lt =
+            LinearTransform::from_crota(vec![1.0, 1.0], vec![0.0, 0.0], vec![1.0, 1.0], 30.0, 0, 1)
+                .unwrap();
         let x = lt.pix_to_intermediate(&[2.0, 1.0]).unwrap();
         let c = (30_f64).to_radians().cos();
         let s = (30_f64).to_radians().sin();
@@ -409,8 +452,15 @@ mod tests {
     /// plane still rotates.
     #[test]
     fn crota_rotates_only_the_celestial_pair_in_a_cube() {
-        let lt = LinearTransform::from_crota(vec![1.0, 1.0, 1.0], vec![1.0, 1.0, 7.0], 30.0, 0, 1)
-            .unwrap();
+        let lt = LinearTransform::from_crota(
+            vec![1.0, 1.0, 1.0],
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 1.0, 7.0],
+            30.0,
+            0,
+            1,
+        )
+        .unwrap();
         let x = lt.pix_to_intermediate(&[2.0, 1.0, 2.0]).unwrap();
         let c = (30_f64).to_radians().cos();
         let s = (30_f64).to_radians().sin();
@@ -425,21 +475,22 @@ mod tests {
     #[test]
     fn crota_with_zero_cdelt_rejected() {
         for cdelt in [vec![0.0, 1.0], vec![1.0, 0.0]] {
-            let r = LinearTransform::from_crota(vec![1.0, 1.0], cdelt, 30.0, 0, 1);
+            let r = LinearTransform::from_crota(vec![1.0, 1.0], vec![0.0, 0.0], cdelt, 30.0, 0, 1);
             assert!(r.is_err(), "zero CDELT accepted");
         }
     }
 
     #[test]
     fn singular_matrix_rejected() {
-        let r = LinearTransform::from_cd(vec![0.0, 0.0], vec![1.0, 2.0, 2.0, 4.0]);
+        let r = LinearTransform::from_cd(vec![0.0, 0.0], vec![0.0, 0.0], vec![1.0, 2.0, 2.0, 4.0]);
         assert!(r.is_err());
     }
 
     #[test]
     fn non_finite_matrix_rejected() {
         for bad in [f64::NAN, f64::INFINITY] {
-            let r = LinearTransform::from_cd(vec![0.0, 0.0], vec![1.0, 0.0, bad, 1.0]);
+            let r =
+                LinearTransform::from_cd(vec![0.0, 0.0], vec![0.0, 0.0], vec![1.0, 0.0, bad, 1.0]);
             assert!(r.is_err(), "non-finite element {bad} accepted");
         }
     }

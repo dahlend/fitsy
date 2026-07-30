@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
+use crate::units::{dimensions, factor_to};
 use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation, RadeSys};
 use crate::wcs::celestial_block::{CelestialBlock, CelestialPair};
@@ -14,31 +15,26 @@ use crate::wcs::dss::Dss;
 use crate::wcs::linear::LinearTransform;
 use crate::wcs::projection::{self, Projection, ProjectionKind};
 use crate::wcs::sip::{Sip, SipPoly};
-use crate::wcs::spectral::{SpectralAlgorithm, SpectralAxis, SpectralKind};
+use crate::wcs::spectral::{
+    Grism, SourceFrame, SpectralAlgorithm, SpectralAxis, SpectralFrame, SpectralKind,
+};
 use crate::wcs::tab::TabSpec;
+use crate::wcs::time::{PhaseAxis, TimeAxis, is_phase_ctype};
 use crate::wcs::tnx::Tnx;
 use crate::wcs::tpv::{Tpv, TpvAxis};
 use crate::wcs::wat;
+use crate::wcs::{Axis, WcsParts};
 
 impl Wcs {
     /// Parse the WCS for alternate `alt` (use `' '` for the primary).
     /// Returns `Ok(None)` if the header carries no recognizable WCS
     /// for that alternate.
     pub fn from_header(header: &Header, alt: char) -> Result<Option<Self>> {
-        if !alt.is_ascii() {
-            return Err(FitsError::Header(format!(
-                "WCS alt must be an ASCII character (got {alt:?})"
-            )));
-        }
+        let alt_suffix = crate::wcs::alt_suffix(alt)?;
         let header_naxis = header.naxis()?;
         if header_naxis == 0 {
             return Ok(None);
         }
-        let alt_suffix: String = if alt == ' ' {
-            String::new()
-        } else {
-            alt.to_string()
-        };
 
         // WCSAXES (Standard Sec.8.2): may declare more (or fewer) WCS
         // axes than NAXIS. When present it overrides NAXIS for the
@@ -110,20 +106,27 @@ impl Wcs {
             ));
         }
         let linear = if let Some(cd) = cd {
-            LinearTransform::from_cd(crpix.clone(), cd)?
+            LinearTransform::from_cd(crpix.clone(), crval.clone(), cd)?
         } else if let Some(pc) = pc {
-            LinearTransform::from_pc(crpix.clone(), cdelt.clone(), pc)?
+            LinearTransform::from_pc(crpix.clone(), crval.clone(), cdelt.clone(), pc)?
         } else if let Some((crota, lon, lat)) =
             read_crota(header, &alt_suffix, celestial_pair, naxis)
         {
-            LinearTransform::from_crota(crpix.clone(), cdelt.clone(), crota, lon, lat)?
+            LinearTransform::from_crota(
+                crpix.clone(),
+                crval.clone(),
+                cdelt.clone(),
+                crota,
+                lon,
+                lat,
+            )?
         } else {
             // Identity PC with CDELT scaling.
             let mut id = vec![0.0; naxis * naxis];
             for i in 0..naxis {
                 id[i * naxis + i] = 1.0;
             }
-            LinearTransform::from_pc(crpix.clone(), cdelt.clone(), id)?
+            LinearTransform::from_pc(crpix.clone(), crval.clone(), cdelt.clone(), id)?
         };
 
         // IRAF subimage convention (`LTVn`, `LTMi_j`): the WCS refers
@@ -143,24 +146,53 @@ impl Wcs {
         // piece (projection, rotation, optional SIP, optional TPV) as
         // a single `CelestialBlock` so the type system enforces the
         // all-or-nothing rule (Paper II Sec.2).
-        let celestial = if let Some(pair) = celestial_pair {
+        // A celestial `-TAB` pair carries no projection at all: its
+        // longitude and latitude come straight from a shared
+        // coordinate array (Paper III Sec.6.1.1). There is no
+        // `CelestialBlock` to build -- `build_celestial_block` would
+        // reach the projection lookup and report `TAB` as an unknown
+        // projection code -- so the pair is recorded on its own and the
+        // `-TAB` machinery supplies the coordinates.
+        //
+        // Either both members are `-TAB` or neither: half a pair has
+        // no defined transform -- the tabular side needs the shared
+        // array, the projected side needs its partner in the spherical
+        // rotation -- and Paper III Sec.6.1.1 declares unmet `-TAB`
+        // group conditions undefined. `wcslib` rejects the same header
+        // as "unmatched celestial axes"; transforming it anyway put
+        // the projected axis on the bare linear pipeline, a wrong
+        // answer disguised as a right one.
+        let celestial_is_tabular = match celestial_pair {
+            Some(p) => {
+                let lon_tab = is_tab_ctype(&ctype[p.lon]);
+                let lat_tab = is_tab_ctype(&ctype[p.lat]);
+                if lon_tab != lat_tab {
+                    return Err(FitsError::Wcs(format!(
+                        "CTYPE{}{alt_suffix} = `{}` / CTYPE{}{alt_suffix} = `{}`: a \
+                         celestial pair must be -TAB on both axes or neither \
+                         (Paper III Sec.6.1.1)",
+                        p.lon + 1,
+                        ctype[p.lon],
+                        p.lat + 1,
+                        ctype[p.lat],
+                    )));
+                }
+                lon_tab && lat_tab
+            }
+            None => false,
+        };
+        let celestial = if let Some(pair) = celestial_pair.filter(|_| !celestial_is_tabular) {
             Some(build_celestial_block(
                 header,
                 &alt_suffix,
                 pair,
                 &ctype,
                 &crval,
+                &cunit,
             )?)
         } else {
             None
         };
-
-        // `Wcs::crval` keeps the as-parsed value on every axis. The
-        // pipeline reads celestial and spectral axes from their own
-        // structs instead, but callers -- `to_header`, the Python
-        // bindings -- still need the real reference value here, and
-        // `fit_celestial_wcs` never zeroes it either.
-        let crval_for_struct = crval.clone();
 
         // Frame metadata (Paper II Sec.3.1).
         // EPOCH is a legacy alias for EQUINOX.
@@ -177,15 +209,88 @@ impl Wcs {
             || RadeSys::default_for_equinox(equinox),
             RadeSys::from_keyword,
         );
+        // Retention gates (see the module-level layering note in
+        // `wcs`): EQUINOX had to be *read* above because Sec.8.3
+        // resolves the frame from it when RADESYS is absent, but it is
+        // *kept* only where it means something -- a celestial pair
+        // exists, and the resolved frame is not one that defines the
+        // equinox away (Paper II Sec.3.1: "not applicable to ICRS or
+        // GAPPT"). An unrecognized frame keeps it: dropping data
+        // because the RADESYS string was not understood would be
+        // strictness against ourselves, not the header.
+        let equinox = equinox.filter(|_| {
+            celestial_pair.is_some() && !matches!(radesys, RadeSys::Icrs | RadeSys::Gappt)
+        });
+        let radesys = if celestial_pair.is_some() {
+            radesys
+        } else {
+            RadeSys::default()
+        };
         let mjd_obs = header.mjd_obs_utc();
 
+        // Time axis (Sec.9.5.3). Sec.9.2.1 lets a CTYPE name its own
+        // scale, otherwise it defers to TIMESYS, which defaults to UTC.
+        // Purely descriptive -- the axis stays on the linear pipeline,
+        // which is what Sec.9.5.3 defines its transform to be.
+        let timesys = header.time_sys();
+        let mut time = ctype
+            .iter()
+            .enumerate()
+            .find_map(|(i, ct)| TimeAxis::recognize(i, ct, &timesys));
+        // The time reference frame trio (Sec.9.2.3-9.2.5) rides on the
+        // axis: with no time axis there is no time for it to locate,
+        // so the keywords stay in the source `Header` only.
+        if let Some(t) = time.as_mut() {
+            t.trefpos = read_optional_string(header, "TREFPOS");
+            t.trefdir = read_optional_string(header, "TREFDIR");
+            t.plephem = read_optional_string(header, "PLEPHEM");
+        }
+        // Phase axes (Sec.9.6): `CZPHSia`/`CPERIia` describe the zero
+        // point and period of a `'PHASE'` axis and are retained on no
+        // other kind.
+        let phase: Vec<PhaseAxis> = ctype
+            .iter()
+            .enumerate()
+            .filter(|(_, ct)| is_phase_ctype(ct))
+            .map(|(i, _)| PhaseAxis {
+                axis: i,
+                czphs: read_optional_real(header, &format!("CZPHS{}{alt_suffix}", i + 1)),
+                cperi: read_optional_real(header, &format!("CPERI{}{alt_suffix}", i + 1)),
+            })
+            .collect();
         // WCSNAME (Standard Sec.8.2.6): free-form name for this alternate.
         let wcsname = read_optional_string(header, &format!("WCSNAME{alt_suffix}"));
-        // Spectral reference frame keywords (Paper III Sec.7). Stored
-        // verbatim -- we do not currently transform between frames.
-        let specsys = read_optional_string(header, &format!("SPECSYS{alt_suffix}"));
-        let ssysobs = read_optional_string(header, &format!("SSYSOBS{alt_suffix}"));
-        let velosys = read_optional_real(header, &format!("VELOSYS{alt_suffix}"));
+        // Spectral reference frames (Paper III Sec.7, Standard
+        // Sec.8.4.3). Stored, not applied -- and retained only when
+        // there is a spectral axis for them to describe. The gate is
+        // the CTYPE *type* code, so a bare linear `FREQ` and a
+        // `WAVE-TAB` count even though `parse_spectral_ctype` routes
+        // both elsewhere: the frame applies to them equally.
+        let has_spectral_ctype = ctype
+            .iter()
+            .any(|ct| SpectralKind::from_code(first4(ct.trim())).is_some());
+        let spectral_frame = has_spectral_ctype
+            .then(|| {
+                // ZSOURCE is the parent of its trio: SSYSSRC names the
+                // frame the redshift is expressed in and VELANGL
+                // orients the velocity vector, so neither is retained
+                // without it (Sec.8.4.3).
+                let source =
+                    read_optional_real(header, &format!("ZSOURCE{alt_suffix}")).map(|zsource| {
+                        SourceFrame {
+                            zsource,
+                            ssyssrc: read_optional_string(header, &format!("SSYSSRC{alt_suffix}")),
+                            velangl: read_optional_real(header, &format!("VELANGL{alt_suffix}")),
+                        }
+                    });
+                SpectralFrame {
+                    specsys: read_optional_string(header, &format!("SPECSYS{alt_suffix}")),
+                    ssysobs: read_optional_string(header, &format!("SSYSOBS{alt_suffix}")),
+                    velosys: read_optional_real(header, &format!("VELOSYS{alt_suffix}")),
+                    source,
+                }
+            })
+            .filter(|f| *f != SpectralFrame::default());
 
         // DSS plate solution (non-standard): only meaningful for the
         // primary alternate. When present it replaces the standard
@@ -196,11 +301,27 @@ impl Wcs {
             None
         };
 
-        // Spectral axes (Paper III). RESTFRQ/RESTWAV are global to
-        // the HDU (no per-alternate variant in the standard).
-        let restfrq = read_optional_real(header, "RESTFRQ")
+        // Spectral axes (Paper III). `RESTFRQ` and `RESTWAV` take the
+        // alternate code like any other WCS keyword -- Table 22 marks
+        // both with the suffix, and its footnote 4 spells out that the
+        // 7-character forms "can include an alternate version code
+        // letter at the end". Without this an alternate description
+        // could not carry its own rest quantity, which is exactly the
+        // frequency-alongside-wavelength case Sec.8.2.1 exists for.
+        //
+        // Falling back to the unsuffixed keyword is leniency: Sec.8.2.1
+        // says an alternate must repeat every coordinate keyword, but
+        // writers routinely give `RESTFRQ` once and add alternates
+        // around it, and the primary's value is the only sensible
+        // reading of such a header.
+        //
+        // `RESTFREQ` is the deprecated 8-character spelling, so it has
+        // no room for a suffix and is global by construction.
+        let restfrq = read_optional_real(header, &format!("RESTFRQ{alt_suffix}"))
+            .or_else(|| read_optional_real(header, "RESTFRQ"))
             .or_else(|| read_optional_real(header, "RESTFREQ"));
-        let restwav = read_optional_real(header, "RESTWAV");
+        let restwav = read_optional_real(header, &format!("RESTWAV{alt_suffix}"))
+            .or_else(|| read_optional_real(header, "RESTWAV"));
         let mut spectral: Vec<SpectralAxis> = Vec::new();
         for (i, ct) in ctype.iter().enumerate() {
             if let Some(c) = celestial.as_ref()
@@ -208,10 +329,38 @@ impl Wcs {
             {
                 continue;
             }
-            let Some((kind, algo)) = parse_spectral_ctype(ct) else {
-                continue;
+            let (kind, algo) = match parse_spectral_ctype(ct) {
+                SpectralCtype::Recognized(kind, algo) => (kind, algo),
+                SpectralCtype::NotSpectral => continue,
+                // Falling through to the linear pipeline here would
+                // hand back `CRVAL + x` for an axis the standard says
+                // is non-linear -- a confidently wrong coordinate, off
+                // by orders of magnitude, with no way for the caller
+                // to notice. Refuse instead.
+                SpectralCtype::Unsupported(code) => {
+                    return Err(FitsError::Wcs(format!(
+                        "CTYPE{}{alt_suffix} = `{ct}`: `{code}` is not a spectral algorithm \
+                         code (Standard Sec.8.4 Table 26)",
+                        i + 1,
+                    )));
+                }
+                SpectralCtype::WrongAssociate { code, expected } => {
+                    return Err(FitsError::Wcs(format!(
+                        "CTYPE{}{alt_suffix} = `{ct}`: algorithm `{code}` names associate \
+                         variable `{}`, but this type is associated with `{expected}` \
+                         (Paper III Sec.3.3.1)",
+                        i + 1,
+                        &code[2..],
+                    )));
+                }
             };
-            let sx = SpectralAxis::new(i, kind, algo, crval[i], &cunit[i], restfrq, restwav)?;
+            // Grism dispersers take their parameters from `PVk_m` on
+            // the *spectral* axis (Paper III Table 7). Every other
+            // algorithm leaves `PVk_m` unused.
+            let grism = matches!(algo, Some(SpectralAlgorithm::Grism { .. }))
+                .then(|| read_grism(header, &alt_suffix, i));
+            let sx =
+                SpectralAxis::new(i, kind, algo, crval[i], &cunit[i], restfrq, restwav, grism)?;
             spectral.push(sx);
         }
 
@@ -226,17 +375,6 @@ impl Wcs {
             if !is_tab_ctype(ct) {
                 continue;
             }
-            // -TAB on a celestial axis would require the full
-            // multi-D algorithm (the longitude/latitude pair shares
-            // a 2-D coordinate array). Reject rather than silently
-            // doing the wrong thing.
-            if let Some(c) = celestial.as_ref()
-                && (i == c.pair.lon || i == c.pair.lat)
-            {
-                return Err(FitsError::Wcs(
-                    "celestial -TAB axes (multi-dimensional lookup) are not supported".into(),
-                ));
-            }
             tab_specs.push(read_tab_spec(header, &alt_suffix, i)?);
             // Unlike the celestial and spectral axes above, the
             // pipeline really does read `crval` for a -TAB axis: the
@@ -245,30 +383,52 @@ impl Wcs {
             // (Paper III Sec.6).
         }
 
-        Ok(Some(Self {
-            naxis,
+        // Built last: every `ctype` / `cunit` read above still needs the
+        // flat vectors, so they are consumed into the per-axis records
+        // only once nothing else wants them. The Sec.8.2 Table 22
+        // per-axis keywords (name, coordinate error pair -- the latter
+        // the per-axis override of TIMSYER/TIMRDER per Sec.9.4.3) are
+        // picked up in the same pass.
+        let axes: Vec<Axis> = ctype
+            .into_iter()
+            .zip(cunit)
+            .enumerate()
+            .map(|(k, (ctype, cunit))| {
+                let i = k + 1;
+                Axis {
+                    ctype,
+                    cunit,
+                    cname: read_optional_string(header, &format!("CNAME{i}{alt_suffix}")),
+                    crder: read_optional_real(header, &format!("CRDER{i}{alt_suffix}")),
+                    csyer: read_optional_real(header, &format!("CSYER{i}{alt_suffix}")),
+                }
+            })
+            .collect();
+
+        Ok(Some(Self::new(
+            axes,
             linear,
-            ctype,
-            cunit,
-            crval: crval_for_struct,
-            celestial,
-            spectral,
-            radesys,
-            equinox,
-            mjd_obs,
-            wcsname,
-            specsys,
-            ssysobs,
-            velosys,
-            dss,
-            tab_specs,
-            tab: Vec::new(),
-            // Snapshot of the image extent, purely for callers; the
-            // pipeline above never consults it. `axes()` yields the
-            // NAXISn cards, so this is `None` only for a header that
-            // has none (NAXIS = 0 is rejected earlier).
-            pixel_shape: header.axes().ok().filter(|a| !a.is_empty()),
-        }))
+            WcsParts {
+                celestial_pair,
+                time,
+                phase,
+                celestial,
+                spectral,
+                spectral_frame,
+                radesys,
+                equinox,
+                mjd_obs,
+                wcsname,
+                dss,
+                tab_specs,
+                tab: Vec::new(),
+                // Snapshot of the image extent, purely for callers; the
+                // pipeline above never consults it. `axes()` yields the
+                // NAXISn cards, so this is `None` only for a header
+                // that has none (NAXIS = 0 is rejected earlier).
+                pixel_shape: header.axes().ok().filter(|a| !a.is_empty()),
+            },
+        )?))
     }
 }
 
@@ -282,6 +442,7 @@ fn build_celestial_block(
     pair: CelestialPair,
     ctype: &[String],
     crval: &[f64],
+    cunit: &[String],
 ) -> Result<CelestialBlock> {
     let lat_ctype = &ctype[pair.lat];
     let lon_ctype = &ctype[pair.lon];
@@ -305,15 +466,17 @@ fn build_celestial_block(
     } else {
         (ProjectionKind::from_code(proj_code)?, false, false, false)
     };
-    // Collect PV2_m. TPV needs up to PV2_39; standard projections
-    // only consume PV2_0..PV2_19.
-    let pv_count = if is_tpv { 40 } else { 20 };
+    // Collect PV2_m. Sec.8.2 puts `m` in the range 0..=99; ZPN is the
+    // projection that reaches highest, with a polynomial in
+    // `PV2_0..PV2_20`. Collecting only 20 silently dropped its top
+    // term. TPV reuses the same slot for its own 0..=39.
+    let pv_count = if is_tpv { 40 } else { PV_MAX + 1 };
     let pv2 = collect_pv(header, pair.lat + 1, alt_suffix, pv_count);
     let projection: Arc<dyn Projection> = if is_tpv || is_tnx {
         // TAN takes no PV parameters.
         projection::build(kind, &[])?
     } else {
-        projection::build(kind, &pv2[..pv_count.min(20)])?
+        projection::build(kind, &pv2)?
     };
     // Sec.8.2 puts four parameters on the *longitude* axis: `PVi_1`
     // and `PVi_2` are the fiducial point, `PVi_3`/`PVi_4` spell
@@ -377,6 +540,18 @@ fn build_celestial_block(
     } else {
         None
     };
+    // Sec.8.1 requires degrees on a celestial axis, but headers do
+    // carry `arcsec` and `rad`, so the declared CUNIT has to be
+    // converted -- and checked, since a non-angle here is a broken
+    // header rather than something to rescale. Resolved once, not on
+    // every transformed point.
+    let to_deg = |axis: usize| {
+        factor_to(
+            cunit.get(axis).map_or("", String::as_str),
+            dimensions::ANGLE,
+        )
+    };
+    let cunit_to_deg = (to_deg(pair.lon)?, to_deg(pair.lat)?);
     Ok(CelestialBlock {
         pair,
         projection,
@@ -384,6 +559,7 @@ fn build_celestial_block(
         sip,
         tpv,
         tnx,
+        cunit_to_deg,
         fiducial_offset,
     })
 }
@@ -532,6 +708,11 @@ fn read_matrix(header: &Header, name: &str, alt: &str, n: usize) -> Result<Optio
     Ok(if any { Some(m) } else { None })
 }
 
+/// Highest `PVi_m` index any projection in Paper II consumes: ZPN's
+/// polynomial runs `PV2_0..PV2_20`. Sec.8.2 permits `m` up to 99, but
+/// no registered projection uses more than this.
+const PV_MAX: usize = 20;
+
 fn collect_pv(header: &Header, axis: usize, alt: &str, count: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(count);
     for m in 0..count {
@@ -673,8 +854,20 @@ fn identify_celestial_pair(ctype: &[String]) -> Option<CelestialPair> {
     None
 }
 
+/// The leading 4 characters, for matching a CTYPE against the
+/// celestial axis prefixes.
+///
+/// `get`, not slicing: a CTYPE whose fourth byte falls inside a
+/// multi-byte character would otherwise panic. The card reader keeps
+/// non-ASCII out of a value read from a file, but a `Header` built
+/// programmatically can hold anything, and a parser should refuse
+/// input rather than abort on it.
 fn first4(s: &str) -> &str {
-    if s.len() < 4 { s } else { &s[..4] }
+    if s.len() < 4 {
+        s
+    } else {
+        s.get(..4).unwrap_or(s)
+    }
 }
 
 fn projection_code(ctype: &str) -> Result<&str> {
@@ -683,8 +876,13 @@ fn projection_code(ctype: &str) -> Result<&str> {
             "CTYPE `{ctype}` is shorter than 8 chars; cannot extract projection code"
         )));
     }
-    // Chars 5-8 are `-CCC` where `CCC` is the projection code.
-    let tail = &ctype[4..8];
+    // Chars 5-8 are `-CCC` where `CCC` is the projection code. `get`
+    // rather than slicing, for the same reason as `first4`.
+    let Some(tail) = ctype.get(4..8) else {
+        return Err(FitsError::Wcs(format!(
+            "CTYPE `{ctype}` is not ASCII; cannot extract a projection code"
+        )));
+    };
     if !tail.starts_with('-') {
         return Err(FitsError::Wcs(format!(
             "CTYPE `{ctype}` missing `-` separator before projection code"
@@ -693,37 +891,108 @@ fn projection_code(ctype: &str) -> Result<&str> {
     Ok(&tail[1..])
 }
 
-/// Parse a spectral CTYPE per Paper III Sec.3.3. Returns
-/// `Some((kind, algorithm))` if the leading 4 chars match a spectral
-/// code, with the optional 3-char algorithm parsed from chars 6-8.
-fn parse_spectral_ctype(ctype: &str) -> Option<(SpectralKind, Option<SpectralAlgorithm>)> {
-    let ct = ctype.trim();
-    if ct.len() < 4 {
-        return None;
+/// Read the grism disperser parameters `PV<k>_0..PV<k>_6` for
+/// zero-based spectral axis `axis` (Paper III Sec.5.1.3 Table 7).
+///
+/// Absent keywords take the table's defaults, which are all zero
+/// except `n_r = 1` -- so this cannot use [`collect_pv`], which
+/// zero-fills. Units are fixed by the table (SI, angles in degrees)
+/// and are deliberately independent of `CUNIT`.
+fn read_grism(header: &Header, alt_suffix: &str, axis: usize) -> Grism {
+    let k = axis + 1;
+    let pv = |m: u32, default: f64| {
+        read_optional_real(header, &format!("PV{k}_{m}{alt_suffix}")).unwrap_or(default)
+    };
+    let d = Grism::default();
+    Grism {
+        density: pv(0, d.density),
+        order: pv(1, d.order),
+        alpha: pv(2, d.alpha),
+        n_r: pv(3, d.n_r),
+        n_r_prime: pv(4, d.n_r_prime),
+        epsilon: pv(5, d.epsilon),
+        theta: pv(6, d.theta),
     }
-    let head = &ct[..4];
-    let kind = SpectralKind::from_code(head)?;
+}
+
+/// Outcome of matching a `CTYPE` against Paper III Sec.3.3.
+enum SpectralCtype {
+    /// Not a spectral axis; leave it to the linear pipeline.
+    NotSpectral,
+    /// Recognized. `None` algorithm means linear in pixel.
+    Recognized(SpectralKind, Option<SpectralAlgorithm>),
+    /// A spectral type code carrying an algorithm code that is not in
+    /// Table 26. Carries the code for the diagnostic.
+    Unsupported(String),
+    /// A Table 26 code whose associate variable disagrees with the
+    /// type's (Paper III Sec.3.3.1).
+    WrongAssociate { code: String, expected: char },
+}
+
+/// Parse a spectral CTYPE per Paper III Sec.3.3: the leading 4 chars
+/// are the coordinate type and chars 6-8 an optional algorithm code.
+///
+/// Algorithm codes shorter than three characters are blank-padded
+/// (Standard Sec.8.2), and string values lose trailing blanks, so the
+/// code is matched after trimming rather than at a fixed width.
+///
+/// `-TAB` reports [`SpectralCtype::NotSpectral`]: those axes are
+/// driven by [`crate::wcs::tab`], not by the algorithms here.
+fn parse_spectral_ctype(ctype: &str) -> SpectralCtype {
+    let ct = ctype.trim();
+    // `get`, not slicing: a non-ASCII CTYPE would otherwise panic on a
+    // char boundary rather than being reported as non-spectral.
+    let (Some(head), Some(rest)) = (ct.get(..4), ct.get(4..)) else {
+        return SpectralCtype::NotSpectral;
+    };
+    let Some(kind) = SpectralKind::from_code(head) else {
+        return SpectralCtype::NotSpectral;
+    };
     // Linear: bare 4-char code, optionally padded with spaces or
     // trailing dashes.
-    if ct.len() <= 4 || ct[4..].chars().all(|c| c == ' ' || c == '-') {
-        return Some((kind, None));
+    let tail = rest.trim_end();
+    if tail.is_empty() || tail.chars().all(|c| c == '-') {
+        return SpectralCtype::Recognized(kind, None);
     }
-    // Non-linear: chars 5..8 should be "-XXX".
-    if ct.len() < 8 {
-        return None;
+    // Non-linear: the remainder is `-XXX`.
+    let Some(code) = tail.strip_prefix('-') else {
+        return SpectralCtype::NotSpectral;
+    };
+    let code = code.trim();
+    if code.eq_ignore_ascii_case("TAB") {
+        return SpectralCtype::NotSpectral;
     }
-    let tail = &ct[4..8];
-    if !tail.starts_with('-') {
-        return None;
+    match SpectralAlgorithm::from_code(code) {
+        Some(algo) => {
+            // Paper III Sec.3.3.1: in an `X2P` code the third letter is
+            // the type's *associate variable*, which the type already
+            // determines. A mismatch is not a different transform, it
+            // is a code the paper says does not exist -- `ZOPT-F2V` is
+            // its own example, since z goes with lambda, not v.
+            if let Some(p) = code
+                .as_bytes()
+                .get(2)
+                .map(|b| b.to_ascii_uppercase() as char)
+                && matches!(algo, SpectralAlgorithm::Linear(_))
+                && p != kind.associate_letter()
+            {
+                return SpectralCtype::WrongAssociate {
+                    code: code.to_ascii_uppercase(),
+                    expected: kind.associate_letter(),
+                };
+            }
+            SpectralCtype::Recognized(kind, Some(algo))
+        }
+        None => SpectralCtype::Unsupported(code.to_ascii_uppercase()),
     }
-    let algo = SpectralAlgorithm::from_code(&tail[1..])?;
-    Some((kind, Some(algo)))
 }
 
 /// True iff `ctype` ends in the `-TAB` algorithm code.
 fn is_tab_ctype(ctype: &str) -> bool {
     let ct = ctype.trim();
-    ct.len() >= 8 && ct[4..8].eq_ignore_ascii_case("-TAB")
+    // `get`, not slicing: see `first4`.
+    ct.get(4..8)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case("-TAB"))
 }
 
 /// Parse the `PSi_*<a>` / `PVi_*<a>` keywords describing a `-TAB`
@@ -762,6 +1031,11 @@ fn read_tab_spec(header: &Header, alt_suffix: &str, axis: usize) -> Result<TabSp
         Some(Value::Real(r)) => *r as i64,
         _ => 1,
     };
+    let extlevel = match header.first(&format!("PV{i}_2{alt_suffix}")) {
+        Some(Value::Integer(v)) => *v,
+        Some(Value::Real(r)) => *r as i64,
+        _ => 1,
+    };
     let coord_axis = match header.first(&format!("PV{i}_3{alt_suffix}")) {
         Some(Value::Integer(v)) if *v > 0 => *v as u32,
         Some(Value::Real(r)) if *r > 0.0 => *r as u32,
@@ -773,6 +1047,7 @@ fn read_tab_spec(header: &Header, alt_suffix: &str, axis: usize) -> Result<TabSp
         coord_column,
         index_column,
         extver,
+        extlevel,
         coord_axis,
     })
 }

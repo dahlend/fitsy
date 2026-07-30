@@ -560,6 +560,7 @@ impl FitsFile {
     }
 
     #[must_use]
+    /// True when the file holds no HDUs.
     pub fn is_empty(&self) -> bool {
         self.hdu_spans.is_empty()
     }
@@ -864,6 +865,72 @@ impl FitsFile {
         Ok(Some(wcs))
     }
 
+    /// Parse the pixel-list WCS of binary-table HDU `i` (Standard
+    /// Sec.8.2, Table 22): the `TCTYPn`/`TCRVLn`/... form that
+    /// georeferences scalar coordinate columns, as every high-energy
+    /// event list does.
+    ///
+    /// `Ok(None)` when the table carries no pixel-list keyword for
+    /// `alt`; an error when the HDU is not a binary table.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use fitsy::FitsFile;
+    ///
+    /// let f = FitsFile::open("acis_evt2.fits")?;
+    /// if let Some(t) = f.pixel_list_wcs(1, ' ')? {
+    ///     // `colax` names the columns that feed each axis.
+    ///     println!("sky columns {:?}", t.colax);
+    ///     let sky = t.wcs.pixel_to_world(&[4096.0, 4096.0])?;
+    ///     println!("{sky:?}");
+    /// }
+    /// # Ok::<(), fitsy::FitsError>(())
+    /// ```
+    pub fn pixel_list_wcs(&self, i: usize, alt: char) -> Result<Option<crate::wcs::TableWcs>> {
+        let header = self.bintable_header(i)?;
+        let Some(mut t) = crate::wcs::TableWcs::from_pixel_list(&header, alt)? else {
+            return Ok(None);
+        };
+        if !t.wcs.tab_specs.is_empty() {
+            t.wcs.resolve_tab(self)?;
+        }
+        Ok(Some(t))
+    }
+
+    /// Parse the WCS of the image held in vector cells of column
+    /// `column` (1-based) of binary-table HDU `i` (Standard Sec.8.2,
+    /// Table 22, `iCTYPn` form).
+    pub fn column_wcs(
+        &self,
+        i: usize,
+        column: usize,
+        alt: char,
+    ) -> Result<Option<crate::wcs::TableWcs>> {
+        let header = self.bintable_header(i)?;
+        let Some(mut t) = crate::wcs::TableWcs::from_table_column(&header, column, alt)? else {
+            return Ok(None);
+        };
+        if !t.wcs.tab_specs.is_empty() {
+            t.wcs.resolve_tab(self)?;
+        }
+        Ok(Some(t))
+    }
+
+    /// Header of HDU `i`, rejecting anything that is not a binary
+    /// table. Table 22's table-resident WCS forms are only defined for
+    /// `BINTABLE`.
+    fn bintable_header(&self, i: usize) -> Result<Header> {
+        let header = self.parsed_header(i)?;
+        match header.optional_string("XTENSION") {
+            Some("BINTABLE") => Ok(header),
+            other => Err(FitsError::HduMismatch {
+                expected: "BINTABLE",
+                found: other.unwrap_or("primary HDU").to_string(),
+            }),
+        }
+    }
+
     /// Verify `CHECKSUM` and `DATASUM` for every HDU that has them,
     /// in HDU order. HDUs with neither are skipped.
     ///
@@ -960,7 +1027,9 @@ impl FitsFile {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ImageOrOwned<'a> {
+    /// An image HDU read in place, borrowing the file buffer.
     Borrowed(ImageHdu<'a>),
+    /// An image decompressed into a fresh allocation.
     Owned(crate::compression::OwnedImage),
 }
 
@@ -970,8 +1039,11 @@ pub enum ImageOrOwned<'a> {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ChecksumReport {
+    /// Zero-based index of the HDU this report covers.
     pub hdu: usize,
+    /// Whether `CHECKSUM` matched, or `None` if the card is absent.
     pub checksum_ok: Option<bool>,
+    /// Whether `DATASUM` matched, or `None` if the card is absent.
     pub datasum_ok: Option<bool>,
 }
 
@@ -1227,8 +1299,19 @@ pub(crate) fn data_section_size(h: &Header) -> Result<u64> {
             .ok_or_else(|| FitsError::Data("axis product overflows u64".into()))?;
     }
 
-    let pcount = h.optional_int("PCOUNT").unwrap_or(0) as u64;
-    let gcount = h.optional_int("GCOUNT").unwrap_or(1) as u64;
+    // Sec.7.1.3 makes both non-negative. Casting a negative straight to
+    // `u64` produced a huge value that failed the overflow check below
+    // and reported "data size overflows", naming neither the keyword
+    // nor the real problem.
+    let count = |key: &str, default: i64| -> Result<u64> {
+        let v = h.optional_int(key).unwrap_or(default);
+        u64::try_from(v).map_err(|_| FitsError::Value {
+            keyword: key.into(),
+            msg: format!("{key} must be non-negative, got {v}"),
+        })
+    };
+    let pcount = count("PCOUNT", 0)?;
+    let gcount = count("GCOUNT", 1)?;
 
     let bytes_per_elem = bitpix.byte_size() as u64;
     let total = bytes_per_elem

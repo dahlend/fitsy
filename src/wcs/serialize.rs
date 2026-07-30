@@ -13,6 +13,8 @@
 //! * SIP (`A_`/`B_`/`AP_`/`BP_`), TPV (`PVi_m`), TNX and ZPX
 //!   (`WATi_nnn`), and DSS plate solutions
 //! * spectral axes (`RESTFRQ` / `RESTWAV`; the rest is CTYPE + CRVAL)
+//! * time axes (`TIMESYS`, `TREFPOS`, `TREFDIR`, `PLEPHEM`, and the
+//!   per-axis `CZPHS`/`CPERI`/`CRDER`/`CSYER`)
 //! * `-TAB` pointer cards (`PSi_m` / `PVi_m`)
 //!
 //! `tests/wcs.rs::to_header_round_trips_every_projection` pins the
@@ -27,11 +29,16 @@
 //!   BINTABLE. The pointer cards name it, but the caller has to carry
 //!   that extension along.
 //!
-//! `RESTFRQ` / `RESTWAV` are written unsuffixed even for an alternate
-//! description. The Standard defines `RESTFRQa` / `RESTWAVa`, but this
-//! crate's parser reads only the bare spelling, so a suffixed card
-//! would not round-trip -- at the cost that wcslib and astropy read
-//! ours as belonging to the primary description.
+//! `RESTFRQa` / `RESTWAVa` carry the alternate code, as Table 22
+//! specifies, so an alternate description keeps its own rest quantity
+//! and reads back the same way in wcslib and astropy.
+//!
+//! The output is the **interpretation**, not a reproduction of the
+//! source header (see the layering note in [`crate::wcs`]): keywords
+//! the parse dropped as meaningless in context -- `EQUINOX` under
+//! ICRS, a spectral frame with no spectral axis -- are not written,
+//! because they were never retained. The contract is
+//! `from_header(to_header(w)) == w`.
 //!
 //! Values are written **resolved** rather than as-found, since the
 //! Paper II Sec.2.4 defaults depend on the projection's `theta0`.
@@ -40,12 +47,12 @@ use std::fmt::Write as _;
 
 use crate::error::{FitsError, Result};
 use crate::header::{Header, Value};
-use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, RadeSys};
 use crate::wcs::dss::Dss;
 use crate::wcs::sip::{Sip, SipPoly};
 use crate::wcs::tnx::{Tnx, TnxCrossTerm, TnxFunction, TnxSurface};
 use crate::wcs::tpv::Tpv;
+use crate::wcs::{Wcs, alt_suffix};
 
 impl Wcs {
     /// Build a fresh [`Header`] holding the WCS keywords for this
@@ -57,7 +64,7 @@ impl Wcs {
     /// carry (`NAXISi`, and the `-TAB` lookup extension).
     pub fn to_header(&self, alt: char) -> Result<Header> {
         let suffix = alt_suffix(alt)?;
-        let n = self.naxis;
+        let n = self.naxis();
         let mut h = Header::empty();
 
         // Inline comments mirror the curated set astropy/wcslib
@@ -82,26 +89,26 @@ impl Wcs {
             )?;
         }
 
-        // CTYPEi / CUNITi / CRVALi.
-        for i in 0..n {
+        // CTYPEi / CUNITi / CRVALi. Kept as three passes so the cards
+        // stay grouped by keyword, which is how astropy orders them.
+        for (i, ax) in self.axes().iter().enumerate() {
             h.push(
                 format!("CTYPE{}{}", i + 1, suffix),
-                Value::String(self.ctype[i].clone()),
-                Some(ctype_comment(&self.ctype[i])),
+                Value::String(ax.ctype.clone()),
+                Some(ctype_comment(&ax.ctype)),
             )?;
         }
-        for i in 0..n {
-            if !self.cunit[i].is_empty() {
+        for (i, ax) in self.axes().iter().enumerate() {
+            if !ax.cunit.is_empty() {
                 h.push(
                     format!("CUNIT{}{}", i + 1, suffix),
-                    Value::String(self.cunit[i].clone()),
+                    Value::String(ax.cunit.clone()),
                     Some("Units of coordinate increment and value"),
                 )?;
             }
         }
-        for i in 0..n {
-            let v = self.crval[i];
-            let unit = self.cunit.get(i).map_or("", String::as_str);
+        for (i, &v) in self.linear.crval().iter().enumerate().take(n) {
+            let unit = self.cunit(i);
             let comment = if unit.is_empty() {
                 "Coordinate value at reference point".to_string()
             } else {
@@ -197,7 +204,7 @@ impl Wcs {
                 // TNX and ZPX share the `WATi_nnn` carrier and differ
                 // only in the underlying projection, so the record
                 // has to name whichever one the CTYPE does.
-                let wtype = projection_code_of(&self.ctype[cb.pair.lat]);
+                let wtype = projection_code_of(self.ctype(cb.pair.lat));
                 write_tnx(&mut h, tnx, &wtype, lon_axis, lat_axis)?;
             }
         }
@@ -251,9 +258,6 @@ impl Wcs {
         // a description declares, so two axes disagreeing is an error:
         // silently keeping the first would re-parse into a different
         // transform.
-        //
-        // Written unsuffixed even for an alternate description; see
-        // the module note.
         if let Some(sx) = self.spectral.first() {
             if let Some(other) = self
                 .spectral
@@ -269,10 +273,175 @@ impl Wcs {
                 )));
             }
             if let Some(f) = sx.restfrq {
-                h.push("RESTFRQ", Value::Real(f), Some("[Hz] Line rest frequency"))?;
+                h.push(
+                    format!("RESTFRQ{suffix}"),
+                    Value::Real(f),
+                    Some("[Hz] Line rest frequency"),
+                )?;
             }
             if let Some(w) = sx.restwav {
-                h.push("RESTWAV", Value::Real(w), Some("[m] Line rest wavelength"))?;
+                h.push(
+                    format!("RESTWAV{suffix}"),
+                    Value::Real(w),
+                    Some("[m] Line rest wavelength"),
+                )?;
+            }
+        }
+
+        // Spectral reference frames (Sec.8.4.3). Stored rather than
+        // applied, so writing them back is the whole of their
+        // contract: dropping one would silently change what frame the
+        // coordinates are declared to be in. Parse-time gating means a
+        // frame here always has a spectral axis to describe.
+        if let Some(frame) = &self.spectral_frame {
+            for (key, value, comment) in [
+                (
+                    "SPECSYS",
+                    frame.specsys.as_ref(),
+                    "Spectral reference frame",
+                ),
+                (
+                    "SSYSOBS",
+                    frame.ssysobs.as_ref(),
+                    "Spectral frame of observation",
+                ),
+                (
+                    "SSYSSRC",
+                    frame.source.as_ref().and_then(|s| s.ssyssrc.as_ref()),
+                    "Reference frame for ZSOURCE",
+                ),
+            ] {
+                if let Some(v) = value {
+                    h.push(
+                        format!("{key}{suffix}"),
+                        Value::String(v.clone()),
+                        Some(comment),
+                    )?;
+                }
+            }
+            for (key, value, comment) in [
+                (
+                    "VELOSYS",
+                    frame.velosys,
+                    "[m/s] Velocity towards the reference frame",
+                ),
+                (
+                    "ZSOURCE",
+                    frame.source.as_ref().map(|s| s.zsource),
+                    "Redshift of the source",
+                ),
+                (
+                    "VELANGL",
+                    frame.source.as_ref().and_then(|s| s.velangl),
+                    "[deg] Angle of the true velocity vector",
+                ),
+            ] {
+                if let Some(v) = value {
+                    h.push(format!("{key}{suffix}"), Value::Real(v), Some(comment))?;
+                }
+            }
+        }
+
+        // Time-axis keywords. All four are global -- the standard
+        // defines no alternate-suffixed forms -- so like `MJD-OBS`
+        // they are written from the primary description only; a caller
+        // merging `to_header(' ')` with `to_header('A')` must not end
+        // up with duplicate cards.
+        if let Some(t) = &self.time
+            && alt == ' '
+        {
+            // `TIMESYS` is written only for an axis that *defers* to it
+            // (`CTYPE = 'TIME'`), where the scale has nowhere else to
+            // live and would otherwise re-parse as the UTC default. A
+            // CTYPE naming its own scale (Sec.9.2.1) round-trips
+            // through CTYPE alone; copying that scale into TIMESYS
+            // would silently change the declared scale of the header's
+            // *other* time keywords (`DATE-OBS`, `MJD-OBS`), which
+            // TIMESYS, not CTYPE, governs.
+            if self.ctype(t.axis).trim().eq_ignore_ascii_case("TIME") {
+                let value = match &t.realization {
+                    Some(r) => format!("{}({r})", t.scale),
+                    None => t.scale.clone(),
+                };
+                h.push("TIMESYS", Value::String(value), Some("Time scale"))?;
+            }
+            // Reference frame trio (Sec.9.2.3-9.2.5).
+            for (key, value, comment) in [
+                ("TREFPOS", t.trefpos.as_ref(), "Time reference position"),
+                ("TREFDIR", t.trefdir.as_ref(), "Time reference direction"),
+                ("PLEPHEM", t.plephem.as_ref(), "Solar system ephemeris"),
+            ] {
+                if let Some(v) = value {
+                    h.push(key, Value::String(v.clone()), Some(comment))?;
+                }
+            }
+        }
+        // Phase axes (Sec.9.6).
+        for p in &self.phase {
+            let i = p.axis + 1;
+            if let Some(v) = p.czphs {
+                h.push(
+                    format!("CZPHS{i}{suffix}"),
+                    Value::Real(v),
+                    Some("[s] Phase axis zero point"),
+                )?;
+            }
+            if let Some(v) = p.cperi {
+                h.push(
+                    format!("CPERI{i}{suffix}"),
+                    Value::Real(v),
+                    Some("[s] Phase axis period"),
+                )?;
+            }
+        }
+        // Per-axis metadata (Sec.8.2 Table 22).
+        for (i, m) in self.axes.iter().enumerate() {
+            if let Some(v) = &m.cname {
+                h.push(
+                    format!("CNAME{}{suffix}", i + 1),
+                    Value::String(v.clone()),
+                    Some("Coordinate axis name"),
+                )?;
+            }
+            if let Some(v) = m.crder {
+                h.push(
+                    format!("CRDER{}{suffix}", i + 1),
+                    Value::Real(v),
+                    Some("Random error in coordinate"),
+                )?;
+            }
+            if let Some(v) = m.csyer {
+                h.push(
+                    format!("CSYER{}{suffix}", i + 1),
+                    Value::Real(v),
+                    Some("Systematic error in coordinate"),
+                )?;
+            }
+        }
+
+        // Grism dispersers: `PVk_0..PVk_6` on the spectral axis
+        // (Paper III Table 7). Unlike the rest quantity these are
+        // per-axis, so every grism axis writes its own set. All seven
+        // are written rather than only the non-defaults -- a reader
+        // cannot tell an omitted `PVk_3` (which defaults to 1) from a
+        // dropped one.
+        for sx in &self.spectral {
+            let Some(g) = sx.grism else { continue };
+            let k = sx.axis + 1;
+            for (m, value, comment) in [
+                (0, g.density, "[m**-1] Grating ruling density"),
+                (1, g.order, "Interference order"),
+                (2, g.alpha, "[deg] Angle of incidence"),
+                (3, g.n_r, "Refractive index at the reference wavelength"),
+                (4, g.n_r_prime, "[m**-1] dn/dlambda at the reference"),
+                (5, g.epsilon, "[deg] Grating normal out of dispersion plane"),
+                (6, g.theta, "[deg] Reference ray to camera axis"),
+            ] {
+                h.push(
+                    format!("PV{k}_{m}{suffix}"),
+                    Value::Real(value),
+                    Some(comment),
+                )?;
             }
         }
 
@@ -305,6 +474,14 @@ impl Wcs {
                 Value::Integer(spec.extver),
                 Some("Coordinate table extension version"),
             )?;
+            // EXTLEVEL is checked against the table HDU when the spec
+            // resolves, so dropping it here would break the round trip
+            // for any lookup table carrying EXTLEVEL != 1.
+            h.push(
+                format!("PV{i}_2{suffix}"),
+                Value::Integer(spec.extlevel),
+                Some("Coordinate table extension level"),
+            )?;
             h.push(
                 format!("PV{i}_3{suffix}"),
                 Value::Integer(i64::from(spec.coord_axis)),
@@ -329,18 +506,6 @@ impl Wcs {
 
         Ok(h)
     }
-}
-
-fn alt_suffix(alt: char) -> Result<String> {
-    if alt == ' ' {
-        return Ok(String::new());
-    }
-    if !alt.is_ascii_uppercase() {
-        return Err(FitsError::Wcs(format!(
-            "alt must be ' ' or 'A'..'Z' (got {alt:?})"
-        )));
-    }
-    Ok(alt.to_string())
 }
 
 /// TPV polynomial: `PV<lon>_m` and `PV<lat>_m`.

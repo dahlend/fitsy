@@ -27,7 +27,10 @@ use crate::header::Header;
 use crate::header::value::Value;
 
 /// `TFORM` type code (Standard Table 18).
+// `non_exhaustive`: Table 18 has grown before -- `Q` arrived in
+// FITS 3.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BinFieldKind {
     /// `L` -- logical (1 byte: 'T', 'F', or 0 = undefined).
     Logical,
@@ -234,14 +237,22 @@ impl BinFormat {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BinColumn {
+    /// 1-based column number, as in `TFORMn`.
     pub index: usize,
+    /// `TTYPEn`, trimmed. Empty when the card is absent.
     pub name: String,
+    /// `TUNITn`, trimmed. Empty when the card is absent.
     pub unit: String,
+    /// Parsed `TFORMn`: repeat count and type code.
     pub format: BinFormat,
     /// Byte offset within a row where this column begins.
     pub offset: usize,
+    /// `TSCALn`, default 1.0.
     pub tscal: f64,
+    /// `TZEROn`, default 0.0.
     pub tzero: f64,
+    /// `TNULLn` -- the stored value that marks an undefined element.
+    /// Integer columns only (Sec.7.3.4).
     pub tnull: Option<i64>,
     /// `TDIMn` shape, if present (Standard Sec.7.3.3.2).
     pub tdim: Option<Vec<usize>>,
@@ -438,22 +449,28 @@ impl<'a> BinTableHdu<'a> {
         })
     }
 
+    /// The HDU's header.
     #[must_use]
     pub fn header(&self) -> &Header {
         &self.header
     }
+    /// Row count, from `NAXIS2`.
     #[must_use]
     pub fn n_rows(&self) -> usize {
         self.n_rows
     }
+    /// Bytes per row, from `NAXIS1`.
     #[must_use]
     pub fn row_size(&self) -> usize {
         self.row_size
     }
+    /// Every column, in `TFORMn` order.
     #[must_use]
     pub fn columns(&self) -> &[BinColumn] {
         &self.columns
     }
+    /// Size of the variable-length-array heap in bytes, from `PCOUNT`
+    /// less `THEAP` (Sec.7.3.5).
     #[must_use]
     pub fn heap_size(&self) -> usize {
         self.heap_size
@@ -553,7 +570,9 @@ impl<'a> BinTableHdu<'a> {
 }
 
 /// Decoded value of one BINTABLE cell.
+// `non_exhaustive`: tracks `BinFieldKind`, which grows with Table 18.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BinValue {
     /// Fixed-length array of logicals (`L`).
     Logical(Vec<Option<bool>>),
@@ -576,11 +595,13 @@ pub enum BinValue {
     /// dimension is the width of each string and the rest give the
     /// array shape, so the cell is an array of fixed-width strings.
     StrArray(Vec<String>),
-    /// `E`/`D` floats.
+    /// `E` single-precision floats.
     F32(Vec<f32>),
+    /// `D` double-precision floats.
     F64(Vec<f64>),
-    /// `C` complex (interleaved re/im) and `M` complex.
+    /// `C` single-precision complex, as `(re, im)` pairs.
     C64(Vec<(f32, f32)>),
+    /// `M` double-precision complex, as `(re, im)` pairs.
     C128(Vec<(f64, f64)>),
     /// `P`/`Q` variable-length array -> resolved against the heap.
     Vla(Box<Self>),

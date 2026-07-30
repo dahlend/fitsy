@@ -13,9 +13,32 @@
 //! axes, use [`FitsFile::wcs`](crate::FitsFile::wcs) instead, which
 //! resolves the table data automatically.
 //!
-//! Time WCS (Sec.9) and the grism algorithms `-GRI`/`-GRA` are not
-//! supported. Tabular WCS (`-TAB`) is supported for the common
-//! single-axis 1-D case via [`tab::TabAxis`].
+//! Every spectral algorithm code of Sec.8.4 Table 26 is implemented:
+//! the `X2P` family including the air-wavelength `A2*`/`*2A` codes,
+//! `-LOG`, and the `-GRI`/`-GRA` grism functions. A CTYPE naming a
+//! code outside that table is **rejected** rather than evaluated as a
+//! linear axis. Tabular WCS (`-TAB`) is supported in full via
+//! [`tab::TabGroup`], including Paper III Sec.6.1.1's non-separable
+//! case where several axes share one coordinate array. A time axis
+//! (Sec.9.5.3) is recognized and described by [`time::TimeAxis`]; its
+//! transform is the linear one the standard defines it to be, so it
+//! reports elapsed time, as `wcslib` does.
+//!
+//! # `Wcs` is the interpreted layer
+//!
+//! [`Header`](crate::Header) is the preservation layer: every card,
+//! verbatim, including the inconsistent ones. `Wcs` is the
+//! **interpreted coordinate description**, and holds only keywords
+//! that mean something in the description it parsed -- `ZSOURCE` on a
+//! header with no spectral axis, or `EQUINOX` under `RADESYS =
+//! 'ICRS'` (which defines the equinox away), is dropped here, exactly
+//! as `RESTFRQ` without a spectral axis always has been. Parsing stays
+//! lenient -- out-of-tree keywords are discarded, never errors -- and
+//! the original cards are still in the `Header` they were parsed from.
+//! Consequently [`Wcs::to_header`] emits the interpretation, not a
+//! reproduction of the source: its round-trip contract is
+//! `from_header(to_header(w)) == w`, not byte fidelity to the file.
+//! `astropy`'s `WCS.to_header()` draws the same line.
 
 pub mod celestial;
 pub mod celestial_block;
@@ -25,11 +48,12 @@ pub mod projection;
 pub mod sip;
 pub mod spectral;
 pub mod tab;
+pub mod table;
+pub mod time;
 pub mod tnx;
 pub mod tpv;
 
 pub mod projections;
-pub(crate) mod units;
 pub(crate) mod wat;
 
 mod fit;
@@ -42,32 +66,51 @@ pub use dss::Dss;
 pub use fit::{WcsFit, WcsFitOptions, fit_celestial_wcs};
 pub use linear::LinearTransform;
 pub use projection::{Projection, ProjectionKind};
-pub use spectral::{SpectralAlgorithm, SpectralAxis, SpectralKind};
-pub use tab::{TabAxis, TabSpec};
+// `Linearised` and `Grism` are reachable from `SpectralAlgorithm`'s
+// variants, so a caller matching on one needs them at the same level.
+pub use spectral::{
+    Grism, Linearised, SourceFrame, SpectralAlgorithm, SpectralAxis, SpectralFrame, SpectralKind,
+};
+pub use tab::{TabGroup, TabSpec};
+pub use table::TableWcs;
+pub use time::{PhaseAxis, TimeAxis};
 
 use crate::error::{FitsError, Result};
-use crate::wcs::units::to_degrees_factor;
 
 /// Degrees -> radians.
 pub(crate) const D2R: f64 = std::f64::consts::PI / 180.0;
 /// Radians -> degrees.
 pub(crate) const R2D: f64 = 180.0 / std::f64::consts::PI;
 
+/// The suffix an alternate code contributes to a WCS keyword: nothing
+/// for the primary description, the letter itself otherwise.
+///
+/// Sec.8.2 restricts the code to a space or `A`-`Z`; anything else is
+/// an error.
+// Shared by every entry point so the rule is stated once.
+pub(crate) fn alt_suffix(alt: char) -> Result<String> {
+    if alt == ' ' {
+        return Ok(String::new());
+    }
+    if !alt.is_ascii_uppercase() {
+        return Err(FitsError::Wcs(format!(
+            "WCS alternate code must be ' ' or 'A'..'Z' (got {alt:?})"
+        )));
+    }
+    Ok(alt.to_string())
+}
+
 /// A parsed WCS for a single alternate (`' '`, `'A'`, ..., `'Z'`).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Wcs {
-    pub naxis: usize,
+    // Private so `naxis()` can be its length: public parallel vectors
+    // could be truncated out of step and the pipeline indexed them
+    // unchecked. Read via `axes()`, `axis()`, `ctype()`, `cunit()`.
+    axes: Vec<Axis>,
+    /// Linear stage of the pipeline: `CRPIX`, `CRVAL`, and the combined
+    /// `CDELT`/`PC` or `CD` matrix.
     pub linear: LinearTransform,
-    /// Per-axis CTYPE values, exactly as parsed. Codes are matched
-    /// case-insensitively, but the strings are not folded.
-    pub ctype: Vec<String>,
-    /// Per-axis CUNIT values; empty string if not given.
-    pub cunit: Vec<String>,
-    /// Per-axis CRVAL reference value, in `cunit[i]` units, always as
-    /// parsed. Celestial and spectral axes are also mirrored into
-    /// their own structs, and the pipeline reads those instead.
-    pub crval: Vec<f64>,
     /// Celestial axis pair plus everything that depends on it
     /// (projection, native<->celestial rotation, optional SIP/TPV).
     /// Either every component is present or `celestial` is `None` --
@@ -88,17 +131,11 @@ pub struct Wcs {
     /// `WCSNAME` keyword (Standard Sec.8.2.6) -- free-form name for this
     /// alternate coordinate description. `None` when not supplied.
     pub wcsname: Option<String>,
-    /// `SPECSYS` keyword (Paper III Sec.7) -- spectral reference frame
-    /// in which the spectral coordinates are expressed (`TOPOCENT`,
-    /// `BARYCENT`, `LSRK`, ...). Stored verbatim; not applied.
-    pub specsys: Option<String>,
-    /// `SSYSOBS` keyword (Paper III Sec.7) -- spectral reference frame
-    /// of the observation. Stored verbatim; not applied.
-    pub ssysobs: Option<String>,
-    /// `VELOSYS` keyword (Paper III Sec.7) -- relative radial velocity
-    /// (m/s) between the observer and `SSYSOBS`. Stored verbatim;
-    /// not applied.
-    pub velosys: Option<f64>,
+    /// Spectral reference frames (Paper III Sec.7, Standard
+    /// Sec.8.4.3): `SPECSYS`, `SSYSOBS`, `VELOSYS`, and the `ZSOURCE`
+    /// source-frame group. `None` when the description has no spectral
+    /// axis -- see the module-level layering note.
+    pub spectral_frame: Option<SpectralFrame>,
     /// Optional DSS plate solution (non-standard). When present it
     /// replaces the standard celestial pipeline for the celestial
     /// axis pair: pixels go straight through `Dss::pixel_to_world`,
@@ -110,11 +147,31 @@ pub struct Wcs {
     /// actual coordinate data is loaded by [`Self::resolve_tab`].
     /// Empty when the header has no `-TAB` axes.
     pub tab_specs: Vec<TabSpec>,
-    /// Resolved `-TAB` axes (populated by [`Self::resolve_tab`] or
-    /// by [`crate::FitsFile::wcs`]). When a `-TAB` axis is parsed
-    /// but unresolved, `pixel_to_world` / `world_to_pixel` return a
-    /// clear error rather than silently dropping the lookup.
-    pub tab: Vec<TabAxis>,
+    /// Resolved `-TAB` lookup tables (populated by
+    /// [`Self::resolve_tab`] or by [`crate::FitsFile::wcs`]). One
+    /// entry per table, driving the *M* axes that share it. While a
+    /// `-TAB` axis is parsed but unresolved, `pixel_to_world` /
+    /// `world_to_pixel` return a clear error rather than silently
+    /// dropping the lookup.
+    pub tab: Vec<TabGroup>,
+    /// Time axis (Standard Sec.9.5.3), if a `CTYPE` names one,
+    /// carrying the `TREFPOS`/`TREFDIR`/`PLEPHEM` reference-position
+    /// trio with it.
+    ///
+    /// Purely descriptive: Sec.9.5.3 defines the transform as linear,
+    /// so the pipeline handles a time axis like any other and this
+    /// records only which axis it is and on what scale. `wcslib` draws
+    /// the same line.
+    pub time: Option<TimeAxis>,
+    /// Phase axes (Sec.9.6, `CTYPE = 'PHASE'`), each carrying its
+    /// `CZPHSia`/`CPERIia` pair. Empty when no axis is one.
+    pub phase: Vec<PhaseAxis>,
+    /// The celestial axis pair, if the CTYPEs name one.
+    ///
+    /// Set even when [`Self::celestial`] is `None`, which happens for
+    /// a `RA---TAB`/`DEC--TAB` pair: those carry no projection at all,
+    /// their coordinates coming straight from the lookup table.
+    pub celestial_pair: Option<CelestialPair>,
     /// Snapshot of the `NAXISn` cards, in FITS axis order, for callers
     /// like [`Self::footprint`] that need the image extent. Not part of
     /// the coordinate description: nothing in the pipeline reads it,
@@ -127,7 +184,158 @@ pub struct Wcs {
     pub pixel_shape: Option<Vec<u64>>,
 }
 
+/// Everything the standard attaches to a single coordinate axis
+/// (Sec.8.2, Table 22).
+///
+/// One entry per axis; [`Wcs::naxis`] is the length of the list.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Axis {
+    /// `CTYPEia` -- axis type and, past the fourth character, the
+    /// algorithm code. Blank means a plain linear axis.
+    pub ctype: String,
+    /// `CUNITia` -- units of `CRVALia` and `CDELTia`. Empty when
+    /// absent, which means the units Sec.8.1 fixes for the axis type.
+    pub cunit: String,
+    /// `CNAMEia` -- free-form name for the axis, the per-axis
+    /// counterpart of `WCSNAMEa`. Descriptive only; the standard
+    /// attaches no meaning to the string.
+    pub cname: Option<String>,
+    /// `CRDERia` -- random error in the coordinate. Sec.9.4.3 makes
+    /// this the per-axis override of `TIMRDER`.
+    pub crder: Option<f64>,
+    /// `CSYERia` -- systematic error in the coordinate; the per-axis
+    /// override of `TIMSYER`.
+    pub csyer: Option<f64>,
+}
+
+/// Everything [`Wcs::new`] needs beyond the axis list and the linear
+/// transform. The fields move into the `Wcs` unchanged.
+// A bundle rather than sixteen positional parameters, so the two
+// constructors read as named fields.
+#[derive(Debug, Default)]
+pub(crate) struct WcsParts {
+    pub celestial: Option<CelestialBlock>,
+    pub spectral: Vec<SpectralAxis>,
+    pub radesys: RadeSys,
+    pub equinox: Option<f64>,
+    pub mjd_obs: Option<f64>,
+    pub wcsname: Option<String>,
+    pub spectral_frame: Option<SpectralFrame>,
+    pub dss: Option<Dss>,
+    pub tab_specs: Vec<TabSpec>,
+    pub tab: Vec<TabGroup>,
+    pub time: Option<TimeAxis>,
+    pub phase: Vec<PhaseAxis>,
+    pub celestial_pair: Option<CelestialPair>,
+    pub pixel_shape: Option<Vec<u64>>,
+}
+
 impl Wcs {
+    /// Number of coordinate axes.
+    ///
+    /// This is the WCS axis count, which `WCSAXESa` may set higher than
+    /// `NAXIS` (Sec.8.2).
+    #[must_use]
+    pub fn naxis(&self) -> usize {
+        self.axes.len()
+    }
+
+    /// Per-axis descriptions, in FITS order.
+    #[must_use]
+    pub fn axes(&self) -> &[Axis] {
+        &self.axes
+    }
+
+    /// Axis `i` (zero-based), or `None` past the end.
+    #[must_use]
+    pub fn axis(&self, i: usize) -> Option<&Axis> {
+        self.axes.get(i)
+    }
+
+    /// `CTYPEia` for axis `i` (zero-based); `""` past the end.
+    #[must_use]
+    pub fn ctype(&self, i: usize) -> &str {
+        self.axes.get(i).map_or("", |a| a.ctype.as_str())
+    }
+
+    /// `CUNITia` for axis `i` (zero-based); `""` past the end, which
+    /// is also what an absent card yields.
+    #[must_use]
+    pub fn cunit(&self, i: usize) -> &str {
+        self.axes.get(i).map_or("", |a| a.cunit.as_str())
+    }
+
+    /// `CRVALia` for every axis, in the matching [`Axis::cunit`].
+    #[must_use]
+    pub fn crval(&self) -> &[f64] {
+        self.linear.crval()
+    }
+
+    /// Assemble a `Wcs`, rejecting pieces that disagree on the axis
+    /// count or carry an out-of-range axis index.
+    // `LinearTransform` and `Axis` each validate themselves, so what
+    // is left is the agreement between them, plus the axis indices in
+    // `SpectralAxis`, `PhaseAxis`, `TabSpec`, `TabGroup` and
+    // `CelestialPair` -- each of which indexes a `naxis`-long slice.
+    pub(crate) fn new(axes: Vec<Axis>, linear: LinearTransform, parts: WcsParts) -> Result<Self> {
+        let naxis = axes.len();
+        if linear.naxis() != naxis {
+            return Err(FitsError::Wcs(format!(
+                "WCS has {naxis} axis description(s) but a {}-axis linear transform",
+                linear.naxis(),
+            )));
+        }
+        let check = |what: &str, axis: usize| -> Result<()> {
+            if axis >= naxis {
+                return Err(FitsError::Wcs(format!(
+                    "WCS {what} names axis {} of a {naxis}-axis description",
+                    axis + 1,
+                )));
+            }
+            Ok(())
+        };
+        for sx in &parts.spectral {
+            check("spectral axis", sx.axis)?;
+        }
+        for p in &parts.phase {
+            check("phase axis", p.axis)?;
+        }
+        for s in &parts.tab_specs {
+            check("-TAB axis", s.axis)?;
+        }
+        for g in &parts.tab {
+            for &a in &g.axes {
+                check("-TAB group axis", a)?;
+            }
+        }
+        if let Some(t) = &parts.time {
+            check("time axis", t.axis)?;
+        }
+        if let Some(p) = &parts.celestial_pair {
+            check("celestial longitude axis", p.lon)?;
+            check("celestial latitude axis", p.lat)?;
+        }
+        Ok(Self {
+            axes,
+            linear,
+            celestial: parts.celestial,
+            spectral: parts.spectral,
+            radesys: parts.radesys,
+            equinox: parts.equinox,
+            mjd_obs: parts.mjd_obs,
+            wcsname: parts.wcsname,
+            spectral_frame: parts.spectral_frame,
+            dss: parts.dss,
+            tab_specs: parts.tab_specs,
+            tab: parts.tab,
+            time: parts.time,
+            phase: parts.phase,
+            celestial_pair: parts.celestial_pair,
+            pixel_shape: parts.pixel_shape,
+        })
+    }
+
     /// Pixel -> world coordinates.
     ///
     /// # Pixel indexing convention
@@ -154,10 +362,10 @@ impl Wcs {
     /// [`celestial_to_pixel_many`]: Self::celestial_to_pixel_many
     /// [`pixel_scale_at`]: Self::pixel_scale_at
     pub fn pixel_to_world(&self, pix: &[f64]) -> Result<Vec<f64>> {
-        if pix.len() != self.naxis {
+        if pix.len() != self.naxis() {
             return Err(FitsError::Wcs(format!(
                 "expected {} pixel coordinates, got {}",
-                self.naxis,
+                self.naxis(),
                 pix.len()
             )));
         }
@@ -166,7 +374,7 @@ impl Wcs {
         let pix = pix.as_slice();
         // Step 1: pixel offset relative to CRPIX.
         let crpix = self.linear.crpix();
-        let mut dp: Vec<f64> = (0..self.naxis).map(|j| pix[j] - crpix[j]).collect();
+        let mut dp: Vec<f64> = (0..self.naxis()).map(|j| pix[j] - crpix[j]).collect();
         // Step 2: SIP pixel-space distortion (celestial pair only).
         if let Some(c) = self.celestial.as_ref()
             && let Some(sip) = c.sip.as_ref()
@@ -179,10 +387,12 @@ impl Wcs {
         // Step 3: linear matrix.
         let intermediate = self.linear.apply_matrix(&dp)?;
         // Step 4: assemble world; celestial axes go through projection.
-        let mut world = vec![0.0; self.naxis];
-        for i in 0..self.naxis {
-            world[i] = self.crval[i] + intermediate[i];
-        }
+        // `crval` hoisted: one contiguous slice for the whole loop,
+        // and the bounds check happens once instead of per axis.
+        let crval = self.linear.crval();
+        let mut world: Vec<f64> = (0..self.naxis())
+            .map(|i| crval[i] + intermediate[i])
+            .collect();
         // Spectral axes: replace the linear value with the algorithm's
         // forward transform (Paper III Sec.3.3).
         for sx in &self.spectral {
@@ -193,22 +403,18 @@ impl Wcs {
         // The lookup operates on the full intermediate world
         // coordinate (CRVAL + linear_intermediate), which is
         // exactly `world[axis]` at this point.
-        for tab in &self.tab {
-            world[tab.axis] = tab.forward(world[tab.axis])?;
-        }
-        // Any unresolved -TAB axis is a hard error: silently
-        // returning the linear approximation would be a wrong
-        // answer disguised as a right one.
-        if self.tab_specs.len() != self.tab.len() {
-            return Err(FitsError::Wcs(format!(
-                "WCS has {} unresolved -TAB axis spec(s); \
-                 call FitsFile::wcs() or Wcs::resolve_tab() to load them",
-                // `saturating_sub`: `resolve_tab` never leaves `tab`
-                // longer than `tab_specs`, but both are public fields
-                // and a caller that pushed into `tab` directly should
-                // land on this error, not an overflow panic.
-                self.tab_specs.len().saturating_sub(self.tab.len()),
-            )));
+        self.check_tab_resolved()?;
+        for group in &self.tab {
+            // A separable axis takes the scalar path: no per-point
+            // allocation, same numbers.
+            if let [axis] = group.axes[..] {
+                world[axis] = group.forward_scalar(world[axis])?;
+            } else {
+                let psi: Vec<f64> = group.axes.iter().map(|&a| world[a]).collect();
+                for (&axis, value) in group.axes.iter().zip(group.forward(&psi)?) {
+                    world[axis] = value;
+                }
+            }
         }
         if let Some(c) = self.celestial.as_ref() {
             // DSS plate solution: bypass the entire standard
@@ -221,9 +427,9 @@ impl Wcs {
             }
             // Convert the celestial intermediate coords to degrees
             // before feeding the projection inverse, honoring any
-            // non-degree CUNIT (Paper I Sec.3.1).
-            let fx = to_degrees_factor(&self.cunit[c.pair.lon]);
-            let fy = to_degrees_factor(&self.cunit[c.pair.lat]);
+            // non-degree CUNIT (Paper I Sec.3.1). Resolved at parse
+            // time; see `CelestialBlock::cunit_to_deg`.
+            let (fx, fy) = c.cunit_to_deg;
             let mut x = intermediate[c.pair.lon] * fx;
             let mut y = intermediate[c.pair.lat] * fy;
             // TPV polynomial sits between linear and projection.
@@ -257,17 +463,15 @@ impl Wcs {
     /// Returns 0-based pixel coordinates. See [`pixel_to_world`](Self::pixel_to_world)
     /// for the indexing convention.
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
-        if world.len() != self.naxis {
+        if world.len() != self.naxis() {
             return Err(FitsError::Wcs(format!(
                 "expected {} world coordinates, got {}",
-                self.naxis,
+                self.naxis(),
                 world.len()
             )));
         }
-        let mut intermediate = vec![0.0; self.naxis];
-        for i in 0..self.naxis {
-            intermediate[i] = world[i] - self.crval[i];
-        }
+        let crval = self.linear.crval();
+        let mut intermediate: Vec<f64> = (0..self.naxis()).map(|i| world[i] - crval[i]).collect();
         // Spectral axes: invert the algorithm.
         for sx in &self.spectral {
             intermediate[sx.axis] = sx.world_to_intermediate(world[sx.axis])?;
@@ -276,19 +480,16 @@ impl Wcs {
         // rule as the forward pass. The lookup yields the full
         // intermediate world coordinate; subtract CRVAL to get
         // back to the linear-pipeline space.
-        for tab in &self.tab {
-            intermediate[tab.axis] = tab.inverse(world[tab.axis])? - self.crval[tab.axis];
-        }
-        if self.tab_specs.len() != self.tab.len() {
-            return Err(FitsError::Wcs(format!(
-                "WCS has {} unresolved -TAB axis spec(s); \
-                 call FitsFile::wcs() or Wcs::resolve_tab() to load them",
-                // `saturating_sub`: `resolve_tab` never leaves `tab`
-                // longer than `tab_specs`, but both are public fields
-                // and a caller that pushed into `tab` directly should
-                // land on this error, not an overflow panic.
-                self.tab_specs.len().saturating_sub(self.tab.len()),
-            )));
+        self.check_tab_resolved()?;
+        for group in &self.tab {
+            if let [axis] = group.axes[..] {
+                intermediate[axis] = group.inverse_scalar(world[axis])? - crval[axis];
+            } else {
+                let target: Vec<f64> = group.axes.iter().map(|&a| world[a]).collect();
+                for (&axis, psi) in group.axes.iter().zip(group.inverse(&target)?) {
+                    intermediate[axis] = psi - crval[axis];
+                }
+            }
         }
         // A DSS plate replaces the celestial pipeline, but the other
         // axes still need the linear one below. Resolve the pair now
@@ -329,8 +530,7 @@ impl Wcs {
                 y = yp;
             }
             // Convert degrees back to the header's CUNIT.
-            let fx = to_degrees_factor(&self.cunit[c.pair.lon]);
-            let fy = to_degrees_factor(&self.cunit[c.pair.lat]);
+            let (fx, fy) = c.cunit_to_deg;
             intermediate[c.pair.lon] = x / fx;
             intermediate[c.pair.lat] = y / fy;
         }
@@ -347,7 +547,7 @@ impl Wcs {
         }
         let crpix = self.linear.crpix();
         // 1-based -> 0-based: see pixel_to_world doc.
-        let mut out: Vec<f64> = (0..self.naxis).map(|i| crpix[i] + dp[i] - 1.0).collect();
+        let mut out: Vec<f64> = (0..self.naxis()).map(|i| crpix[i] + dp[i] - 1.0).collect();
         if let Some((pair, (px, py))) = dss_pixel {
             // DSS works in 1-based coords internally; the public API
             // is 0-based.
@@ -362,13 +562,13 @@ impl Wcs {
     /// `self.celestial`.
     #[must_use]
     pub fn celestial_axes(&self) -> Option<(usize, usize)> {
-        self.celestial.as_ref().map(|c| (c.pair.lon, c.pair.lat))
+        self.celestial_pair.map(|p| (p.lon, p.lat))
     }
 
     /// True iff this WCS has a celestial axis pair.
     #[must_use]
     pub fn is_celestial(&self) -> bool {
-        self.celestial.is_some()
+        self.celestial_pair.is_some()
     }
 
     /// Sky positions of the image's four corner pixels, as
@@ -423,21 +623,10 @@ impl Wcs {
     /// point is outside the projection" (a `NaN` slot). These are the
     /// only two: every other failure is per-point.
     fn batch_precheck(&self) -> Result<()> {
-        if self.celestial.is_none() {
+        if self.celestial_pair.is_none() {
             return Err(FitsError::Wcs("WCS has no celestial axis pair".into()));
         }
-        if self.tab_specs.len() != self.tab.len() {
-            return Err(FitsError::Wcs(format!(
-                "WCS has {} unresolved -TAB axis spec(s); \
-                 call FitsFile::wcs() or Wcs::resolve_tab() to load them",
-                // `saturating_sub`: `resolve_tab` never leaves `tab`
-                // longer than `tab_specs`, but both are public fields
-                // and a caller that pushed into `tab` directly should
-                // land on this error, not an overflow panic.
-                self.tab_specs.len().saturating_sub(self.tab.len()),
-            )));
-        }
-        Ok(())
+        self.check_tab_resolved()
     }
 
     /// Batch pixel -> (RA, Dec), the same transform as
@@ -536,7 +725,7 @@ impl Wcs {
         // Build a world vector with the celestial pair set and the
         // other axes at CRVAL (zero, since CRVAL is absorbed into the
         // celestial rotation and the spectral algorithms).
-        let mut world = self.crval.clone();
+        let mut world = self.linear.crval().to_vec();
         world[lon] = ra;
         world[lat] = dec;
         let pix = self.world_to_pixel(&world)?;
@@ -559,69 +748,163 @@ impl Wcs {
         Ok((dx_arcsec, dy_arcsec))
     }
 
+    /// How many `-TAB` axes the resolved groups cover. A group drives
+    /// every axis that shares its coordinate array, so this is not the
+    /// group count.
+    fn resolved_tab_axes(&self) -> usize {
+        self.tab.iter().map(|g| g.axes.len()).sum()
+    }
+
+    /// Reject a WCS whose `-TAB` axes were parsed but never loaded.
+    /// Silently returning the linear approximation would be a wrong
+    /// answer disguised as a right one, so both transform directions
+    /// check this before reaching the lookup.
+    fn check_tab_resolved(&self) -> Result<()> {
+        let resolved = self.resolved_tab_axes();
+        if self.tab_specs.len() == resolved {
+            return Ok(());
+        }
+        Err(FitsError::Wcs(format!(
+            "WCS has {} unresolved -TAB axis spec(s); \
+             call FitsFile::wcs() or Wcs::resolve_tab() to load them",
+            // `saturating_sub`: `resolve_tab` never leaves `tab` longer
+            // than `tab_specs`, but both are public fields and a caller
+            // that pushed into `tab` directly should land on this
+            // error, not an overflow panic.
+            self.tab_specs.len().saturating_sub(resolved),
+        )))
+    }
+
     /// Resolve every parsed `-TAB` axis against the binary tables
     /// in `file`. Idempotent: calling twice has no effect after the
     /// first successful resolution. Returns the number of axes
     /// resolved. Most callers do not call this directly -- use
     /// [`crate::FitsFile::wcs`] which resolves transparently.
     pub fn resolve_tab(&mut self, file: &crate::FitsFile) -> Result<usize> {
-        if self.tab_specs.len() == self.tab.len() {
+        if self.tab_specs.len() == self.resolved_tab_axes() {
             return Ok(0);
         }
-        let mut resolved = Vec::with_capacity(self.tab_specs.len());
+        // Sec.6.2: axes naming the same coordinate array in the same
+        // extension are one non-separable group and must be looked up
+        // together. Grouping keeps their first-seen order stable.
+        let mut order: Vec<(String, i64, i64, String)> = Vec::new();
+        let mut groups: Vec<Vec<&TabSpec>> = Vec::new();
         for spec in &self.tab_specs {
-            let axis = load_tab_axis(file, spec)?;
-            resolved.push(axis);
+            let key = spec.group_key();
+            if let Some(i) = order.iter().position(|k| *k == key) {
+                groups[i].push(spec);
+            } else {
+                order.push(key);
+                groups.push(vec![spec]);
+            }
         }
-        let n = resolved.len();
+        let mut resolved = Vec::with_capacity(groups.len());
+        for group in &groups {
+            resolved.push(load_tab_group(file, group)?);
+        }
         self.tab = resolved;
-        Ok(n)
+        Ok(self.resolved_tab_axes())
     }
 }
 
-/// Load one `-TAB` axis from its referenced binary table.
-fn load_tab_axis(file: &crate::FitsFile, spec: &TabSpec) -> Result<TabAxis> {
-    let hdu = file.hdu_by_name(&spec.extname, Some(spec.extver))?;
+/// Load one `-TAB` group -- every WCS axis sharing a coordinate array
+/// -- from its referenced binary table (Paper III Sec.6.2).
+fn load_tab_group(file: &crate::FitsFile, specs: &[&TabSpec]) -> Result<TabGroup> {
+    let first = specs[0];
+    let hdu = file.hdu_by_name(&first.extname, Some(first.extver))?;
     let crate::Hdu::BinTable(bin) = hdu else {
         return Err(FitsError::Wcs(format!(
             "-TAB axis {}: extension `{}` (EXTVER {}) is not a BINTABLE",
-            spec.axis + 1,
-            spec.extname,
-            spec.extver,
+            first.axis + 1,
+            first.extname,
+            first.extver,
         )));
     };
-    let coord = read_tab_column(&bin, &spec.coord_column, spec)?;
-    let index = match &spec.index_column {
-        Some(name) => Some(read_tab_column(&bin, name, spec)?),
-        None => None,
+    // Sec.6.2 identifies the table by the EXTNAME/EXTVER/EXTLEVEL
+    // triple; `hdu_by_name` matches the first two, so confirm the third.
+    let found_level = match bin.header().first("EXTLEVEL") {
+        Some(crate::header::value::Value::Integer(v)) => *v,
+        _ => 1,
     };
-    if let Some(idx) = index.as_ref()
-        && idx.len() != coord.len()
-    {
+    if found_level != first.extlevel {
         return Err(FitsError::Wcs(format!(
-            "-TAB axis {}: index column `{}` length {} != coord column `{}` length {}",
-            spec.axis + 1,
-            spec.index_column.as_deref().unwrap_or(""),
-            idx.len(),
-            spec.coord_column,
-            coord.len(),
+            "-TAB axis {}: extension `{}` (EXTVER {}) has EXTLEVEL {found_level}, but \
+             PV{}_2 asks for {}",
+            first.axis + 1,
+            first.extname,
+            first.extver,
+            first.axis + 1,
+            first.extlevel,
         )));
     }
-    Ok(TabAxis {
-        axis: spec.axis,
-        coord,
+    if bin.n_rows() != 1 {
+        return Err(FitsError::Wcs(format!(
+            "-TAB: BINTABLE `{}` has {} rows; Sec.6.2 requires exactly one",
+            first.extname,
+            bin.n_rows(),
+        )));
+    }
+
+    let (coord, tdim) = read_tab_column(&bin, &first.coord_column, first)?;
+    // `TDIM` is `(M, K_1, ..., K_M)`, fastest axis first. Without it
+    // the array can only be the one-axis case, where the repeat count
+    // is K and the leading degenerate axis is implied.
+    let dims: Vec<usize> = match tdim {
+        Some(t) if t.len() >= 2 => t[1..].to_vec(),
+        _ => vec![coord.len()],
+    };
+    let rank = dims.len();
+    if specs.len() != rank {
+        return Err(FitsError::Wcs(format!(
+            "-TAB: coordinate array `{}` describes {rank} axes, but {} WCS axes \
+             reference it; Sec.6.2 requires the PVi_3 values to account for all of them",
+            first.coord_column,
+            specs.len(),
+        )));
+    }
+
+    // Place each axis in the slot its `PVi_3` names.
+    let mut axes = vec![usize::MAX; rank];
+    let mut index: Vec<Option<Vec<f64>>> = vec![None; rank];
+    for spec in specs {
+        let m = spec.coord_axis as usize;
+        if m < 1 || m > rank {
+            return Err(FitsError::Wcs(format!(
+                "-TAB axis {}: PV{}_3 = {m} is outside 1..={rank}",
+                spec.axis + 1,
+                spec.axis + 1,
+            )));
+        }
+        if axes[m - 1] != usize::MAX {
+            return Err(FitsError::Wcs(format!(
+                "-TAB: axes {} and {} both claim coordinate-array axis {m}",
+                axes[m - 1] + 1,
+                spec.axis + 1,
+            )));
+        }
+        axes[m - 1] = spec.axis;
+        if let Some(name) = &spec.index_column {
+            index[m - 1] = Some(read_tab_column(&bin, name, spec)?.0);
+        }
+    }
+
+    let group = TabGroup {
+        axes,
+        dims,
         index,
-    })
+        coord,
+    };
+    group.validate()?;
+    Ok(group)
 }
 
-/// Read a single 1-D float column from a BINTABLE as `Vec<f64>`. The
-/// column is expected to hold one row whose cell is the full lookup
-/// array (the canonical Paper III layout for single-axis -TAB).
+/// Read a 1-D float column from a single-row BINTABLE, with its
+/// `TDIMn` if present.
 fn read_tab_column(
     bin: &crate::hdu::bintable::BinTableHdu<'_>,
     name: &str,
     spec: &TabSpec,
-) -> Result<Vec<f64>> {
+) -> Result<(Vec<f64>, Option<Vec<usize>>)> {
     use crate::hdu::bintable::BinValue;
     let col = bin.column_by_name(name).ok_or_else(|| {
         FitsError::Wcs(format!(
@@ -630,24 +913,6 @@ fn read_tab_column(
             spec.extname,
         ))
     })?;
-    if bin.n_rows() != 1 {
-        return Err(FitsError::Wcs(format!(
-            "-TAB axis {}: BINTABLE `{}` has {} rows; only single-row \
-             1-D lookup tables are supported",
-            spec.axis + 1,
-            spec.extname,
-            bin.n_rows(),
-        )));
-    }
-    if spec.coord_axis != 1 {
-        return Err(FitsError::Wcs(format!(
-            "-TAB axis {}: PV{}_3 = {} requests a multi-dimensional \
-             lookup which is not supported",
-            spec.axis + 1,
-            spec.axis + 1,
-            spec.coord_axis,
-        )));
-    }
     let raw = bin.cell_value(0, col)?;
     let v = match raw {
         BinValue::F64(v) | BinValue::Float(v) => v,
@@ -663,7 +928,7 @@ fn read_tab_column(
             )));
         }
     };
-    Ok(v)
+    Ok((v, col.tdim.clone()))
 }
 
 /// Great-circle separation between two (RA, Dec) points in degrees,

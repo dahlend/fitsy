@@ -108,6 +108,7 @@ pub mod wcs;
 
 pub mod checksum;
 pub mod diff;
+pub mod units;
 
 #[cfg(feature = "compression")]
 pub mod compression;

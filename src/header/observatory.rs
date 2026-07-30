@@ -12,8 +12,11 @@ const ELLIPSOID_INV_F: f64 = 298.257_223_563; // inverse flattening
 /// Observatory location as ITRS Cartesian coordinates (m), geocentric.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ObsGeo {
+    /// `OBSGEO-X`, metres.
     pub x: f64,
+    /// `OBSGEO-Y`, metres.
     pub y: f64,
+    /// `OBSGEO-Z`, metres.
     pub z: f64,
 }
 
@@ -110,22 +113,22 @@ impl Header {
     /// Reads geodetic keywords without any fallback.
     fn read_geodetic_raw(&self) -> Option<ObsGeodetic> {
         let lat = self
-            .real_in_unit("OBSGEO-B", "DEG")
-            .or_else(|| self.real_in_unit("LAT-OBS", "DEG"))
-            .or_else(|| self.real_in_unit("OBS-LAT", "DEG"))
-            .or_else(|| self.real_in_unit("OBSLAT", "DEG"))
-            .or_else(|| self.real_in_unit("SITELAT", "DEG"))
-            .or_else(|| self.real_in_unit("GEOLAT", "DEG"))?;
+            .real_in_unit("OBSGEO-B", "deg")
+            .or_else(|| self.real_in_unit("LAT-OBS", "deg"))
+            .or_else(|| self.real_in_unit("OBS-LAT", "deg"))
+            .or_else(|| self.real_in_unit("OBSLAT", "deg"))
+            .or_else(|| self.real_in_unit("SITELAT", "deg"))
+            .or_else(|| self.real_in_unit("GEOLAT", "deg"))?;
         let lon = self
-            .real_in_unit("OBSGEO-L", "DEG")
-            .or_else(|| self.real_in_unit("LONG-OBS", "DEG"))
-            .or_else(|| self.real_in_unit("OBS-LONG", "DEG"))
-            .or_else(|| self.real_in_unit("OBSLONG", "DEG"))
-            .or_else(|| self.real_in_unit("SITELONG", "DEG"))
-            .or_else(|| self.real_in_unit("GEOLON", "DEG"))?;
-        // Altitude keywords may carry a [unit] annotation (e.g. [km], [m]).
-        // optional_real_si_or_raw converts to meters when a recognized unit is
-        // present, otherwise returns the raw value (assumed meters per the standard).
+            .real_in_unit("OBSGEO-L", "deg")
+            .or_else(|| self.real_in_unit("LONG-OBS", "deg"))
+            .or_else(|| self.real_in_unit("OBS-LONG", "deg"))
+            .or_else(|| self.real_in_unit("OBSLONG", "deg"))
+            .or_else(|| self.real_in_unit("SITELONG", "deg"))
+            .or_else(|| self.real_in_unit("GEOLON", "deg"))?;
+        // Altitude keywords may carry a [unit] annotation (e.g. [km], [m]);
+        // real_in_unit converts to metres when one is present, and with no
+        // annotation the raw value is metres already, per the standard.
         let alt = self
             .real_in_unit("OBSGEO-H", "m")
             .or_else(|| self.real_in_unit("OBS-ELEV", "m"))

@@ -82,8 +82,11 @@ pub enum HeaderDiff {
     OnlyInB(String),
     /// Keyword present in both with different values.
     ValueDiffers {
+        /// The keyword that differs.
         keyword: String,
+        /// Its value in `a`, rendered for display.
         a_value: String,
+        /// Its value in `b`, rendered for display.
         b_value: String,
     },
 }
@@ -122,6 +125,7 @@ pub struct HduDiff {
 
 impl HduDiff {
     #[must_use]
+    /// True when the two inputs matched in every respect compared.
     pub fn is_empty(&self) -> bool {
         self.headers.is_empty() && self.data.is_empty() && self.kind_mismatch.is_none()
     }

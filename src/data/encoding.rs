@@ -8,15 +8,28 @@ use crate::error::{FitsError, Result};
 /// `BITPIX` value (Standard Sec.4.4.1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bitpix {
+    /// `BITPIX = 8`: unsigned 8-bit integer.
     U8,
+    /// `BITPIX = 16`: two's-complement 16-bit integer.
     I16,
+    /// `BITPIX = 32`: two's-complement 32-bit integer.
     I32,
+    /// `BITPIX = 64`: two's-complement 64-bit integer.
     I64,
+    /// `BITPIX = -32`: IEEE 754 single-precision float.
     F32,
+    /// `BITPIX = -64`: IEEE 754 double-precision float.
     F64,
 }
 
 impl Bitpix {
+    /// Interpret a raw `BITPIX` card value.
+    ///
+    /// # Errors
+    ///
+    /// Any value outside the six the standard defines, with
+    /// `BITPIX = -16` (half-precision, not a FITS type) called out
+    /// separately because it turns up in non-conforming files.
     pub fn from_i64(v: i64) -> Result<Self> {
         Ok(match v {
             8 => Self::U8,
@@ -55,6 +68,7 @@ impl Bitpix {
         }
     }
 
+    /// The value as it appears on the `BITPIX` card.
     #[must_use]
     pub const fn as_i64(self) -> i64 {
         match self {
@@ -71,7 +85,12 @@ impl Bitpix {
 /// A primitive that can be decoded as raw FITS pixels of a particular
 /// `BITPIX`.
 pub trait Pixel: Sized + Copy {
+    /// The `BITPIX` this type is the in-memory form of.
     const BITPIX: Bitpix;
+    /// Decode one element from its big-endian on-disk bytes.
+    ///
+    /// `bytes` must be at least `BITPIX::byte_size()` long; callers in
+    /// this crate slice exactly that much.
     fn from_be_bytes(bytes: &[u8]) -> Self;
     /// Append the big-endian on-disk encoding of `self` to `out`.
     fn write_be(self, out: &mut Vec<u8>);
@@ -149,6 +168,14 @@ pub struct ImageData<T> {
 }
 
 impl<T> ImageData<T> {
+    /// Pair a flat element vector with its axis lengths.
+    ///
+    /// # Errors
+    ///
+    /// If the axis product does not equal `data.len()`, or overflows
+    /// `u64`. An empty `axes` means `NAXIS = 0` and requires an empty
+    /// `data`, since the empty product would otherwise demand one
+    /// element (Sec.4.4.1.1).
     pub fn new(data: Vec<T>, axes: Vec<u64>) -> Result<Self> {
         // `NAXIS = 0` means no data (Sec.4.4.1.1), but the empty
         // product is 1, which would demand a one-element array.
@@ -168,16 +195,20 @@ impl<T> ImageData<T> {
         Ok(Self { data, axes })
     }
 
+    /// Axis lengths in FITS order: `axes()[0]` is `NAXIS1`, the
+    /// fastest-varying axis.
     #[must_use]
     pub fn axes(&self) -> &[u64] {
         &self.axes
     }
 
+    /// The elements, flat, with the first axis varying fastest.
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
         &self.data
     }
 
+    /// Consume the array and return its elements, dropping the shape.
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
         self.data

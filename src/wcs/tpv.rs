@@ -125,7 +125,9 @@ impl TpvAxis {
 /// before the standard TAN projection is inverted.
 #[derive(Debug, Clone, Copy)]
 pub struct Tpv {
+    /// `PV1_m` -- polynomial for the longitude axis.
     pub pv1: TpvAxis,
+    /// `PV2_m` -- polynomial for the latitude axis.
     pub pv2: TpvAxis,
 }
 

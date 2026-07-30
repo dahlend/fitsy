@@ -1,6 +1,7 @@
 //! IEEE 754 helpers that preserve NaN bit patterns (Standard
 //! Sec.4.4.2.5: "the value of the NaN should not be modified").
 
+/// Decode a big-endian `f32`, keeping the exact NaN payload.
 #[inline]
 #[must_use]
 pub fn f32_from_be_bytes_preserving_nan(b: &[u8]) -> f32 {
@@ -8,6 +9,7 @@ pub fn f32_from_be_bytes_preserving_nan(b: &[u8]) -> f32 {
     f32::from_bits(bits)
 }
 
+/// Decode a big-endian `f64`, keeping the exact NaN payload.
 #[inline]
 #[must_use]
 pub fn f64_from_be_bytes_preserving_nan(b: &[u8]) -> f64 {
@@ -15,12 +17,14 @@ pub fn f64_from_be_bytes_preserving_nan(b: &[u8]) -> f64 {
     f64::from_bits(bits)
 }
 
+/// Encode an `f32` big-endian, keeping the exact NaN payload.
 #[inline]
 #[must_use]
 pub fn f32_to_be_bytes_preserving_nan(x: f32) -> [u8; 4] {
     x.to_bits().to_be_bytes()
 }
 
+/// Encode an `f64` big-endian, keeping the exact NaN payload.
 #[inline]
 #[must_use]
 pub fn f64_to_be_bytes_preserving_nan(x: f64) -> [u8; 8] {

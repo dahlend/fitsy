@@ -13,11 +13,12 @@
 //!   `COMPRESSED_DATA` column, one tile per row. Any tile may fall
 //!   back to `GZIP_COMPRESSED_DATA` or raw `UNCOMPRESSED_DATA`.
 //!
-//! This crate currently implements `GZIP_1`, `GZIP_2`, `RICE_1`,
-//! `PLIO_1` and `HCOMPRESS_1` for 8-/16-/32-/64-bit integer images,
-//! plus `NO_DITHER` / `SUBTRACTIVE_DITHER_1` / `SUBTRACTIVE_DITHER_2`
-//! quantized float images and lossless float compression via `GZIP_1`
-//! / `GZIP_2`.
+//! This crate implements every `ZCMPTYPE` of Standard Sec.10 Table 10:
+//! `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1` and `HCOMPRESS_1` for
+//! 8-/16-/32-/64-bit integer images, and `NOCOMPRESS`, whose tiles hold
+//! the pixel bytes verbatim. Float images are supported through
+//! `NO_DITHER` / `SUBTRACTIVE_DITHER_1` / `SUBTRACTIVE_DITHER_2`
+//! quantization, and losslessly via `GZIP_1`, `GZIP_2` or `NOCOMPRESS`.
 
 mod hcompress;
 mod plio;
@@ -107,6 +108,9 @@ enum CmpType {
         scale: i32,
         smooth: bool,
     },
+    /// `NOCOMPRESS` -- tiles hold the pixel bytes verbatim (Table 10).
+    /// Lossless, so legal for float images too.
+    None,
 }
 
 impl<'a> CompressedImageHdu<'a> {
@@ -222,11 +226,16 @@ impl<'a> CompressedImageHdu<'a> {
             bitpix
         };
         let internal_bp = inner_bitpix.byte_size();
-        // Lossless float: only GZIP_1 / GZIP_2 are defined.
-        if is_float && quantize.is_none() && !matches!(cmptype_s, "GZIP_1" | "GZIP_2") {
+        // Lossless float: only GZIP_1 / GZIP_2 are defined -- plus
+        // NOCOMPRESS, which stores the IEEE bytes untouched and so
+        // cannot lose anything.
+        if is_float
+            && quantize.is_none()
+            && !matches!(cmptype_s, "GZIP_1" | "GZIP_2" | "NOCOMPRESS")
+        {
             return Err(FitsError::NonStandard(format!(
-                "lossless float compression requires ZCMPTYPE=GZIP_1 or GZIP_2, \
-                 got {cmptype_s}"
+                "lossless float compression requires ZCMPTYPE=GZIP_1, GZIP_2 or \
+                 NOCOMPRESS, got {cmptype_s}"
             )));
         }
 
@@ -266,10 +275,11 @@ impl<'a> CompressedImageHdu<'a> {
                 let (scale, smooth) = parse_hcompress_params(h)?;
                 CmpType::Hcompress1 { scale, smooth }
             }
+            "NOCOMPRESS" => CmpType::None,
             other => {
                 return Err(FitsError::NonStandard(format!(
-                    "tile compression algorithm `{other}` is not supported \
-                     (this build supports GZIP_1, GZIP_2, RICE_1, PLIO_1 and HCOMPRESS_1)"
+                    "tile compression algorithm `{other}` is not supported (this build \
+                     supports GZIP_1, GZIP_2, RICE_1, PLIO_1, HCOMPRESS_1 and NOCOMPRESS)"
                 )));
             }
         };
@@ -285,6 +295,7 @@ impl<'a> CompressedImageHdu<'a> {
     }
 
     #[must_use]
+    /// The HDU's header.
     pub fn header(&self) -> &Header {
         self.inner.header()
     }
@@ -295,15 +306,18 @@ impl<'a> CompressedImageHdu<'a> {
         &self.inner
     }
     #[must_use]
+    /// Pixel encoding of the *decompressed* image, from `ZBITPIX`.
     pub fn bitpix(&self) -> Bitpix {
         self.bitpix
     }
     /// Original image dimensions (`ZNAXISn`, fastest-varying first).
     #[must_use]
+    /// `ZNAXISn` in FITS order, fastest-varying axis first.
     pub fn axes(&self) -> &[u64] {
         &self.axes
     }
     #[must_use]
+    /// `ZTILEn` in FITS order, fastest-varying axis first.
     pub fn tile_shape(&self) -> &[u64] {
         &self.tile
     }
@@ -463,14 +477,17 @@ impl OwnedImage {
         })
     }
     #[must_use]
+    /// The HDU's header.
     pub fn header(&self) -> &Header {
         &self.header
     }
     #[must_use]
+    /// Pixel encoding of the *decompressed* image, from `ZBITPIX`.
     pub fn bitpix(&self) -> Bitpix {
         self.bitpix
     }
     #[must_use]
+    /// `ZNAXISn` in FITS order, fastest-varying axis first.
     pub fn axes(&self) -> &[u64] {
         &self.axes
     }
@@ -604,19 +621,12 @@ fn decompress_tile(
     tile_pixels: u32,
 ) -> Result<()> {
     match payload {
-        TilePayload::Uncompressed(bytes) => {
-            if bytes.len() != out.len() {
-                return Err(FitsError::Data(format!(
-                    "UNCOMPRESSED_DATA tile is {} bytes, expected {}",
-                    bytes.len(),
-                    out.len()
-                )));
-            }
-            out.copy_from_slice(bytes);
-            Ok(())
-        }
+        TilePayload::Uncompressed(bytes) => copy_tile(bytes, out, "UNCOMPRESSED_DATA"),
         TilePayload::GzipFallback(bytes) => inflate_into(bytes, out),
         TilePayload::Compressed(bytes) => match cmptype {
+            // The tile holds the pixel bytes as they would appear in an
+            // ordinary image: FITS byte order, no transform to undo.
+            CmpType::None => copy_tile(bytes, out, "NOCOMPRESS"),
             CmpType::Gzip1 => inflate_into(bytes, out),
             CmpType::Gzip2 => {
                 inflate_into(bytes, out)?;
@@ -638,6 +648,19 @@ fn decompress_tile(
             ),
         },
     }
+}
+
+/// A tile stored verbatim: the payload must be exactly the pixel bytes.
+fn copy_tile(bytes: &[u8], out: &mut [u8], what: &str) -> Result<()> {
+    if bytes.len() != out.len() {
+        return Err(FitsError::Data(format!(
+            "{what} tile is {} bytes, expected {}",
+            bytes.len(),
+            out.len()
+        )));
+    }
+    out.copy_from_slice(bytes);
+    Ok(())
 }
 
 /// Pence & Seaman 2010 Sec.3.3: `HCOMPRESS_1` carries `SCALE`

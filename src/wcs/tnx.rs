@@ -67,15 +67,21 @@ pub enum TnxCrossTerm {
 /// One IRAF TNX/ZPX correction surface (`lngcor` or `latcor`).
 #[derive(Debug, Clone)]
 pub struct TnxSurface {
+    /// Basis the surface is expanded in.
     pub function: TnxFunction,
     /// Number of basis functions in the xi (longitude) direction.
     pub ni: u32,
     /// Number of basis functions in the eta (latitude) direction.
     pub nj: u32,
+    /// Which cross terms the expansion retains.
     pub cross: TnxCrossTerm,
+    /// Lower bound of the `xi` normalisation range.
     pub xi_min: f64,
+    /// Upper bound of the `xi` normalisation range.
     pub xi_max: f64,
+    /// Lower bound of the `eta` normalisation range.
     pub eta_min: f64,
+    /// Upper bound of the `eta` normalisation range.
     pub eta_max: f64,
     /// Coefficients in IRAF row-major order: outer loop over `j`,
     /// inner loop over `i`, restricted to entries selected by
@@ -246,7 +252,9 @@ fn basis(f: TnxFunction, x: f64, n: usize) -> Vec<f64> {
 /// One full TNX / ZPX axis pair.
 #[derive(Debug, Clone)]
 pub struct Tnx {
+    /// Longitude correction surface, from `WAT1_nnn`.
     pub lngcor: Option<TnxSurface>,
+    /// Latitude correction surface, from `WAT2_nnn`.
     pub latcor: Option<TnxSurface>,
 }
 

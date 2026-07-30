@@ -1,98 +1,17 @@
-//! Units strings (Standard Sec.4.3) and basic SI conversion.
+//! `Header` accessors for keyword units.
 //!
-//! Formal unit keywords (`BUNIT`, `CUNIT*`, `TUNIT*`) are stored verbatim.
-//! This module also supports the widely-used `[unit]` comment convention,
-//! where the unit appears in brackets anywhere in a card's inline comment.
+//! The unit *strings* themselves -- Sec.4.3 syntax, the base tables,
+//! and the `[unit]` comment convention -- live in [`crate::units`].
+//! This module is only the two `Header` methods that apply them, kept
+//! here alongside the other topic-grouped `impl Header` blocks.
 
 use crate::header::Header;
-
-// -- Comment-based unit extraction -------------------------------------------
-
-/// Extract the first `[unit]` token from a FITS inline comment string.
-///
-/// Matches the first `[...]` pair regardless of position, returning the
-/// content between the brackets.
-#[must_use]
-pub fn parse_comment_unit(comment: &str) -> Option<&str> {
-    let start = comment.find('[')? + 1;
-    let end = comment[start..].find(']')? + start;
-    let unit = comment[start..end].trim();
-    if unit.is_empty() { None } else { Some(unit) }
-}
-
-// -- SI conversion table -----------------------------------------------------
-
-/// Multiplier that converts one `unit` into the SI base for its dimension.
-///
-/// Dimensions and their SI bases:
-/// - Length -> meters (m)
-/// - Angle  -> Degrees (deg)
-/// - Time   -> seconds (s)
-/// - Velocity -> meters per second (m/s)
-/// - Frequency -> hertz (Hz)
-/// - Flux density -> Jansky (Jy)
-///
-/// Returns `None` for unrecognized or compound units.
-#[must_use]
-#[allow(
-    clippy::match_same_arms,
-    reason = "matches are grouped for readability, not to avoid repetition"
-)]
-pub fn si_factor(unit: &str) -> Option<f64> {
-    let s = unit.trim().to_ascii_lowercase();
-    Some(match s.as_str() {
-        // --- Length (SI base: m) ---
-        "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
-        "km" | "kilometer" | "kilometers" | "kilometre" | "kilometres" => 1e3,
-        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 1e-2,
-        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 1e-3,
-        "um" | "micrometer" | "micrometers" | "micrometre" | "micrometres" => 1e-6,
-        "nm" | "nanometer" | "nanometers" | "nanometre" | "nanometres" => 1e-9,
-        "au" => 1.495_978_707e11, // IAU 2012
-
-        // --- Angle (Deg) ---
-        "rad" | "radian" | "radians" => 180.0 / std::f64::consts::PI,
-        "deg" | "degree" | "degrees" => 1.0,
-        "arcmin" | "arcmins" | "amin" | "'" => 1.0 / 60.0,
-        "arcsec" | "arcsecs" | "asec" | "\"" | "as" => 1.0 / 3600.0,
-        "mas" => 1.0 / 3_600_000.0,
-        "uas" => 1.0 / 3_600_000_000.0,
-
-        // --- Time (SI base: s) ---
-        "s" | "sec" | "second" | "seconds" => 1.0,
-        "min" | "minute" | "minutes" => 60.0,
-        "h" | "hr" | "hour" | "hours" => 3_600.0,
-        "d" | "day" | "days" => 86_400.0,
-        "yr" | "a" | "year" | "years" => 31_557_600.0, // Julian year (365.25 d)
-
-        // --- Velocity (SI base: m/s) ---
-        "m/s" => 1.0,
-        "km/s" => 1e3,
-        "cm/s" | "cm/sec" => 1e-2,
-        "km/h" => 1_000.0 / 3_600.0,
-        "au/d" | "au/day" => 1.495_978_707e11 / 86_400.0,
-
-        // --- Frequency (SI base: Hz) ---
-        "hz" => 1.0,
-        "khz" => 1e3,
-        "mhz" => 1e6,
-        "ghz" => 1e9,
-        "thz" => 1e12,
-
-        // --- Flux density (Base: 1 Jy) ---
-        "jy" => 1.0,
-        "mjy" => 1e-3,
-        "ujy" => 1e-6,
-
-        _ => return None,
-    })
-}
-
-// -- Header accessors --------------------------------------------------------
+use crate::units::{Unit, parse_comment_unit, parse_unit_lenient};
 
 impl Header {
-    /// Unit string for `key`, taken from the keyword's inline comment via
-    /// the `[unit]` convention. Returns `None` if no unit is found.
+    /// Unit string for `key`, taken from the keyword's inline comment
+    /// via the Sec.4.3.2 `[unit]` convention. `None` if there is no
+    /// such card or its comment carries no annotation.
     #[must_use]
     pub fn keyword_unit(&self, key: &str) -> Option<String> {
         let k = key.trim().to_ascii_uppercase();
@@ -106,71 +25,50 @@ impl Header {
 
     /// Value of `key` expressed in `target_unit`.
     ///
-    /// Uses the `[unit]` comment annotation as the source unit when present;
-    /// otherwise assumes the stored value is already in `target_unit` and
-    /// returns it unchanged. Returns `None` if the keyword is absent,
-    /// non-numeric, or either the annotation or `target_unit` is unrecognized.
+    /// The `[unit]` comment annotation gives the source unit; without
+    /// one the value is taken to be in `target_unit` already. Both are
+    /// read leniently, so `[degrees]` and `[sec]` resolve alongside the
+    /// strict Sec.4.3 spellings.
+    ///
+    /// `None` if the keyword is absent or non-numeric, if either unit
+    /// fails to parse, or if the two carry different dimensions -- a
+    /// value annotated `[s]` cannot be reported in metres.
     #[must_use]
     pub fn real_in_unit(&self, key: &str, target_unit: &str) -> Option<f64> {
         let v = self.optional_real(key)?;
         let source = self.keyword_unit(key);
         let source = source.as_deref().unwrap_or(target_unit);
-        let src = si_factor(source)?;
-        let tgt = si_factor(target_unit)?;
-        Some(v * src / tgt)
+        let src = parse_unit_lenient(source).ok()?;
+        let tgt = parse_unit_lenient(target_unit).ok()?;
+        // The converter is affine, so a magnitude annotation converts by
+        // its shift rather than being silently multiplied.
+        Some(src.converter_to(tgt).ok()?.apply(v))
+    }
+
+    /// Value of `key` converted to the canonical unit for its dimension
+    /// (metre, kilogram, second, degree, ...).
+    ///
+    /// The source unit comes from the `[unit]` comment annotation, read
+    /// leniently. Unlike [`Self::real_in_unit`], an *unannotated*
+    /// keyword is `None` -- with no unit on record there is nothing to
+    /// convert from, and passing the raw number off as canonical would
+    /// be a guess.
+    ///
+    /// `None` if the keyword is absent or non-numeric, if it carries no
+    /// annotation, if the annotation fails to parse, or if the unit is
+    /// a bare level (`mag`) with no linear reading.
+    #[must_use]
+    pub fn real_in_canonical(&self, key: &str) -> Option<f64> {
+        let v = self.optional_real(key)?;
+        let src = parse_unit_lenient(&self.keyword_unit(key)?).ok()?;
+        let canonical = Unit::new(1.0, src.dimension);
+        Some(src.converter_to(canonical).ok()?.apply(v))
     }
 }
 
-// -- Tests -------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_unit_at_start() {
-        assert_eq!(parse_comment_unit("[AU] Distance to target"), Some("AU"));
-    }
-
-    #[test]
-    fn parse_unit_mid_comment() {
-        assert_eq!(parse_comment_unit("exposure time [s]"), Some("s"));
-    }
-
-    #[test]
-    fn parse_unit_none_when_absent() {
-        assert!(parse_comment_unit("no brackets here").is_none());
-        assert!(parse_comment_unit("[] empty brackets").is_none());
-    }
-
-    #[test]
-    fn si_factor_length() {
-        assert_eq!(si_factor("m").unwrap(), 1.0);
-        assert!((si_factor("km").unwrap() - 1e3).abs() < 1e-6);
-        assert!((si_factor("AU").unwrap() - 1.495_978_707e11).abs() < 1e3);
-    }
-
-    #[test]
-    fn si_factor_angle() {
-        assert_eq!(si_factor("deg").unwrap(), 1.0);
-        assert!((si_factor("rad").unwrap() - 180.0 / std::f64::consts::PI).abs() < 1e-12);
-        assert!((si_factor("arcsec").unwrap() - 1.0 / 3600.0).abs() < 1e-15);
-    }
-
-    #[test]
-    fn si_factor_velocity() {
-        assert_eq!(si_factor("m/s").unwrap(), 1.0);
-        assert!((si_factor("km/s").unwrap() - 1e3).abs() < 1e-6);
-        assert!((si_factor("km/h").unwrap() - 1000.0 / 3600.0).abs() < 1e-10);
-        let au_day = 1.495_978_707e11 / 86_400.0;
-        assert!((si_factor("AU/day").unwrap() - au_day).abs() < 1.0);
-    }
-
-    #[test]
-    fn si_factor_unknown_returns_none() {
-        assert!(si_factor("parsec").is_none());
-        assert!(si_factor("erg/cm2/s").is_none());
-    }
+    use super::Header;
 
     #[test]
     fn real_in_unit_converts_annotation_to_target() {
@@ -183,7 +81,6 @@ mod tests {
 
     #[test]
     fn real_in_unit_matching_units_passes_through() {
-        // Annotated [AU], asked for AU -> return raw.
         let mut h = Header::empty();
         h.push("DIST", 1.5_f64, Some("[AU] Distance")).unwrap();
         assert!((h.real_in_unit("DIST", "AU").unwrap() - 1.5).abs() < 1e-12);
@@ -191,10 +88,61 @@ mod tests {
 
     #[test]
     fn real_in_unit_no_annotation_assumes_target() {
-        // No annotation -> assume value already in target unit.
         let mut h = Header::empty();
         h.push("ALT", 500.0_f64, None).unwrap();
         assert_eq!(h.real_in_unit("ALT", "m"), Some(500.0));
+    }
+
+    /// Converting between different quantities is not a scaling
+    /// problem, it is a broken header. The old lookup returned a
+    /// number here.
+    #[test]
+    fn real_in_unit_refuses_a_dimension_mismatch() {
+        let mut h = Header::empty();
+        h.push("DIST", 1.0_f64, Some("[s] mislabelled")).unwrap();
+        assert!(h.real_in_unit("DIST", "m").is_none());
+        // ... and an unparseable unit on either side.
+        let mut h = Header::empty();
+        h.push("DIST", 1.0_f64, Some("[furlong] nope")).unwrap();
+        assert!(h.real_in_unit("DIST", "m").is_none());
+    }
+
+    /// Annotations are written by people, not by the Sec.4.3 grammar.
+    ///
+    /// Regression: moving to the strict parser silently dropped these
+    /// spellings, and `obs_geodetic` lost the whole observatory
+    /// location to a `[degrees]`.
+    #[test]
+    fn real_in_unit_accepts_informal_annotation_spellings() {
+        let mut h = Header::empty();
+        h.push("PA", 2.0_f64, Some("[degrees] position angle"))
+            .unwrap();
+        assert!((h.real_in_unit("PA", "deg").unwrap() - 2.0).abs() < 1e-12);
+        let mut h = Header::empty();
+        h.push("RATE", 1.0_f64, Some("[AU/day] sky motion"))
+            .unwrap();
+        let want = 1.495_978_707e11 / 86_400.0;
+        assert!((h.real_in_unit("RATE", "m/s").unwrap() - want).abs() < 1.0);
+    }
+
+    /// A surface brightness rescales *additively*: 1 deg^2 is 3600^2
+    /// arcsec^2, so the same sky is 2.5 log10(3600^2) = 17.78 magnitudes
+    /// brighter per square degree.
+    ///
+    /// Regression: this multiplied by 1.296e7, turning 20 mag/arcsec2
+    /// into 2.592e8 mag/deg2.
+    #[test]
+    fn real_in_unit_shifts_a_magnitude_rather_than_scaling_it() {
+        let mut h = Header::empty();
+        h.push("SKYMAG", 20.0_f64, Some("[mag/arcsec2] sky brightness"))
+            .unwrap();
+        let want = 20.0 - 2.5 * (3600.0_f64 * 3600.0).log10();
+        let got = h.real_in_unit("SKYMAG", "mag/deg2").unwrap();
+        assert!((got - want).abs() < 1e-9, "got {got}, want {want}");
+        // Against itself it is the identity, not a factor of 1.296e7.
+        assert!((h.real_in_unit("SKYMAG", "mag/arcsec2").unwrap() - 20.0).abs() < 1e-12);
+        // A magnitude still refuses a linear unit.
+        assert!(h.real_in_unit("SKYMAG", "Jy").is_none());
     }
 
     #[test]
@@ -221,5 +169,21 @@ mod tests {
         h.push("CD1-1", 1.0_f64, None).unwrap();
         assert!(h.optional_real("CD1_1").is_none());
         assert!(!h.contains("CD1_1"));
+    }
+
+    /// `real_in_canonical` converts an annotated value to the
+    /// canonical unit for its dimension, and refuses to guess when
+    /// there is no annotation to convert from -- passing the raw
+    /// number off as canonical is exactly the silent wrong answer the
+    /// method exists to avoid.
+    #[test]
+    fn real_in_canonical_requires_an_annotation() {
+        let mut h = Header::empty();
+        h.push("DIST", 1.5_f64, Some("[km] distance")).unwrap();
+        assert!((h.real_in_canonical("DIST").unwrap() - 1500.0).abs() < 1e-9);
+
+        let mut plain = Header::empty();
+        plain.push("PLAIN", 42.0_f64, None).unwrap();
+        assert_eq!(plain.real_in_canonical("PLAIN"), None);
     }
 }

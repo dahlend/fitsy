@@ -25,6 +25,7 @@ use crate::wcs::celestial_block::{CelestialBlock, CelestialPair};
 use crate::wcs::linear::LinearTransform;
 use crate::wcs::projection::{self, Projection, ProjectionKind};
 use crate::wcs::sip::{SIP_MAX_ORDER, Sip, SipPoly};
+use crate::wcs::{Axis, WcsParts};
 use crate::wcs::{D2R, R2D};
 
 /// User-supplied configuration for [`fit_celestial_wcs`].
@@ -483,10 +484,20 @@ fn build_wcs(
         }
         t
     };
-    let ctype = vec![pad(ctype1), pad(ctype2)];
-    let cunit = vec!["deg".into(), "deg".into()];
-    let crval = vec![alpha0, delta0];
-    let linear = LinearTransform::from_cd(vec![crpix1, crpix2], cd.to_vec())?;
+    // A fitted WCS is built in degrees throughout.
+    let axes = vec![
+        Axis {
+            ctype: pad(ctype1),
+            cunit: "deg".into(),
+            ..Axis::default()
+        },
+        Axis {
+            ctype: pad(ctype2),
+            cunit: "deg".into(),
+            ..Axis::default()
+        },
+    ];
+    let linear = LinearTransform::from_cd(vec![crpix1, crpix2], vec![alpha0, delta0], cd.to_vec())?;
 
     let pair = CelestialPair {
         lon: 0,
@@ -500,35 +511,31 @@ fn build_wcs(
         sip,
         tpv: None,
         tnx: None,
+        // A fitted WCS is built in degrees throughout, so there is no
+        // CUNIT to convert from.
+        cunit_to_deg: (1.0, 1.0),
         // A fit always puts the fiducial point at the projection's
         // own origin, so there is nothing to offset.
         fiducial_offset: (0.0, 0.0),
     });
 
-    Ok(Wcs {
-        naxis: 2,
+    Wcs::new(
+        axes,
         linear,
-        ctype,
-        cunit,
-        crval,
-        celestial,
-        spectral: Vec::new(),
-        radesys: match frame {
-            CelestialFrame::Equatorial => RadeSys::Icrs,
-            _ => RadeSys::Other,
+        WcsParts {
+            celestial_pair: Some(pair),
+            celestial,
+            radesys: match frame {
+                CelestialFrame::Equatorial => RadeSys::Icrs,
+                _ => RadeSys::Other,
+            },
+            // A fitted WCS is celestial only: no spectral or Sec.9 time
+            // metadata applies, and a fit has pixel/sky pairs rather
+            // than an image, so `pixel_shape` stays `None`. Everything
+            // else takes its `Default`.
+            ..WcsParts::default()
         },
-        equinox: None,
-        mjd_obs: None,
-        wcsname: None,
-        specsys: None,
-        ssysobs: None,
-        velosys: None,
-        dss: None,
-        tab_specs: Vec::new(),
-        tab: Vec::new(),
-        // A fit has pixel/sky pairs, not an image.
-        pixel_shape: None,
-    })
+    )
 }
 
 // ---- Self-contained least-squares solver -------------------------------

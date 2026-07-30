@@ -139,7 +139,10 @@ pub fn encode_checksum(value: u32) -> [u8; 16] {
         }
     }
 
-    // Cyclic left-rotate by one byte: out[i] = asc[(i + 15) % 16].
+    // Rotate the string one place to the right, moving the last
+    // character to the front (Appendix J step 5). This compensates for
+    // fixed-format FITS string values not being 4-byte aligned: the
+    // value starts in column 12, not 13.
     let mut out = [0_u8; 16];
     for i in 0..16 {
         out[i] = asc[(i + 15) % 16];

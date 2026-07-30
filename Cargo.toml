@@ -51,6 +51,7 @@ flate2 = "1.1.9"
 
 
 [lints]
+rust.missing_docs = "deny"
 rust.keyword_idents_2024 = "deny"
 rust.non_ascii_idents = "deny"
 rust.non_local_definitions = "deny"
