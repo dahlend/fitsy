@@ -227,7 +227,9 @@ def test_ascii_table_round_trip(tmp_path):
                     "FLUX": [1.5, 2.25, -3.125, float("nan")],
                     "NAME": ["alpha", "beta", "g", "delta"],
                 },
-                tnulls={"ID": "-9999"},
+                # Sec.7.2.5: a blank numeric field is zero, so an
+                # undefined float needs an explicit TNULLn sentinel.
+                tnulls={"ID": "-9999", "FLUX": "NaN"},
                 units={"FLUX": "Jy"},
                 extname="CAT",
             ),
