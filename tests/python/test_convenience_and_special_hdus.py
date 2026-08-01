@@ -330,8 +330,11 @@ def test_string_array_column_round_trips(tmp_path):
     reads back as the same array of strings (Sec.7.3.3.2)."""
     p = tmp_path / "sa.fits"
     rows = [["alpha", "beta", "gamma"], ["delta", "epsil", "zeta"]]
-    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
-                         fitsy.bintable({"S": rows})], overwrite=True)
+    fitsy.write(
+        str(p),
+        [fitsy.image(np.zeros((2, 2), np.int16)), fitsy.bintable({"S": rows})],
+        overwrite=True,
+    )
     with fitsy.open(str(p)) as f:
         assert f[1].header["TFORM1"] == "15A"
         assert f[1].header["TDIM1"] == "(5,3)"
@@ -341,8 +344,11 @@ def test_string_array_column_round_trips(tmp_path):
 def test_flat_string_column_has_no_tdim(tmp_path):
     """A 1-D ``list[str]`` stays a plain ``nA`` column."""
     p = tmp_path / "flat.fits"
-    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
-                         fitsy.bintable({"S": ["ab", "cde"]})], overwrite=True)
+    fitsy.write(
+        str(p),
+        [fitsy.image(np.zeros((2, 2), np.int16)), fitsy.bintable({"S": ["ab", "cde"]})],
+        overwrite=True,
+    )
     with fitsy.open(str(p)) as f:
         assert f[1].header["TFORM1"] == "3A"
         assert "TDIM1" not in f[1].header
@@ -357,10 +363,10 @@ def test_ragged_string_array_column_rejected(tmp_path):
 @pytest.mark.parametrize(
     "columns",
     [
-        {"S": ["ok", "été"]},          # flat nA column
-        {"S": [["ok", "été"]]},        # nA + TDIM string array
-        {"S": ["a\tb"]},                          # control character
-        {"S": ["a\x00b"]},                        # NUL
+        {"S": ["ok", "été"]},  # flat nA column
+        {"S": [["ok", "été"]]},  # nA + TDIM string array
+        {"S": ["a\tb"]},  # control character
+        {"S": ["a\x00b"]},  # NUL
     ],
 )
 def test_non_ascii_character_column_is_rejected(columns):
@@ -378,8 +384,14 @@ def test_non_ascii_ascii_table_column_is_rejected():
 
 def test_plain_ascii_character_columns_still_accepted(tmp_path):
     p = tmp_path / "ok.fits"
-    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
-                         fitsy.bintable({"S": ["ok", "fine"]})], overwrite=True)
+    fitsy.write(
+        str(p),
+        [
+            fitsy.image(np.zeros((2, 2), np.int16)),
+            fitsy.bintable({"S": ["ok", "fine"]}),
+        ],
+        overwrite=True,
+    )
     with fitsy.open(str(p)) as f:
         assert f[1].column("S") == ["ok", "fine"]
 

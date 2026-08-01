@@ -208,7 +208,9 @@ def test_image_data_parity(name):
                     )
             compared += 1
     if problems:
-        pytest.fail(f"{name}: {len(problems)} image issues:\n  " + "\n  ".join(problems))
+        pytest.fail(
+            f"{name}: {len(problems)} image issues:\n  " + "\n  ".join(problems)
+        )
     if compared == 0:
         pytest.skip("no comparable image HDUs")
 

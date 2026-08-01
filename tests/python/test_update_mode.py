@@ -381,8 +381,11 @@ def test_compressed_image_data_setitem_persists(tmp_path: Path) -> None:
     to happen where the array is handed out, not on lazy load."""
     p = tmp_path / "z.fits"
     arr = np.arange(64, dtype=np.int16).reshape(8, 8)
-    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
-                         fitsy.compressed_image(arr)], overwrite=True)
+    fitsy.write(
+        str(p),
+        [fitsy.image(np.zeros((2, 2), np.int16)), fitsy.compressed_image(arr)],
+        overwrite=True,
+    )
 
     with fitsy.open(str(p), mode="update") as f:
         f[1].data[0, 0] = 999
@@ -395,8 +398,11 @@ def test_compressed_image_data_setitem_persists(tmp_path: Path) -> None:
 def test_compressed_image_data_read_only_by_default(tmp_path: Path) -> None:
     p = tmp_path / "z.fits"
     arr = np.arange(64, dtype=np.int16).reshape(8, 8)
-    fitsy.write(str(p), [fitsy.image(np.zeros((2, 2), np.int16)),
-                         fitsy.compressed_image(arr)], overwrite=True)
+    fitsy.write(
+        str(p),
+        [fitsy.image(np.zeros((2, 2), np.int16)), fitsy.compressed_image(arr)],
+        overwrite=True,
+    )
     with fitsy.open(str(p)) as f:
         assert f[1].data.flags.writeable is False
         with pytest.raises(ValueError):
@@ -408,8 +414,11 @@ def test_reading_data_in_update_mode_does_not_rewrite(tmp_path: Path) -> None:
     as *maybe* changed. ``flush`` re-reads and compares, so a read-only
     pass must leave the file untouched."""
     p = tmp_path / "img.fits"
-    fitsy.write(str(p), [fitsy.image(np.arange(64, dtype=np.int32).reshape(8, 8))],
-                overwrite=True)
+    fitsy.write(
+        str(p),
+        [fitsy.image(np.arange(64, dtype=np.int32).reshape(8, 8))],
+        overwrite=True,
+    )
     before = p.stat().st_mtime_ns
 
     with fitsy.open(str(p), mode="update") as f:

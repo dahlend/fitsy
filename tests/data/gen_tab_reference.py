@@ -49,7 +49,7 @@ def main() -> None:
         h[f"PS{i}_0"] = "WCS-TAB"
         h[f"PS{i}_1"] = "COORDS"
         h[f"PS{i}_2"] = f"IDX{i}"
-        h[f"PV{i}_3"] = i          # slot in the leading length-M axis
+        h[f"PV{i}_3"] = i  # slot in the leading length-M axis
 
     # Index vectors: axis 1 sampled evenly, axis 2 unevenly, so the
     # per-axis indirection of Sec.6.1.1 is exercised too.
@@ -76,8 +76,15 @@ def main() -> None:
 
     # Store wcslib's own answers, so the Rust side is compared against
     # an independent implementation rather than round-tripped.
-    pixels = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (2.0, 1.0),
-              (3.5, 2.0), (4.0, 3.0), (1.25, 2.75)]
+    pixels = [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (0.0, 1.0),
+        (2.0, 1.0),
+        (3.5, 2.0),
+        (4.0, 3.0),
+        (1.25, 2.75),
+    ]
     with fits.open(OUT) as f:
         w = WCS(f[0].header, f)
         world = w.wcs_pix2world(np.array(pixels), 0)

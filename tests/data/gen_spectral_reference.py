@@ -26,66 +26,181 @@ OUT = Path(__file__).parent / "spectral_reference.txt"
 # (name, header, pixel samples). Pixels are 0-based, as fitsy's API is.
 CASES = [
     # --- air <-> vacuum dispersion, Paper III Sec.4 ---
-    ("awav_linear", {
-        "CTYPE1": "AWAV", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m"}),
-    ("awav_f2a", {
-        "CTYPE1": "AWAV-F2A", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m"}),
-    ("wave_a2w", {
-        "CTYPE1": "WAVE-A2W", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m"}),
-    ("freq_a2f", {
-        "CTYPE1": "FREQ-A2F", "CRVAL1": 6.0e14, "CRPIX1": 1.0,
-        "CDELT1": -1.0e11, "CUNIT1": "Hz"}),
-    ("awav_w2a", {
-        "CTYPE1": "AWAV-W2A", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m"}),
-    ("velo_a2v", {
-        "CTYPE1": "VELO-A2V", "CRVAL1": 0.0, "CRPIX1": 1.0,
-        "CDELT1": 1.0e3, "CUNIT1": "m/s", "RESTWAV": 5.0e-7}),
-    ("awav_v2a", {
-        "CTYPE1": "AWAV-V2A", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m", "RESTWAV": 5.0e-7}),
-
+    (
+        "awav_linear",
+        {
+            "CTYPE1": "AWAV",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+        },
+    ),
+    (
+        "awav_f2a",
+        {
+            "CTYPE1": "AWAV-F2A",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+        },
+    ),
+    (
+        "wave_a2w",
+        {
+            "CTYPE1": "WAVE-A2W",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+        },
+    ),
+    (
+        "freq_a2f",
+        {
+            "CTYPE1": "FREQ-A2F",
+            "CRVAL1": 6.0e14,
+            "CRPIX1": 1.0,
+            "CDELT1": -1.0e11,
+            "CUNIT1": "Hz",
+        },
+    ),
+    (
+        "awav_w2a",
+        {
+            "CTYPE1": "AWAV-W2A",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+        },
+    ),
+    (
+        "velo_a2v",
+        {
+            "CTYPE1": "VELO-A2V",
+            "CRVAL1": 0.0,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e3,
+            "CUNIT1": "m/s",
+            "RESTWAV": 5.0e-7,
+        },
+    ),
+    (
+        "awav_v2a",
+        {
+            "CTYPE1": "AWAV-V2A",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+            "RESTWAV": 5.0e-7,
+        },
+    ),
     # --- grism, Paper III Sec.5.1 ---
     # Pure grating in vacuum.
-    ("wave_gri_grating", {
-        "CTYPE1": "WAVE-GRI", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m",
-        "PV1_0": 3.16e5, "PV1_1": 1.0, "PV1_2": 13.9}),
+    (
+        "wave_gri_grating",
+        {
+            "CTYPE1": "WAVE-GRI",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+            "PV1_0": 3.16e5,
+            "PV1_1": 1.0,
+            "PV1_2": 13.9,
+        },
+    ),
     # Grism proper: n_r and n'_r active.
-    ("wave_gri_grism", {
-        "CTYPE1": "WAVE-GRI", "CRVAL1": 7.2452e-7, "CRPIX1": 1.0,
-        "CDELT1": 2.956e-10, "CUNIT1": "m",
-        "PV1_0": 4.50e5, "PV1_1": 1.0, "PV1_2": 27.0,
-        "PV1_3": 1.765, "PV1_4": -1.077e6}),
+    (
+        "wave_gri_grism",
+        {
+            "CTYPE1": "WAVE-GRI",
+            "CRVAL1": 7.2452e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 2.956e-10,
+            "CUNIT1": "m",
+            "PV1_0": 4.50e5,
+            "PV1_1": 1.0,
+            "PV1_2": 27.0,
+            "PV1_3": 1.765,
+            "PV1_4": -1.077e6,
+        },
+    ),
     # Non-zero epsilon and theta, the small geometric corrections.
-    ("wave_gri_eps_theta", {
-        "CTYPE1": "WAVE-GRI", "CRVAL1": 5.0e-7, "CRPIX1": 1.0,
-        "CDELT1": 1.0e-10, "CUNIT1": "m",
-        "PV1_0": 3.16e5, "PV1_1": 1.0, "PV1_2": 13.9,
-        "PV1_5": 2.5, "PV1_6": 1.75}),
+    (
+        "wave_gri_eps_theta",
+        {
+            "CTYPE1": "WAVE-GRI",
+            "CRVAL1": 5.0e-7,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-10,
+            "CUNIT1": "m",
+            "PV1_0": 3.16e5,
+            "PV1_1": 1.0,
+            "PV1_2": 13.9,
+            "PV1_5": 2.5,
+            "PV1_6": 1.75,
+        },
+    ),
     # Spectral type != wavelength, so the S->P->lambda chain runs.
-    ("freq_gri", {
-        "CTYPE1": "FREQ-GRI", "CRVAL1": 6.0e14, "CRPIX1": 1.0,
-        "CDELT1": -1.0e11, "CUNIT1": "Hz",
-        "PV1_0": 3.16e5, "PV1_1": 1.0, "PV1_2": 13.9}),
-
+    (
+        "freq_gri",
+        {
+            "CTYPE1": "FREQ-GRI",
+            "CRVAL1": 6.0e14,
+            "CRPIX1": 1.0,
+            "CDELT1": -1.0e11,
+            "CUNIT1": "Hz",
+            "PV1_0": 3.16e5,
+            "PV1_1": 1.0,
+            "PV1_2": 13.9,
+        },
+    ),
     # --- the three real KPNO headers from Paper III Figs. 3-5 ---
-    ("kpno_coude", {
-        "CTYPE1": "AWAV-GRA", "CUNIT1": "Angstrom", "CRPIX1": 1801.7,
-        "CRVAL1": 5225.2, "CDELT1": -0.4334,
-        "PV1_0": 3.16e5, "PV1_1": 1.0, "PV1_2": 13.9}),
-    ("kpno_hydra", {
-        "CTYPE1": "AWAV-GRA", "CUNIT1": "Angstrom", "CRPIX1": 944.8,
-        "CRVAL1": 5136.8, "CDELT1": -0.1287,
-        "PV1_0": 3.16e5, "PV1_1": 11.0, "PV1_2": 64.8}),
-    ("kpno_mars", {
-        "CTYPE1": "AWAV-GRA", "CUNIT1": "Angstrom", "CRPIX1": 719.8,
-        "CRVAL1": 7245.2, "CDELT1": 2.956,
-        "PV1_0": 4.50e5, "PV1_1": 1.0, "PV1_2": 27.0,
-        "PV1_3": 1.765, "PV1_4": -1.077e6}),
+    (
+        "kpno_coude",
+        {
+            "CTYPE1": "AWAV-GRA",
+            "CUNIT1": "Angstrom",
+            "CRPIX1": 1801.7,
+            "CRVAL1": 5225.2,
+            "CDELT1": -0.4334,
+            "PV1_0": 3.16e5,
+            "PV1_1": 1.0,
+            "PV1_2": 13.9,
+        },
+    ),
+    (
+        "kpno_hydra",
+        {
+            "CTYPE1": "AWAV-GRA",
+            "CUNIT1": "Angstrom",
+            "CRPIX1": 944.8,
+            "CRVAL1": 5136.8,
+            "CDELT1": -0.1287,
+            "PV1_0": 3.16e5,
+            "PV1_1": 11.0,
+            "PV1_2": 64.8,
+        },
+    ),
+    (
+        "kpno_mars",
+        {
+            "CTYPE1": "AWAV-GRA",
+            "CUNIT1": "Angstrom",
+            "CRPIX1": 719.8,
+            "CRVAL1": 7245.2,
+            "CDELT1": 2.956,
+            "PV1_0": 4.50e5,
+            "PV1_1": 1.0,
+            "PV1_2": 27.0,
+            "PV1_3": 1.765,
+            "PV1_4": -1.077e6,
+        },
+    ),
 ]
 
 PIXELS = [0.0, 1.0, 200.0, 500.0, 1000.0, 1500.0, 2047.0]
