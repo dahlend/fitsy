@@ -1,6 +1,6 @@
-"""Read binary and ASCII tables: columns, rows, and structured arrays.
+"""Read a binary table: columns, rows, and structured arrays.
 
-Run from the repo root::
+Run from the repository root:
 
     python examples/python/tables.py
 """

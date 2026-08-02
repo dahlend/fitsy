@@ -4,17 +4,15 @@
     clippy::needless_range_loop,
     reason = "matrix-vector products are clearer with explicit (i, j) index notation"
 )]
-#![allow(
-    clippy::doc_markdown,
-    reason = "math formulae use backtick notation for subscripts within KaTeX blocks"
-)]
 
 //! Linear part of the WCS pipeline (Paper I Sec.2, Standard Sec.8.1).
 //!
 //! For an N-axis WCS with chosen alternate `a`, the pipeline maps a
 //! pixel coordinate `p` to an *intermediate world* coordinate `x`:
 //!
-//! $$ `x_i` \;=\; \`sum_j` m_{ij}\,(`p_j` - \mathrm{CRPIX}_j) $$
+//! ```text
+//! x_i = sum_j m_{ij} (p_j - CRPIX_j)
+//! ```
 //!
 //! where `m_{ij}` is either `CDELT_i * PC_{ij}` (PC form) or `CD_{ij}`
 //! (CD form). The two forms are mutually exclusive per Sec.8.2.1.
@@ -48,7 +46,14 @@ pub struct LinearTransform {
 }
 
 impl LinearTransform {
-    /// Build from CRPIX, CDELT, and PC matrix (row-major).
+    /// Build from `CRPIX`, `CRVAL`, `CDELT` and the `PCi_j` matrix in
+    /// row-major order.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `crval.len()` or `cdelt.len()` differs
+    /// from `crpix.len()`, when `pc.len()` is not the square of that
+    /// length, or when the combined matrix is singular.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "cdelt and pc are part of the public API; changing to &[f64] would be a breaking change"
@@ -77,7 +82,14 @@ impl LinearTransform {
         Self::from_matrix(crpix, crval, m)
     }
 
-    /// Build from CRPIX, CRVAL and CD matrix (row-major).
+    /// Build from `CRPIX`, `CRVAL` and the `CDi_j` matrix in
+    /// row-major order.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `crval.len()` differs from
+    /// `crpix.len()`, when `cd.len()` is not the square of that
+    /// length, or when the matrix is singular.
     pub fn from_cd(crpix: Vec<f64>, crval: Vec<f64>, cd: Vec<f64>) -> Result<Self> {
         let n = crpix.len();
         if cd.len() != n * n || crval.len() != n {
@@ -91,16 +103,29 @@ impl LinearTransform {
     }
 
     /// Legacy `CROTAi` (Sec.8.2, deprecated). Builds the equivalent
-    /// `PC` matrix: the identity everywhere except the 2x2 block on
-    /// the rotated axis pair `(lon, lat)`, which holds
-    /// $$ \begin{pmatrix}
-    ///   \cos\rho & -\lambda\sin\rho \\
-    ///   \sin\rho/\lambda &  \cos\rho
-    /// \end{pmatrix}$$
-    /// with `lambda = CDELT_lat/CDELT_lon`.
+    /// `PC` matrix. That matrix is the identity everywhere except the
+    /// 2 by 2 block on the rotated axis pair `(lon, lat)`, which
+    /// holds
     ///
-    /// `CROTAi` is indexed and attaches to the latitude axis, so the
-    /// rotated pair need not be axes 1 and 2, nor the image 2-D.
+    /// ```text
+    /// [ cos(rho)         -lambda sin(rho) ]
+    /// [ sin(rho)/lambda   cos(rho)        ]
+    /// ```
+    ///
+    /// in `(lon, lat)` row and column order, with
+    /// `lambda = CDELT_lat/CDELT_lon`.
+    ///
+    /// `CROTAi` is indexed and attaches to the latitude axis. The
+    /// rotated pair therefore need not be axes 1 and 2, and the image
+    /// need not be two-dimensional.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - The argument lengths disagree.
+    /// - `lon` or `lat` is not a valid axis index.
+    /// - The resulting matrix is singular.
     pub fn from_crota(
         crpix: Vec<f64>,
         crval: Vec<f64>,
@@ -174,9 +199,14 @@ impl LinearTransform {
         &self.crval
     }
 
-    /// Forward: `x = M (p - crpix)`. `pix` is **1-based** (FITS
-    /// convention, Sec.3.3.4: pixel centers are at integer values
-    /// starting from 1).
+    /// Forward step: `x = M (p - crpix)`.
+    ///
+    /// The `pix` argument is 1-based, which is the FITS convention of
+    /// Sec.3.3.4. Pixel centers there sit at integer values from 1.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the argument lengths disagree.
     pub fn pix_to_intermediate(&self, pix: &[f64]) -> Result<Vec<f64>> {
         if pix.len() != self.naxis {
             return Err(FitsError::Wcs(format!(
@@ -196,7 +226,11 @@ impl LinearTransform {
         Ok(out)
     }
 
-    /// Inverse: `p = crpix + M^{-1} x`.
+    /// Inverse step: `p = crpix + M^-1 x`. The result is 1-based.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the argument lengths disagree.
     pub fn intermediate_to_pix(&self, intermediate: &[f64]) -> Result<Vec<f64>> {
         if intermediate.len() != self.naxis {
             return Err(FitsError::Wcs(format!(
@@ -235,9 +269,15 @@ impl LinearTransform {
         &self.inverse
     }
 
-    /// Apply only the linear matrix `M * dp` (no CRPIX shift).
-    /// Used by distortion conventions (SIP) that need to inject a
-    /// polynomial between the CRPIX subtraction and the matrix.
+    /// Apply the linear matrix alone, as `M * dp`, with no `CRPIX`
+    /// shift.
+    ///
+    /// A distortion convention such as SIP uses this to insert a
+    /// polynomial between the `CRPIX` subtraction and the matrix.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the argument lengths disagree.
     pub fn apply_matrix(&self, dp: &[f64]) -> Result<Vec<f64>> {
         if dp.len() != self.naxis {
             return Err(FitsError::Wcs(format!(
@@ -256,8 +296,12 @@ impl LinearTransform {
         Ok(out)
     }
 
-    /// Apply only `M^-1 * x` (no CRPIX add). Inverse counterpart of
-    /// [`Self::apply_matrix`].
+    /// Apply the inverse matrix alone, as `M^-1 * x`, with no `CRPIX`
+    /// addition. This is the counterpart of [`Self::apply_matrix`].
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the argument lengths disagree.
     pub fn apply_inverse_matrix(&self, x: &[f64]) -> Result<Vec<f64>> {
         if x.len() != self.naxis {
             return Err(FitsError::Wcs(format!(
@@ -278,15 +322,21 @@ impl LinearTransform {
 
     /// Compose with a pre-pixel affine remap `p_phys = A * p_log + b`.
     ///
-    /// Used to absorb the IRAF `LTV`/`LTM` subimage convention into
-    /// the linear pipeline: the WCS-as-written refers to original
-    /// (physical) detector pixels, but the array we are reading is a
-    /// subimage in logical coordinates. Substituting `p_phys` into
-    /// `x = M (p_phys - CRPIX_phys)` yields a new equivalent linear
-    /// transform `x = M*A * (p_log - CRPIX_log)` with
+    /// This absorbs the `LTV` and `LTM` subimage convention into the
+    /// linear pipeline. The WCS as written refers to physical detector
+    /// pixels, while the array being read is a subimage in logical
+    /// coordinates. Substituting `p_phys` into
+    /// `x = M (p_phys - CRPIX_phys)` gives the equivalent transform
+    /// `x = M*A * (p_log - CRPIX_log)`, where
     /// `CRPIX_log = A^-1 (CRPIX_phys - b)`.
     ///
-    /// `a` is row-major `naxis x naxis`; `b` is length `naxis`.
+    /// The `a` argument is a row-major `naxis` by `naxis` matrix, and
+    /// `b` has length `naxis`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `a` or `b` has the wrong length, or
+    /// when the composed matrix is singular.
     pub fn compose_with_input_affine(&self, a: &[f64], b: &[f64]) -> Result<Self> {
         let n = self.naxis;
         if a.len() != n * n || b.len() != n {
@@ -470,7 +520,7 @@ mod tests {
         assert!((x[2] - 7.0).abs() < 1e-12);
     }
 
-    /// Sec.8.2: "CDELTi ... The value must not be zero." With CROTA a
+    /// Sec.8.2: "`CDELTi` ... The value must not be zero." With CROTA a
     /// zero yields a NaN matrix that used to invert without complaint.
     #[test]
     fn crota_with_zero_cdelt_rejected() {

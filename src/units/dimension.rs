@@ -42,10 +42,10 @@ pub(super) mod dim {
 /// Exponents of the base quantities. Fractional powers are legal
 /// (`m**(3/2)`), so these are not integers.
 ///
-/// [`PartialEq`] is the tolerant comparison, not the derived exact one:
-/// `m**(1/3)` cubed does not land on exactly 1.0, so an exact test would
-/// answer no to questions whose answer is yes. That also makes it
-/// non-transitive, which is why there is no [`Eq`].
+/// [`PartialEq`] compares with a tolerance rather than exactly.
+/// `m**(1/3)` cubed does not land on exactly 1.0, so an exact test
+/// would answer no to a question whose answer is yes. A tolerant
+/// comparison is not transitive, so this type implements no [`Eq`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Dimension([f64; N_DIM]);
 

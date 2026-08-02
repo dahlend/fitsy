@@ -1,44 +1,58 @@
 //! World Coordinate System (Standard Sec.8, Greisen & Calabretta 2002,
 //! Calabretta & Greisen 2002).
 //!
-//! This module implements the four-step WCS pipeline (Paper I Sec.8.1)
-//! and every celestial projection in Paper II Table 13, plus the
-//! spectral CTYPE codes and non-linear regridding algorithms of
-//! Paper III Sec.3.3 (Greisen et al. 2006). SIP and TPV distortion
-//! conventions are supported in addition to the standard `PVi_m`
-//! parameter family.
+//! # Purpose
 //!
-//! The typical entry point is [`Wcs::from_header`], which parses the
-//! WCS from a [`Header`](crate::Header). For files with tabular (`-TAB`)
-//! axes, use [`FitsFile::wcs`](crate::FitsFile::wcs) instead, which
-//! resolves the table data automatically.
+//! [`Wcs`] describes the coordinates of one HDU and transforms between
+//! pixel and world values. It runs the four-step pipeline of Paper I
+//! Sec.8.1: pixel offset from `CRPIX`, the linear matrix, the
+//! projection, and the spherical rotation.
 //!
-//! Every spectral algorithm code of Sec.8.4 Table 26 is implemented:
-//! the `X2P` family including the air-wavelength `A2*`/`*2A` codes,
-//! `-LOG`, and the `-GRI`/`-GRA` grism functions. A CTYPE naming a
-//! code outside that table is **rejected** rather than evaluated as a
-//! linear axis. Tabular WCS (`-TAB`) is supported in full via
-//! [`tab::TabGroup`], including Paper III Sec.6.1.1's non-separable
-//! case where several axes share one coordinate array. A time axis
-//! (Sec.9.5.3) is recognized and described by [`time::TimeAxis`]; its
-//! transform is the linear one the standard defines it to be, so it
-//! reports elapsed time, as `wcslib` does.
+//! [`Wcs::from_header`] parses a [`Header`](crate::Header). For a file
+//! with a tabular `-TAB` axis, call
+//! [`FitsFile::wcs`](crate::FitsFile::wcs) instead. That method
+//! resolves the table data as well.
 //!
-//! # `Wcs` is the interpreted layer
+//! # Layout
 //!
-//! [`Header`](crate::Header) is the preservation layer: every card,
-//! verbatim, including the inconsistent ones. `Wcs` is the
-//! **interpreted coordinate description**, and holds only keywords
-//! that mean something in the description it parsed -- `ZSOURCE` on a
-//! header with no spectral axis, or `EQUINOX` under `RADESYS =
-//! 'ICRS'` (which defines the equinox away), is dropped here, exactly
-//! as `RESTFRQ` without a spectral axis always has been. Parsing stays
-//! lenient -- out-of-tree keywords are discarded, never errors -- and
-//! the original cards are still in the `Header` they were parsed from.
-//! Consequently [`Wcs::to_header`] emits the interpretation, not a
-//! reproduction of the source: its round-trip contract is
-//! `from_header(to_header(w)) == w`, not byte fidelity to the file.
-//! `astropy`'s `WCS.to_header()` draws the same line.
+//! - [`linear`] -- the `CRPIX`, `CDELT`, `PCi_j` and `CDi_j` step.
+//! - [`projection`] and [`projections`] -- the celestial projections
+//!   of Paper II Table 13, selected by the `CTYPE` code.
+//! - [`celestial`] -- the spherical rotation and the reference frame.
+//! - [`spectral`] -- the spectral `CTYPE` codes and the non-linear
+//!   algorithms of Paper III Sec.3.3 (Greisen et al. 2006).
+//! - [`tab`] -- the `-TAB` lookup axes of Paper III Sec.6.
+//! - [`time`] -- the time axis of Sec.9.5.3.
+//! - [`sip`], [`tpv`], [`tnx`], [`dss`] -- distortion conventions that
+//!   sit outside the `PVi_m` family.
+//! - [`table`] -- the table-resident forms of Sec.8.2, Table 22.
+//! - [`fit_celestial_wcs`] -- fits a celestial WCS from pixel and sky
+//!   pairs.
+//!
+//! # Design constraints
+//!
+//! [`Wcs`] is the interpreted layer of the crate.
+//! [`Header`](crate::Header) preserves the file and holds every card
+//! as written, including a card that contradicts another. [`Wcs`]
+//! holds only the keywords that carry meaning in the description it
+//! parsed. `ZSOURCE` on a header with no spectral axis is dropped
+//! here, and so is `EQUINOX` under `RADESYS = 'ICRS'`, which defines
+//! the equinox away. The original cards remain in the `Header` they
+//! were parsed from.
+//!
+//! [`Wcs::to_header`] therefore emits that interpretation, not a
+//! reproduction of the source. Its round-trip contract is
+//! `from_header(to_header(w)) == w`. It is not byte fidelity to the
+//! file.
+//!
+//! Parsing is lenient in one direction only. A keyword outside the
+//! description is discarded rather than rejected. A `CTYPE` that names
+//! an algorithm code outside Sec.8.4 Table 26 is an error, because
+//! evaluating such an axis as a linear one would report a wrong
+//! coordinate as though it were right.
+//!
+//! A time axis transforms linearly, which is what Sec.9.5.3 defines.
+//! It therefore reports elapsed time, not an absolute epoch.
 
 pub mod celestial;
 pub mod celestial_block;
@@ -100,7 +114,32 @@ pub(crate) fn alt_suffix(alt: char) -> Result<String> {
     Ok(alt.to_string())
 }
 
-/// A parsed WCS for a single alternate (`' '`, `'A'`, ..., `'Z'`).
+/// A parsed WCS for one alternate descriptor (`' '`, `'A'` to `'Z'`).
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::{Header, Wcs};
+///
+/// let mut h = Header::empty();
+/// h.push("NAXIS", 2_i64, None)?;
+/// h.push("CTYPE1", "RA---TAN", None)?;
+/// h.push("CTYPE2", "DEC--TAN", None)?;
+/// h.push("CRPIX1", 32.0_f64, None)?;
+/// h.push("CRPIX2", 24.0_f64, None)?;
+/// h.push("CRVAL1", 150.0_f64, None)?;
+/// h.push("CRVAL2", 2.5_f64, None)?;
+/// h.push("CDELT1", -0.001_f64, None)?;
+/// h.push("CDELT2", 0.001_f64, None)?;
+///
+/// let wcs = Wcs::from_header(&h, ' ')?.expect("header declares a WCS");
+///
+/// // Pixel coordinates are 0-based, so CRPIX 32 is pixel 31.
+/// let (ra, dec) = wcs.pixel_to_celestial(31.0, 23.0)?;
+/// assert!((ra - 150.0).abs() < 1e-9);
+/// assert!((dec - 2.5).abs() < 1e-9);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Wcs {
@@ -158,10 +197,10 @@ pub struct Wcs {
     /// carrying the `TREFPOS`/`TREFDIR`/`PLEPHEM` reference-position
     /// trio with it.
     ///
-    /// Purely descriptive: Sec.9.5.3 defines the transform as linear,
-    /// so the pipeline handles a time axis like any other and this
-    /// records only which axis it is and on what scale. `wcslib` draws
-    /// the same line.
+    /// This field is descriptive. Sec.9.5.3 defines the transform as
+    /// linear, so the pipeline handles a time axis as it handles any
+    /// other linear one. This records which axis is time, and on what
+    /// scale.
     pub time: Option<TimeAxis>,
     /// Phase axes (Sec.9.6, `CTYPE = 'PHASE'`), each carrying its
     /// `CZPHSia`/`CPERIia` pair. Empty when no axis is one.
@@ -215,19 +254,33 @@ pub struct Axis {
 // constructors read as named fields.
 #[derive(Debug, Default)]
 pub(crate) struct WcsParts {
+    /// Celestial axis pair and everything attached to it.
     pub celestial: Option<CelestialBlock>,
+    /// Spectral axes, keyed by zero-based axis index.
     pub spectral: Vec<SpectralAxis>,
+    /// `RADESYS` keyword.
     pub radesys: RadeSys,
+    /// `EQUINOX` keyword.
     pub equinox: Option<f64>,
+    /// `MJD-OBS` keyword, in days.
     pub mjd_obs: Option<f64>,
+    /// `WCSNAME` keyword.
     pub wcsname: Option<String>,
+    /// `SPECSYS` group. `None` without a spectral axis.
     pub spectral_frame: Option<SpectralFrame>,
+    /// DSS plate solution, which replaces the celestial pipeline.
     pub dss: Option<Dss>,
+    /// Parsed but unresolved `-TAB` axis pointers.
     pub tab_specs: Vec<TabSpec>,
+    /// Resolved `-TAB` lookup tables.
     pub tab: Vec<TabGroup>,
+    /// Time axis, if a `CTYPE` names one.
     pub time: Option<TimeAxis>,
+    /// Phase axes (Sec.9.6).
     pub phase: Vec<PhaseAxis>,
+    /// Which two axes form the celestial pair.
     pub celestial_pair: Option<CelestialPair>,
+    /// `NAXISn` lengths, when the caller supplied them.
     pub pixel_shape: Option<Vec<u64>>,
 }
 
@@ -336,23 +389,32 @@ impl Wcs {
         })
     }
 
-    /// Pixel -> world coordinates.
+    /// Transform pixel coordinates to world coordinates.
     ///
     /// # Pixel indexing convention
     ///
-    /// **Pixel coordinates in this API are 0-based** (numpy / C
-    /// convention): the first pixel's center is `(0.0, 0.0, ...)`, as
-    /// in astropy's `wcs.WCS` with `origin=0`. FITS itself is 1-based
-    /// (Sec.3.3.4), so a coordinate from cfitsio, wcslib or IRAF needs
-    /// 1 subtracted before it is passed here.
+    /// Pixel coordinates in this API are 0-based. The center of the
+    /// first pixel is `(0.0, 0.0, ...)`. FITS itself is 1-based
+    /// (Sec.3.3.4), so subtract 1 from a coordinate that came from a
+    /// 1-based source before passing it here.
     ///
-    /// Applies to every pixel-coordinate method on `Wcs`: [`pixel_to_world`],
-    /// [`world_to_pixel`], [`pixel_to_celestial`], [`celestial_to_pixel`],
-    /// [`pixel_to_celestial_many`], [`celestial_to_pixel_many`], and
+    /// This convention holds for every pixel-coordinate method on
+    /// `Wcs`: [`pixel_to_world`], [`world_to_pixel`],
+    /// [`pixel_to_celestial`], [`celestial_to_pixel`],
+    /// [`pixel_to_celestial_many`], [`celestial_to_pixel_many`] and
     /// [`pixel_scale_at`].
     ///
-    /// World values are returned in their CUNIT (degrees for celestial
-    /// axes).
+    /// A world value comes back in the unit its `CUNIT` names. A
+    /// celestial axis therefore reports degrees.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in four cases:
+    ///
+    /// - `pix.len()` does not equal `NAXIS`.
+    /// - A `-TAB` axis remains unresolved.
+    /// - The point lies outside the domain of the projection.
+    /// - A spectral or tabular axis cannot evaluate the point.
     ///
     /// [`pixel_to_world`]: Self::pixel_to_world
     /// [`world_to_pixel`]: Self::world_to_pixel
@@ -458,10 +520,20 @@ impl Wcs {
         Ok(world)
     }
 
-    /// World -> pixel coordinates.
+    /// Transform world coordinates to pixel coordinates.
     ///
-    /// Returns 0-based pixel coordinates. See [`pixel_to_world`](Self::pixel_to_world)
-    /// for the indexing convention.
+    /// The result is 0-based.
+    /// [`pixel_to_world`](Self::pixel_to_world) states the indexing
+    /// convention.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in four cases:
+    ///
+    /// - `world.len()` does not equal `NAXIS`.
+    /// - A `-TAB` axis remains unresolved.
+    /// - The point lies outside the domain of the projection.
+    /// - An iterative inverse fails to converge.
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
         if world.len() != self.naxis() {
             return Err(FitsError::Wcs(format!(
@@ -574,11 +646,10 @@ impl Wcs {
     /// Sky positions of the image's four corner pixels, as
     /// `(lon, lat)` in degrees.
     ///
-    /// Corner *pixel centers* -- `(0, 0)`, `(nx-1, 0)`, `(nx-1, ny-1)`,
-    /// `(0, ny-1)` -- counter-clockwise from the origin, matching
-    /// astropy's `WCS.calc_footprint()`. For the outer edge of the
-    /// grid, call [`Self::pixel_to_celestial`] with `-0.5` and
-    /// `n - 0.5` instead.
+    /// These are corner pixel centers: `(0, 0)`, `(nx-1, 0)`,
+    /// `(nx-1, ny-1)` and `(0, ny-1)`, counter-clockwise from the
+    /// origin. For the outer edge of the grid instead, call
+    /// [`Self::pixel_to_celestial`] with `-0.5` and `n - 0.5`.
     ///
     /// # Errors
     ///
@@ -629,21 +700,25 @@ impl Wcs {
         self.check_tab_resolved()
     }
 
-    /// Batch pixel -> (RA, Dec), the same transform as
-    /// [`Self::pixel_to_celestial`] with the per-call setup shared
-    /// across all points.
+    /// Transform many pixel pairs to (RA, Dec) pairs.
+    ///
+    /// This runs the transform of [`Self::pixel_to_celestial`] and
+    /// shares the per-call setup across every point.
     ///
     /// # Out-of-domain points
     ///
-    /// Points outside the projection's domain get
-    /// `(f64::NAN, f64::NAN)` rather than failing the call, as in
-    /// `wcslib` and `astropy.wcs`: most projections cover only part of
-    /// the plane, so a wide field routinely mixes valid and invalid
-    /// pixels. Call [`Self::pixel_to_celestial`] on a single point for
-    /// the error message instead.
+    /// A point outside the domain of the projection yields
+    /// `(f64::NAN, f64::NAN)`. It does not fail the call. Most
+    /// projections cover part of the plane alone, so a wide field
+    /// routinely mixes valid and invalid pixels. Call
+    /// [`Self::pixel_to_celestial`] on one point to read the error
+    /// message for that point.
     ///
-    /// An `Err` means the whole WCS cannot transform: no celestial
-    /// pair, or unresolved `-TAB` axes.
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the whole WCS cannot transform, which
+    /// means it has no celestial axis pair, or it has a `-TAB` axis
+    /// that remains unresolved.
     pub fn pixel_to_celestial_many(&self, pixels: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
         self.batch_precheck()?;
         Ok(pixels
@@ -655,9 +730,14 @@ impl Wcs {
             .collect())
     }
 
-    /// Batch (RA, Dec) -> pixel. Mirror of
-    /// [`Self::pixel_to_celestial_many`], including the `NaN`
-    /// treatment of out-of-domain points.
+    /// Transform many (RA, Dec) pairs to pixel pairs.
+    ///
+    /// This mirrors [`Self::pixel_to_celestial_many`], including its
+    /// `NaN` treatment of an out-of-domain point.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`Self::pixel_to_celestial_many`].
     pub fn celestial_to_pixel_many(&self, sky: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
         self.batch_precheck()?;
         Ok(sky
@@ -669,22 +749,49 @@ impl Wcs {
             .collect())
     }
 
-    /// 2D celestial pixel -> (RA, Dec) in degrees, for the common case
-    /// of a 2-axis image. `Err` if the WCS has no celestial pair. Any
-    /// other axes are evaluated at their reference pixel, the only
-    /// well-defined choice when the caller has not supplied them.
+    /// Transform one celestial pixel pair to (RA, Dec) in degrees.
     ///
-    /// `(px, py)` are 0-based -- see [`pixel_to_world`](Self::pixel_to_world).
+    /// This serves the common case of a two-axis image. Any further
+    /// axis evaluates at its reference pixel, which is the only
+    /// defined choice when the caller supplies no value for it.
+    ///
+    /// The `px` and `py` arguments are 0-based. See
+    /// [`pixel_to_world`](Self::pixel_to_world).
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the WCS has no celestial axis pair, or
+    /// when the conditions of
+    /// [`pixel_to_world`](Self::pixel_to_world) apply.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_p2c.fits");
+    /// # let px = vec![0.0_f32; 64 * 48];
+    /// # let (h, d) = ImageBuilder::new(vec![64_u64, 48], px)?
+    /// #     .primary(true)
+    /// #     .card("CTYPE1", "RA---TAN", None)
+    /// #     .card("CTYPE2", "DEC--TAN", None)
+    /// #     .card("CRPIX1", 32.0, None)
+    /// #     .card("CRPIX2", 24.0, None)
+    /// #     .card("CRVAL1", 202.469, None)
+    /// #     .card("CRVAL2", 47.195, None)
+    /// #     .card("CDELT1", -0.001, None)
+    /// #     .card("CDELT2", 0.001, None)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
     /// use fitsy::FitsFile;
     ///
-    /// let f = FitsFile::open("image.fits")?;
-    /// let wcs = f.wcs(0, ' ')?.expect("no WCS in HDU 0");
-    /// let (ra, dec) = wcs.pixel_to_celestial(512.0, 512.0)?;
-    /// println!("RA={ra:.6} Dec={dec:.6}");
+    /// let f = FitsFile::open(&path)?;
+    /// let wcs = f.wcs(0, ' ')?.expect("HDU 0 declares no WCS");
+    /// let (ra, dec) = wcs.pixel_to_celestial(31.0, 23.0)?;
+    ///
+    /// assert!((ra - 202.469).abs() < 1e-9);
+    /// assert!((dec - 47.195).abs() < 1e-9);
+    /// # std::fs::remove_file(&path)?;
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn pixel_to_celestial(&self, px: f64, py: f64) -> Result<(f64, f64)> {
@@ -702,20 +809,46 @@ impl Wcs {
         Ok((world[lon], world[lat]))
     }
 
-    /// 2D (RA, Dec) in degrees -> celestial pixel. Mirror of
-    /// [`Self::pixel_to_celestial`].
+    /// Transform one (RA, Dec) pair in degrees to a celestial pixel
+    /// pair. This mirrors [`Self::pixel_to_celestial`].
     ///
-    /// Returned `(px, py)` are 0-based.
+    /// The returned `(px, py)` is 0-based. Any further axis is held at
+    /// its `CRVAL`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the WCS has no celestial axis pair, or
+    /// when the conditions of
+    /// [`world_to_pixel`](Self::world_to_pixel) apply.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_c2p.fits");
+    /// # let px = vec![0.0_f32; 64 * 48];
+    /// # let (h, d) = ImageBuilder::new(vec![64_u64, 48], px)?
+    /// #     .primary(true)
+    /// #     .card("CTYPE1", "RA---TAN", None)
+    /// #     .card("CTYPE2", "DEC--TAN", None)
+    /// #     .card("CRPIX1", 32.0, None)
+    /// #     .card("CRPIX2", 24.0, None)
+    /// #     .card("CRVAL1", 202.469, None)
+    /// #     .card("CRVAL2", 47.195, None)
+    /// #     .card("CDELT1", -0.001, None)
+    /// #     .card("CDELT2", 0.001, None)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
     /// use fitsy::FitsFile;
     ///
-    /// let f = FitsFile::open("image.fits")?;
-    /// let wcs = f.wcs(0, ' ')?.expect("no WCS in HDU 0");
+    /// let f = FitsFile::open(&path)?;
+    /// let wcs = f.wcs(0, ' ')?.expect("HDU 0 declares no WCS");
     /// let (px, py) = wcs.celestial_to_pixel(202.469, 47.195)?;
-    /// println!("pixel = ({px:.2}, {py:.2})");
+    ///
+    /// assert!((px - 31.0).abs() < 1e-6);
+    /// assert!((py - 23.0).abs() < 1e-6);
+    /// # std::fs::remove_file(&path)?;
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn celestial_to_pixel(&self, ra: f64, dec: f64) -> Result<(f64, f64)> {
@@ -732,13 +865,21 @@ impl Wcs {
         Ok((pix[lon], pix[lat]))
     }
 
-    /// Local pixel scale at `(px, py)`, in **arcseconds per pixel**
-    /// along the longitude and latitude axes. Measured by finite
-    /// difference on the sphere, so it includes `cos(dec)`
-    /// foreshortening, distortion and any local skew.
+    /// Local pixel scale at `(px, py)`, in arcseconds per pixel along
+    /// the longitude axis and the latitude axis.
     ///
-    /// This is the great-circle distance per pixel, not the signed
-    /// `CDELT`: a flipped-RA image still reports a positive scale.
+    /// This measures a finite difference on the sphere, so it includes
+    /// the `cos(dec)` foreshortening, the distortion and any local
+    /// skew.
+    ///
+    /// The result is a great-circle distance per pixel, not the signed
+    /// `CDELT`. An image with a flipped RA axis therefore reports a
+    /// positive scale.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::pixel_to_celestial`], evaluated at
+    /// `(px, py)` and at the two neighboring pixels.
     pub fn pixel_scale_at(&self, px: f64, py: f64) -> Result<(f64, f64)> {
         let (ra0, dec0) = self.pixel_to_celestial(px, py)?;
         let (ra_x, dec_x) = self.pixel_to_celestial(px + 1.0, py)?;
@@ -748,17 +889,18 @@ impl Wcs {
         Ok((dx_arcsec, dy_arcsec))
     }
 
-    /// How many `-TAB` axes the resolved groups cover. A group drives
-    /// every axis that shares its coordinate array, so this is not the
-    /// group count.
+    /// How many `-TAB` axes the resolved groups cover. One group
+    /// drives every axis that shares its coordinate array, so this is
+    /// not the group count.
     fn resolved_tab_axes(&self) -> usize {
         self.tab.iter().map(|g| g.axes.len()).sum()
     }
 
-    /// Reject a WCS whose `-TAB` axes were parsed but never loaded.
-    /// Silently returning the linear approximation would be a wrong
-    /// answer disguised as a right one, so both transform directions
-    /// check this before reaching the lookup.
+    /// Reject a WCS whose `-TAB` axes parsed but never loaded.
+    ///
+    /// Returning the linear approximation instead would be a wrong
+    /// answer that looks like a right one. Both transform directions
+    /// therefore check this before they reach the lookup.
     fn check_tab_resolved(&self) -> Result<()> {
         let resolved = self.resolved_tab_axes();
         if self.tab_specs.len() == resolved {
@@ -775,11 +917,24 @@ impl Wcs {
         )))
     }
 
-    /// Resolve every parsed `-TAB` axis against the binary tables
-    /// in `file`. Idempotent: calling twice has no effect after the
-    /// first successful resolution. Returns the number of axes
-    /// resolved. Most callers do not call this directly -- use
-    /// [`crate::FitsFile::wcs`] which resolves transparently.
+    /// Resolve every parsed `-TAB` axis against the binary tables in
+    /// `file`.
+    ///
+    /// The result is the number of axes resolved. A second call after
+    /// a successful one changes nothing and returns 0.
+    ///
+    /// Most callers do not call this. [`crate::FitsFile::wcs`]
+    /// resolves the axes on their behalf.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in four cases:
+    ///
+    /// - The extension a `TabSpec` names is absent from `file`.
+    /// - That extension is not a binary table.
+    /// - The named column is absent.
+    /// - The coordinate array has a shape the axis count does not
+    ///   match.
     pub fn resolve_tab(&mut self, file: &crate::FitsFile) -> Result<usize> {
         if self.tab_specs.len() == self.resolved_tab_axes() {
             return Ok(0);

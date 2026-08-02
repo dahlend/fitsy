@@ -37,9 +37,9 @@ Pixel scaling on write (``BSCALE`` / ``BZERO``)
 
 :func:`fitsy.image` writes the supplied numpy array verbatim: the
 buffer's dtype determines ``BITPIX`` and the pixel bytes are emitted
-without further transformation. ``fitsy`` does **not** invert
-``BSCALE`` / ``BZERO`` from physical units back to a raw integer
-representation. This matches the behavior of ``astropy.io.fits``.
+without further transformation. ``fitsy`` does not invert
+``BSCALE`` or ``BZERO`` from physical units back to a raw integer
+representation.
 
 Two consequences:
 

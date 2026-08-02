@@ -20,17 +20,17 @@ Tunables:
 What gets compared
 ------------------
 
-- **Image pixels**, numerically and in physical units --
+- Image pixels, numerically and in physical units --
   ``BZERO``/``BSCALE`` applied, ``BLANK`` mapped to NaN. Reported
   indices are pixel numbers and reported values are decoded pixels,
   so two files that store the same physical image with different
   ``BSCALE`` compare equal on data.
-- **Tile-compressed images**, on their decompressed pixels, so
+- Tile-compressed images, on their decompressed pixels, so
   re-compressing a file with different tile bytes is not a data
   difference.
-- **Table cells**, per column, in decoded (post-``TSCAL``/``TZERO``)
+- Table cells, per column, in decoded (post-``TSCAL``/``TZERO``)
   values. Differences are reported as ``COLUMN[row]``.
-- **Random-groups HDUs**, and HDUs whose ``XTENSION`` fitsy does not
+- Random-groups HDUs, and HDUs whose ``XTENSION`` fitsy does not
   recognize, are the gap: they have no decoded form and report a
   single byte-level "differs" verdict.
 

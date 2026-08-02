@@ -1,9 +1,36 @@
 //! Image HDUs (Standard Sec.7.1, Sec.3.3.1).
 //!
-//! Use [`ImageHdu::read_physical`] for the common case: it decodes
-//! the raw integer or float pixels and applies `BZERO`/`BSCALE`,
-//! returning `f64` values. Use [`ImageHdu::read_raw`] when you need
-//! the native type without scaling.
+//! # Purpose
+//!
+//! [`ImageHdu`] holds one image: its header, and a borrowed view of
+//! its raw data bytes. It decodes those bytes on demand.
+//!
+//! # Layout
+//!
+//! Four read methods differ in the type they return and in whether
+//! they scale the values:
+//!
+//! - [`ImageHdu::read_physical`] returns `f64` and applies `BZERO`,
+//!   `BSCALE` and `BLANK`. This is the usual choice.
+//! - [`ImageHdu::read_physical_f32`] does the same and returns `f32`.
+//! - [`ImageHdu::read_raw`] returns the native type of `BITPIX` and
+//!   applies no scaling. The caller names that type.
+//! - [`ImageHdu::read_raw_dyn`] returns the native type inside the
+//!   [`ImagePixels`] enum, so the caller does not name it.
+//!
+//! [`ImageHdu::read_subarray`] reads a rectangular region instead of
+//! the whole array.
+//!
+//! # Design constraints
+//!
+//! An [`ImageHdu`] borrows its data bytes from the [`FitsFile`] that
+//! produced it, so it cannot outlive that file.
+//!
+//! Scaling always runs in `f64`, including for
+//! [`ImageHdu::read_physical_f32`]. Only the final store narrows the
+//! value. This keeps the arithmetic identical between the two.
+//!
+//! [`FitsFile`]: crate::FitsFile
 
 use crate::data::encoding::{Bitpix, ImageData, Pixel};
 use crate::data::scaling::Scaling;
@@ -11,7 +38,37 @@ use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::io::block::pad_to_block;
 
-/// An image HDU.
+/// One image HDU.
+///
+/// This borrows its data section from the
+/// [`FitsFile`](crate::FitsFile) that produced it, so it cannot
+/// outlive that file. It reads `BITPIX` and the axis lengths from the
+/// header at construction, and decodes pixels only when asked.
+///
+/// [`read_physical`](Self::read_physical) is the usual decoder. The
+/// module documentation compares it with the other three.
+///
+/// # Examples
+///
+/// ```
+/// # use fitsy::{FitsWriter, ImageBuilder};
+/// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// #     .primary(true)
+/// #     .build()?;
+/// # let mut buf: Vec<u8> = Vec::new();
+/// # FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+/// use fitsy::{Bitpix, FitsFile, Hdu};
+///
+/// let file = FitsFile::from_bytes(buf)?;
+/// let Hdu::Image(img) = file.hdu(0)? else {
+///     panic!("HDU 0 is not an image");
+/// };
+///
+/// assert_eq!(img.bitpix(), Bitpix::I16);
+/// assert_eq!(img.n_elements(), 12);
+/// assert_eq!(img.read_physical()?.as_slice()[0], 7.0);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct ImageHdu<'a> {
     header: Header,
@@ -22,8 +79,20 @@ pub struct ImageHdu<'a> {
 }
 
 impl<'a> ImageHdu<'a> {
-    /// Construct from a parsed header and a slice covering the raw
-    /// data section (no trailing padding).
+    /// Construct from a parsed header and the raw data section.
+    ///
+    /// The `data` slice must cover the data section without its
+    /// trailing block padding.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when the header omits
+    ///   `BITPIX` or `NAXIS`.
+    /// - [`FitsError::Value`] when `BITPIX` holds a value outside the
+    ///   six that Standard Sec.4.4.1.1 defines.
+    /// - [`FitsError::Data`] when the pixel count or the byte count
+    ///   overflows `u64`, or when `data.len()` does not equal the size
+    ///   that the header declares.
     pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
         let bitpix = Bitpix::from_i64(header.bitpix()?)?;
         let axes = header.axes()?;
@@ -83,8 +152,17 @@ impl<'a> ImageHdu<'a> {
         self.data
     }
 
-    /// Decode the array into native primitives without applying
-    /// `BZERO`/`BSCALE`. The element type `T` must match `BITPIX`.
+    /// Decode the array into native primitives, with no scaling.
+    ///
+    /// The element type `T` must match the `BITPIX` of the HDU. This
+    /// applies neither `BZERO` nor `BSCALE`, so the values are the
+    /// ones the file stores.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when `T` does not match `BITPIX`.
+    /// - [`FitsError::Data`] when the decoded element count does not
+    ///   match the axis product.
     pub fn read_raw<T: Pixel>(&self) -> Result<ImageData<T>> {
         if T::BITPIX != self.bitpix {
             return Err(FitsError::HduMismatch {
@@ -104,24 +182,38 @@ impl<'a> ImageHdu<'a> {
         ImageData::new(out, self.axes.clone())
     }
 
-    /// Decode into the native `BITPIX` type, as an [`ImagePixels`]
-    /// enum so the caller need not know it at compile time. No scaling
-    /// is applied.
+    /// Decode into the native `BITPIX` type, wrapped in
+    /// [`ImagePixels`].
+    ///
+    /// The caller dispatches on the returned variant instead of naming
+    /// the element type at compile time. This applies no scaling.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the decoded element count does not
+    /// match the axis product.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_raw_dyn.fits");
+    /// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+    /// #     .primary(true)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
     /// use fitsy::{FitsError, FitsFile, Hdu, ImagePixels};
     ///
-    /// let f = FitsFile::open("image.fits")?;
+    /// let f = FitsFile::open(&path)?;
     /// let Hdu::Image(img) = f.hdu(0)? else {
     ///     return Err(FitsError::Header("HDU 0 is not an image".into()));
     /// };
     /// match img.read_raw_dyn()? {
-    ///     ImagePixels::I16(d) => println!("i16, {} pixels", d.as_slice().len()),
-    ///     ImagePixels::F32(d) => println!("f32, {} pixels", d.as_slice().len()),
-    ///     other => println!("other dtype: {other:?}"),
+    ///     ImagePixels::I16(d) => assert_eq!(d.as_slice().len(), 12),
+    ///     other => panic!("expected i16 pixels, found {other:?}"),
     /// }
+    /// # std::fs::remove_file(&path)?;
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn read_raw_dyn(&self) -> Result<ImagePixels> {
@@ -135,20 +227,41 @@ impl<'a> ImageHdu<'a> {
         })
     }
 
-    /// Decode the array into `f64` and apply `BZERO`/`BSCALE` and
-    /// `BLANK` per Sec.4.4.2.4-Sec.4.4.2.5.
+    /// Decode the array into `f64` in physical units.
+    ///
+    /// Each pixel becomes `BZERO + BSCALE * raw`, per Standard
+    /// Sec.4.4.2.5. An integer image also maps each pixel equal to
+    /// `BLANK` to `NaN`, per Sec.4.4.2.4. A float image carries no
+    /// `BLANK` card, and its undefined pixels are already `NaN`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the decoded element count does not
+    /// match the axis product.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_physical.fits");
+    /// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![2.5_f32; 12])?
+    /// #     .primary(true)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
     /// use fitsy::{FitsError, FitsFile, Hdu};
     ///
-    /// let f = FitsFile::open("image.fits")?;
+    /// let f = FitsFile::open(&path)?;
     /// let Hdu::Image(img) = f.hdu(0)? else {
     ///     return Err(FitsError::Header("HDU 0 is not an image".into()));
     /// };
     /// let pixels = img.read_physical()?;
-    /// assert_eq!(pixels.as_slice().len() as u64, img.axes().iter().product::<u64>());
+    ///
+    /// assert_eq!(
+    ///     pixels.as_slice().len() as u64,
+    ///     img.axes().iter().product::<u64>()
+    /// );
+    /// # std::fs::remove_file(&path)?;
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn read_physical(&self) -> Result<ImageData<f64>> {
@@ -203,11 +316,17 @@ impl<'a> ImageHdu<'a> {
         }
     }
 
-    /// Like [`Self::read_physical`] but returns `f32` instead of
-    /// `f64`. Use this when memory is the constraint and the loss of
-    /// precision is acceptable (e.g. visualization, single-precision
-    /// downstream pipelines). Scaling is performed in `f64` and
-    /// truncated only on the final store.
+    /// Decode the array into `f32` in physical units.
+    ///
+    /// This applies the same scaling as [`Self::read_physical`], and
+    /// runs that arithmetic in `f64`. Only the final store narrows the
+    /// value to `f32`. Use this method when memory is the constraint
+    /// and the loss of precision is acceptable.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the decoded element count does not
+    /// match the axis product.
     pub fn read_physical_f32(&self) -> Result<ImageData<f32>> {
         let scaling = Scaling {
             bzero: self.header.bzero(),
@@ -229,14 +348,21 @@ impl<'a> ImageHdu<'a> {
         pad_to_block(self.n_elements * self.bitpix.byte_size() as u64)
     }
 
-    /// Read a rectangular sub-array.
+    /// Read a rectangular sub-array, with no scaling.
     ///
-    /// `start` and `shape` are in FITS axis order (element 0 is
-    /// `NAXIS1`, the fastest-varying axis) and must both have length
-    /// `NAXIS`. The result has the requested `shape`.
+    /// The `start` and `shape` arguments are in FITS axis order, where
+    /// element 0 is `NAXIS1`, the fastest-varying axis. Both must have
+    /// length `NAXIS`. The result carries the requested `shape`.
     ///
-    /// Each row is copied in one range read, so the I/O is bounded by
-    /// the requested region, not the whole image.
+    /// This copies one contiguous row at a time, so the cost follows
+    /// the requested region rather than the whole image.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when `T` does not match `BITPIX`.
+    /// - [`FitsError::Data`] when `start` or `shape` has the wrong
+    ///   length, when the region escapes the array, or when an axis
+    ///   stride overflows `u64`.
     pub fn read_subarray<T: Pixel>(&self, start: &[u64], shape: &[u64]) -> Result<ImageData<T>> {
         use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
 
@@ -280,7 +406,20 @@ impl<'a> ImageHdu<'a> {
         ImageData::new(out, shape.to_vec())
     }
 
-    /// Parse the WCS for the given alternate (`b' '` for the primary).
+    /// Parse the WCS of this HDU for alternate descriptor `alt`.
+    ///
+    /// Pass `' '` for `alt` to select the primary description. The
+    /// result is `Ok(None)` when the header carries no WCS for that
+    /// descriptor.
+    ///
+    /// This function reads the header of this HDU alone. It resolves
+    /// no `-TAB` lookup extension, because that needs the whole file.
+    /// Call [`FitsFile::wcs`](crate::FitsFile::wcs) for that.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the header declares a WCS that the
+    /// parser rejects, such as an unknown projection code.
     pub fn wcs(&self, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         crate::wcs::Wcs::from_header(&self.header, alt)
     }

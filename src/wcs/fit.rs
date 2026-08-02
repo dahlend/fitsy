@@ -72,34 +72,48 @@ impl Default for WcsFitOptions {
 /// Result of [`fit_celestial_wcs`].
 #[derive(Debug, Clone)]
 pub struct WcsFit {
-    /// Fitted WCS, ready for `pixel_to_celestial` / `celestial_to_pixel`.
+    /// The fitted WCS, ready for
+    /// [`Wcs::pixel_to_celestial`](crate::Wcs::pixel_to_celestial) and
+    /// [`Wcs::celestial_to_pixel`](crate::Wcs::celestial_to_pixel).
     pub wcs: Wcs,
-    /// Per-point residual `(delta_alpha*cos delta, delta_dec)` in **arcseconds**, computed
-    /// by mapping each input pixel through the fitted WCS and
-    /// comparing to the input sky coord. Index aligned with the
-    /// inputs.
+    /// Per-point residual `(delta_alpha * cos delta, delta_dec)`, in
+    /// arcseconds. Each entry maps one input pixel through the fitted
+    /// WCS and compares the result with the input sky coordinate. The
+    /// order matches the input order.
     pub residuals_arcsec: Vec<(f64, f64)>,
-    /// RMS of `sqrt(delta_alpha^2*cos^2delta + delta_dec^2)` across all points, arcsec.
+    /// Root mean square of
+    /// `sqrt(delta_alpha^2 * cos^2 delta + delta_dec^2)` over every
+    /// point, in arcseconds.
     pub rms_arcsec: f64,
     /// Maximum per-point residual magnitude, arcsec.
     pub max_arcsec: f64,
 }
 
-/// Fit a celestial WCS to a set of `(pixel, sky)` correspondences.
+/// Fit a celestial WCS to a set of `(pixel, sky)` pairs.
 ///
-/// `pixels` are **0-based** pixel coordinates (numpy / C convention,
-/// matching [`crate::Wcs::pixel_to_world`]). `sky` are
-/// `(RA, Dec)` in degrees (or, more generally, `(lon, lat)` in the
-/// chosen [`WcsFitOptions::frame`]).
+/// The `pixels` argument holds 0-based pixel coordinates, matching
+/// [`crate::Wcs::pixel_to_world`]. The `sky` argument holds
+/// `(RA, Dec)` in degrees, or `(lon, lat)` in the frame that
+/// [`WcsFitOptions::frame`] names.
 ///
-/// At least 3 points are required for a free-CRPIX linear fit
-/// (6 unknowns / 2 components per point); 2 suffice when CRPIX is
-/// fixed. SIP fits need enough additional points to over-determine
-/// the polynomial: a forward fit of order `n` introduces
-/// `n(n+3)/2 = (n+1)(n+2)/2 - 3` extra parameters per axis, so at
-/// least that many *additional* points are required for a sensible
-/// fit. The function does not enforce a strict minimum beyond what
-/// the linear solver tolerates.
+/// A linear fit with a free `CRPIX` needs at least 3 points, because
+/// it solves 6 unknowns from 2 components per point. A fit with
+/// `CRPIX` fixed needs 2.
+///
+/// A SIP fit needs further points to over-determine the polynomial. A
+/// forward fit of order `n` adds `(n+1)(n+2)/2 - 3` parameters per
+/// axis, so it needs at least that many points beyond the linear
+/// minimum. This function enforces no minimum past what the linear
+/// solver tolerates.
+///
+/// # Errors
+///
+/// [`FitsError::Wcs`] in four cases:
+///
+/// - `pixels` and `sky` have different lengths.
+/// - Fewer than 3 points are supplied with a free `CRPIX`.
+/// - The normal-equation solve is singular.
+/// - The fitted parameters build no valid [`Wcs`].
 pub fn fit_celestial_wcs(
     pixels: &[(f64, f64)],
     sky: &[(f64, f64)],

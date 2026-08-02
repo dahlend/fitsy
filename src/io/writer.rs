@@ -1,20 +1,30 @@
 //! Sequential HDU writer (Standard Sec.3.1, Sec.3.3, Sec.4.4).
 //!
-//! [`FitsWriter`] streams one HDU at a time to any [`std::io::Write`]:
+//! # Purpose
 //!
-//! 1. The header is rendered with [`Header::to_bytes`] (which always
-//!    pads to a 2880-byte boundary and emits an `END` card).
-//! 2. The data section is written verbatim, then padded to the next
-//!    block boundary with the appropriate fill byte: ASCII space
-//!    (`0x20`) for `XTENSION = 'TABLE   '`, otherwise zero bytes
-//!    (Standard Sec.3.3.1, Sec.3.3.2).
-//! 3. Mandatory keywords are sanity-checked: the first HDU must
-//!    declare `SIMPLE = T`; subsequent HDUs must declare `XTENSION`.
+//! [`FitsWriter`] streams one HDU at a time to any
+//! [`std::io::Write`]. [`write()`] wraps it for the common case of
+//! dumping a list of HDUs to a path.
 //!
-//! The writer can optionally compute and stamp `CHECKSUM`/`DATASUM`
-//! cards on every HDU it emits -- see [`FitsWriter::with_checksums`].
-//! When that mode is off, any `CHECKSUM`/`DATASUM` cards already in
-//! the supplied header are emitted verbatim.
+//! # Layout
+//!
+//! Each call to [`FitsWriter::write_hdu`] runs three steps:
+//!
+//! 1. It checks the mandatory keywords. The first HDU must declare
+//!    `SIMPLE = T`, and each later HDU must declare `XTENSION`.
+//! 2. It renders the header with [`Header::to_bytes`], which pads to a
+//!    2880-byte boundary and emits an `END` card.
+//! 3. It writes the data section verbatim, then pads to the next block
+//!    boundary. The fill byte is an ASCII space for
+//!    `XTENSION = 'TABLE   '`, and a zero byte otherwise (Standard
+//!    Sec.3.3.1, Sec.3.3.2).
+//!
+//! # Design constraints
+//!
+//! [`FitsWriter::with_checksums`] makes the writer compute and stamp a
+//! `CHECKSUM` and a `DATASUM` card on every HDU. Without it, a
+//! `CHECKSUM` or `DATASUM` card already in the supplied header goes
+//! out verbatim, and the writer computes neither.
 
 use std::io::{self, Write};
 
@@ -24,6 +34,26 @@ use crate::header::value::Value;
 use crate::io::block::{BLOCK_SIZE, pad_to_block};
 
 /// Streaming writer for a sequence of HDUs.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::{FitsWriter, ImageBuilder};
+///
+/// let (primary, pdata) = ImageBuilder::new(vec![2_u64, 2], vec![1.0_f32; 4])?
+///     .primary(true)
+///     .build()?;
+///
+/// let mut buf: Vec<u8> = Vec::new();
+/// let mut w = FitsWriter::new(&mut buf);
+/// w.write_hdu(&primary, &pdata)?;
+/// assert_eq!(w.hdu_count(), 1);
+/// w.finish()?;
+///
+/// // Every HDU is padded to the 2880-byte block.
+/// assert_eq!(buf.len() % 2880, 0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug)]
 pub struct FitsWriter<W: Write> {
     inner: W,
@@ -41,11 +71,16 @@ impl<W: Write> FitsWriter<W> {
         }
     }
 
-    /// Wrap a writer that is positioned just after an existing
-    /// sequence of `hdu_count` HDUs. The next call to
-    /// [`write_hdu`](Self::write_hdu) will be validated as an
-    /// extension HDU (i.e. `XTENSION` required, `SIMPLE` rejected).
-    /// Used by [`FitsAppender`](crate::FitsAppender).
+    /// Wrap a writer that already sits just past a sequence of
+    /// `hdu_count` HDUs.
+    ///
+    /// The `inner` argument is that writer, positioned at the byte
+    /// after the last HDU. The `hdu_count` argument is how many HDUs
+    /// precede that point.
+    ///
+    /// The next call to [`write_hdu`](Self::write_hdu) validates its
+    /// header as an extension, so it requires `XTENSION` and rejects
+    /// `SIMPLE`. [`FitsAppender`](crate::FitsAppender) uses this.
     pub fn with_hdu_count(inner: W, hdu_count: usize) -> Self {
         Self {
             inner,
@@ -54,28 +89,33 @@ impl<W: Write> FitsWriter<W> {
         }
     }
 
-    /// Enable automatic computation and stamping of `CHECKSUM` and
-    /// `DATASUM` cards on every HDU written. The header passed to
-    /// [`write_hdu`](Self::write_hdu) does not need to contain
-    /// placeholders -- the writer appends them itself if absent.
+    /// Compute and stamp a `CHECKSUM` and a `DATASUM` card on every
+    /// HDU that this writer emits.
+    ///
+    /// The header passed to [`write_hdu`](Self::write_hdu) needs no
+    /// placeholder card. The writer appends one when it is absent.
     #[must_use]
     pub fn with_checksums(mut self) -> Self {
         self.stamp_checksums = true;
         self
     }
 
-    /// Write a single HDU. The header bytes and the padded data
-    /// bytes are written in that order.
+    /// Write one HDU: the header bytes, then the padded data bytes.
     ///
-    /// `data` is the raw data section (no padding). The writer pads
-    /// it to the next 2880-byte block on its own.
+    /// The `data` argument holds the raw data section with no padding.
+    /// This function adds the padding to the next 2880-byte block.
     ///
-    /// The first HDU must be the primary HDU (`SIMPLE = T`);
-    /// subsequent HDUs must declare `XTENSION`. The writer also
-    /// verifies that `BITPIX`, `NAXIS`, `NAXISn`, and (for extensions)
-    /// `PCOUNT`/`GCOUNT` are present and that `data.len()` matches
-    /// the size implied by `NAXIS*` x `BITPIX` (+ heap, for
-    /// `BINTABLE`).
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] in five cases:
+    ///
+    /// - The first HDU does not declare `SIMPLE = T`.
+    /// - A later HDU does not declare `XTENSION`.
+    /// - `BITPIX`, `NAXIS` or a `NAXISn` card is absent.
+    /// - An extension omits `PCOUNT` or `GCOUNT`.
+    /// - `data.len()` does not match the size those keywords imply.
+    ///
+    /// [`FitsError::Io`] when the write fails.
     pub fn write_hdu(&mut self, header: &Header, data: &[u8]) -> Result<()> {
         let is_primary = self.hdu_count == 0;
         validate_mandatory(header, is_primary)?;
@@ -131,11 +171,17 @@ impl<W: Write> FitsWriter<W> {
         self.hdu_count
     }
 
-    /// Append a raw, already-padded HDU (header + padded data) to
-    /// the output. Used internally by `FitsFile.flush()` to stream
-    /// untouched HDUs straight from the source file without a
-    /// decode/encode round-trip. The caller is responsible for
-    /// ensuring `bytes` is a complete, validly framed HDU.
+    /// Append a raw, already-padded HDU, meaning its header followed
+    /// by its padded data.
+    ///
+    /// The Python `FitsFile.flush()` uses this to stream an untouched
+    /// HDU from the source file without decoding and re-encoding it.
+    /// The caller guarantees that `bytes` frames one complete HDU.
+    ///
+    /// # Errors
+    ///
+    /// [`io::Error`] when `bytes.len()` is not a multiple of 2880, or
+    /// when the write fails.
     pub fn write_raw_padded(&mut self, bytes: &[u8]) -> io::Result<()> {
         if !bytes.len().is_multiple_of(BLOCK_SIZE) {
             return Err(io::Error::other(format!(
@@ -148,7 +194,11 @@ impl<W: Write> FitsWriter<W> {
         Ok(())
     }
 
-    /// Flush any buffered output and return the inner writer.
+    /// Flush buffered output and return the inner writer.
+    ///
+    /// # Errors
+    ///
+    /// [`io::Error`] when the flush fails.
     pub fn finish(mut self) -> io::Result<W> {
         self.inner.flush()?;
         Ok(self.inner)
@@ -157,27 +207,39 @@ impl<W: Write> FitsWriter<W> {
 
 /// Write a sequence of HDUs to `path` in one call.
 ///
-/// Convenience wrapper around [`FitsWriter`] for the common case of
-/// "build a list of HDUs, dump them to a file." Each tuple is a
-/// `(header, data)` pair as produced by
+/// This wraps [`FitsWriter`] for the common case: build a list of
+/// HDUs, then write them to a file. Each tuple is a `(header, data)`
+/// pair, as
 /// [`ImageBuilder::build`](crate::ImageBuilder::build),
-/// [`BinTableBuilder::build`](crate::BinTableBuilder::build), or
-/// [`AsciiTableBuilder::build`](crate::AsciiTableBuilder::build).
+/// [`BinTableBuilder::build`](crate::BinTableBuilder::build) and
+/// [`AsciiTableBuilder::build`](crate::AsciiTableBuilder::build)
+/// produce.
 ///
-/// `overwrite = false` (the default in the Python wrapper) returns
-/// an `io::Error::AlreadyExists` if the destination file is already
-/// present; pass `true` to clobber.
+/// An `overwrite` value of `false` fails when `path` exists. Pass
+/// `true` to replace the file.
+///
+/// # Errors
+///
+/// - [`FitsError::Header`] when `hdus` is empty, or when an HDU fails
+///   the checks that [`FitsWriter::write_hdu`] applies.
+/// - [`FitsError::Io`] when `path` cannot be created or written. An
+///   `overwrite` value of `false` gives
+///   [`std::io::ErrorKind::AlreadyExists`] when `path` exists.
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```
 /// use fitsy::{ImageBuilder, write};
 ///
+/// # let path = std::env::temp_dir().join("fitsy_doc_write_fn.fits");
 /// let pixels: Vec<f32> = vec![0.0; 64 * 64];
-/// let img = ImageBuilder::new(vec![64u64, 64], pixels)?
+/// let img = ImageBuilder::new(vec![64_u64, 64], pixels)?
 ///     .primary(true)
 ///     .build()?;
-/// write("out.fits", &[img], false)?;
+/// write(&path, &[img], true)?;
+///
+/// # assert_eq!(std::fs::metadata(&path)?.len() % 2880, 0);
+/// # std::fs::remove_file(&path)?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn write(

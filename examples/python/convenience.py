@@ -1,10 +1,11 @@
 """Module-level convenience functions: `getdata`, `getval`, `setval`,
-`delval`, `info`, `append`.
+`delval`, `info` and `append`.
 
-These mirror ``astropy.io.fits`` and are the right tool when you only
-need a single read or write and don't want to manage a `FitsFile`.
+Each one opens the file, does its work, and closes it again. Use them
+for a single read or a single write. Use `fitsy.open` instead when you
+need several operations on one file.
 
-Run from the repo root::
+Run from the repository root:
 
     python examples/python/convenience.py
 """
@@ -21,7 +22,8 @@ with tempfile.TemporaryDirectory() as td:
         path,
         [
             fitsy.image(
-                np.arange(16, dtype="i2").reshape(4, 4), header={"OBJECT": "demo"}
+                np.arange(16, dtype="i2").reshape(4, 4),
+                header={"OBJECT": "demo"},
             )
         ],
     )
@@ -41,9 +43,9 @@ with tempfile.TemporaryDirectory() as td:
     fitsy.setval(path, "OBJECT", value="NGC 2403")
     fitsy.delval(path, "OBSERVER")
 
-    # Stream a new HDU onto the end without rewriting the existing file.
-    # `fitsy.append` mirrors astropy's signature: it takes a raw
-    # numpy array (and optional header dict), not a builder.
+    # Stream a new HDU onto the end without rewriting the existing
+    # file. `fitsy.append` takes a raw numpy array and an optional
+    # header dict, not a builder.
     fitsy.append(
         path,
         np.zeros((2, 2), dtype="f4"),

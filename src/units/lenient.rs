@@ -122,14 +122,17 @@ pub fn parse_unit_lenient(s: &str) -> Result<Unit> {
 
 /// [`factor_to`] with the [`parse_unit_lenient`] fallback.
 ///
-/// Also retries the aliases when the strict reading exists but carries
-/// the wrong dimension: `TIMEUNIT = 'S'` is siemens to the grammar and
-/// seconds to the files that write it, and `canonical` is what tells
-/// the two apart.
+/// This also retries the aliases when a strict reading exists but
+/// carries the wrong dimension. The grammar reads `TIMEUNIT = 'S'` as
+/// siemens, while the files that write it mean seconds. The
+/// `canonical` argument is what tells the two apart, and it names the
+/// dimension the caller expects. The `unit` argument is the unit
+/// string to read.
 ///
 /// # Errors
 ///
-/// [`crate::error::FitsError::Header`] if neither reading has dimension `canonical`.
+/// [`crate::error::FitsError::Header`] when neither reading carries
+/// the dimension that `canonical` names.
 pub fn factor_to_lenient(unit: &str, canonical: Dimension) -> Result<f64> {
     let strict = factor_to(unit, canonical);
     if strict.is_ok() {

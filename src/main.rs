@@ -1,16 +1,20 @@
-//! `fitsy` command-line tool.
+//! The `fitsy` command-line tool.
 //!
-//! A small Swiss-army knife around the `fitsy` library:
+//! This binary wraps the `fitsy` library. It offers five subcommands:
 //!
-//! * `fitsy info <file>`                      -- one-line summary per HDU (with WCS details).
-//! * `fitsy header <file> [--hdu N] [filter]` -- dump parsed header cards, optionally filtered.
-//! * `fitsy checksum <file>`                  -- verify CHECKSUM / DATASUM keywords.
-//! * `fitsy stats <file> [--hdu N]`           -- pixel statistics for image HDUs.
-//! * `fitsy funpack <input> [-o out]`         -- write a tile-decompressed copy
-//!   (the inverse of `fpack`).
+//! * `fitsy info <file>` -- one summary line per HDU, with WCS
+//!   details.
+//! * `fitsy header <file> [--hdu N] [filter]` -- print the parsed
+//!   header cards, filtered by `filter` when one is given.
+//! * `fitsy checksum <file>` -- verify the `CHECKSUM` and `DATASUM`
+//!   keywords.
+//! * `fitsy stats <file> [--hdu N]` -- pixel statistics for each image
+//!   HDU.
+//! * `fitsy funpack <input> [-o out]` -- write a tile-decompressed
+//!   copy of the input.
 //!
-//! Designed to require no external dependencies: argument parsing is
-//! manual and intentionally simple.
+//! The binary takes no dependency outside the library. Argument
+//! parsing is manual and stays simple for that reason.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -770,7 +774,8 @@ fn pixel_stats(pixels: &[f64]) -> Stats {
     }
 }
 
-/// Decode an [`OwnedImage`]'s raw bytes to physical (BZERO/BSCALE applied) `f64` pixels.
+/// Decode the raw bytes of an [`OwnedImage`] into `f64` pixels in
+/// physical units, with `BZERO` and `BSCALE` applied.
 #[cfg(feature = "compression")]
 #[allow(
     clippy::unnecessary_wraps,

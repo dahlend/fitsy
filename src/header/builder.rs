@@ -1,21 +1,37 @@
-//! Header construction and serialisation (Standard Sec.4).
+//! Header construction and serialization (Standard Sec.4).
 //!
-//! [`Header::parse`] reads; this module writes -- builder methods to
-//! append cards, and [`Header::to_bytes`] to render a block-padded
-//! byte stream ending in `END`.
+//! # Purpose
 //!
-//! Serialisation rules (Sec.4):
+//! [`Header::parse`] reads a header. This module writes one. It adds
+//! the builder methods that append and edit cards, and
+//! [`Header::to_bytes`], which renders a block-padded byte stream
+//! ending in `END`.
 //!
-//! * Keywords up to 8 chars use `KEYWORD = VALUE / COMMENT`, with the
-//!   value indicator in columns 9-10.
-//! * A string too long for the 68 chars between the quotes becomes a
-//!   chain of `CONTINUE` cards, each but the last ending in `&`
-//!   (Sec.4.2.1.2).
-//! * `HIERARCH key1 key2 ...` puts the `=` after the longest name that
-//!   fits. `CONTINUE` is not emitted for HIERARCH.
-//! * Commentary cards carry up to 72 bytes in columns 9-80; longer
-//!   text splits across cards in order.
-//! * Output is space-padded to the next 2880-byte boundary (Sec.3.1).
+//! # Layout
+//!
+//! [`Header::push`] appends a value card, and
+//! [`Header::push_commentary`] appends a commentary card.
+//! [`Header::set`] replaces the value of an existing card, or appends
+//! one. [`Header::insert`], [`Header::set_after`] and
+//! [`Header::set_before`] place a card at a chosen position.
+//! [`Header::rename_keyword`] renames every card with one keyword.
+//!
+//! # Reference: serialization rules
+//!
+//! Sec.4 fixes the byte layout that [`Header::to_bytes`] emits:
+//!
+//! * A keyword of eight characters or fewer writes as
+//!   `KEYWORD = VALUE / COMMENT`, with the value indicator in columns
+//!   9 and 10.
+//! * A string too long for the 68 characters between the quotes
+//!   becomes a chain of `CONTINUE` cards. Every card but the last ends
+//!   in `&` (Sec.4.2.1.2).
+//! * A `HIERARCH key1 key2 ...` keyword puts the `=` after the longest
+//!   name that fits. This form emits no `CONTINUE` card.
+//! * A commentary card carries up to 72 bytes in columns 9 to 80.
+//!   Longer text splits across cards in order.
+//! * The output pads with ASCII spaces to the next 2880-byte
+//!   boundary (Sec.3.1).
 
 use crate::error::{FitsError, Result};
 use crate::header::card::{CARD_SIZE, KEYWORD_LEN, VALUE_INDICATOR_LEN};
@@ -57,11 +73,24 @@ impl Header {
 
     /// Append a value card.
     ///
-    /// `keyword` may be a standard <= 8-char name (e.g. `"BITPIX"`)
-    /// or an ESO HIERARCH long keyword in the form
-    /// `"HIERARCH name1 name2 ..."`. If a card with the same keyword
-    /// already exists, the new card is appended after it (i.e. the
-    /// original first occurrence is returned by [`first`](Header::first)).
+    /// The `keyword` argument takes a standard name of eight
+    /// characters or fewer, such as `"BITPIX"`, or a HIERARCH long
+    /// keyword in the form `"HIERARCH name1 name2 ..."`.
+    ///
+    /// The `value` argument becomes the value field. The `comment`
+    /// argument becomes the inline comment after the `/`. Pass `None`
+    /// for no comment.
+    ///
+    /// When a card with the same keyword already exists, this appends
+    /// the new card after it. [`first`](Header::first) therefore keeps
+    /// returning the original card.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `keyword` is empty, when it exceeds
+    /// eight characters without a `HIERARCH` prefix, or when it holds
+    /// a byte outside upper-case ASCII, digits, `-` and `_`. A
+    /// `HIERARCH` keyword accepts any printable ASCII byte.
     pub fn push(
         &mut self,
         keyword: impl Into<String>,
@@ -81,8 +110,11 @@ impl Header {
         Ok(self)
     }
 
-    /// Append a commentary card. `text` may be any length; long text
-    /// is split across multiple cards on serialisation.
+    /// Append a commentary card holding `text`.
+    ///
+    /// The `kind` argument picks the keyword: `COMMENT`, `HISTORY` or
+    /// a blank keyword. The `text` argument takes any length, and
+    /// [`Header::to_bytes`] splits long text across several cards.
     pub fn push_commentary(&mut self, kind: CommentaryKind, text: &str) -> &mut Self {
         let entry = HeaderEntry {
             keyword: kind.keyword().to_string(),
@@ -95,10 +127,24 @@ impl Header {
         self
     }
 
-    /// Replace the value of the first existing entry with `keyword`,
-    /// or append a new value card if none exists. Commentary cards
-    /// are not affected. Returns `true` if an existing entry was
-    /// updated, `false` if a new card was appended.
+    /// Replace the value of the first card with `keyword`, or append
+    /// a new value card when none exists.
+    ///
+    /// The `value` argument becomes the new value field. The
+    /// `comment` argument becomes the inline comment after the `/`.
+    /// Pass `None` for no comment.
+    /// An existing card keeps its comment when `comment` is `None`.
+    ///
+    /// The result is `true` when this updated an existing card, and
+    /// `false` when it appended one. This does not touch a commentary
+    /// card.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `keyword` is empty, when it exceeds
+    /// eight characters without a `HIERARCH` prefix, or when it holds
+    /// a byte outside upper-case ASCII, digits, `-` and `_`. A
+    /// `HIERARCH` keyword accepts any printable ASCII byte.
     pub fn set(
         &mut self,
         keyword: &str,
@@ -118,8 +164,19 @@ impl Header {
         Ok(false)
     }
 
-    /// Insert a value card at position `idx`, shifting subsequent
-    /// cards right. If `idx` is past the end, the card is appended.
+    /// Insert a value card at position `idx`, moving each later card
+    /// one position along. An `idx` past the end appends the card.
+    ///
+    /// The `value` argument becomes the value field. The `comment`
+    /// argument becomes the inline comment after the `/`. Pass `None`
+    /// for no comment.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `keyword` is empty, when it exceeds
+    /// eight characters without a `HIERARCH` prefix, or when it holds
+    /// a byte outside upper-case ASCII, digits, `-` and `_`. A
+    /// `HIERARCH` keyword accepts any printable ASCII byte.
     pub fn insert(
         &mut self,
         idx: usize,
@@ -140,9 +197,22 @@ impl Header {
         Ok(self)
     }
 
-    /// Insert a value card immediately after the first card whose
-    /// keyword equals `after`. Returns `Ok(false)` and appends at the
-    /// end if no `after` card exists.
+    /// Insert a value card directly after the first card whose
+    /// keyword equals `after`.
+    ///
+    /// The `value` argument becomes the value field. The `comment`
+    /// argument becomes the inline comment after the `/`. Pass `None`
+    /// for no comment.
+    ///
+    /// The result is `true` when such a card exists. When none does,
+    /// this appends the new card at the end and returns `false`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `keyword` is empty, when it exceeds
+    /// eight characters without a `HIERARCH` prefix, or when it holds
+    /// a byte outside upper-case ASCII, digits, `-` and `_`. A
+    /// `HIERARCH` keyword accepts any printable ASCII byte.
     pub fn set_after(
         &mut self,
         after: &str,
@@ -169,9 +239,22 @@ impl Header {
         }
     }
 
-    /// Insert a value card immediately before the first card whose
-    /// keyword equals `before`. Returns `Ok(false)` and appends at
-    /// the end if no `before` card exists.
+    /// Insert a value card directly before the first card whose
+    /// keyword equals `before`.
+    ///
+    /// The `value` argument becomes the value field. The `comment`
+    /// argument becomes the inline comment after the `/`. Pass `None`
+    /// for no comment.
+    ///
+    /// The result is `true` when such a card exists. When none does,
+    /// this appends the new card at the end and returns `false`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `keyword` is empty, when it exceeds
+    /// eight characters without a `HIERARCH` prefix, or when it holds
+    /// a byte outside upper-case ASCII, digits, `-` and `_`. A
+    /// `HIERARCH` keyword accepts any printable ASCII byte.
     pub fn set_before(
         &mut self,
         before: &str,
@@ -198,8 +281,15 @@ impl Header {
         }
     }
 
-    /// Rename every value card whose keyword equals `old` to use
-    /// `new`. Returns the number of cards renamed.
+    /// Rename every value card whose keyword equals `old` to `new`.
+    ///
+    /// The result is the number of cards renamed. This does not touch
+    /// a commentary card.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `new` is not a legal FITS keyword.
+    /// [`Header::push`] lists the rules.
     pub fn rename_keyword(&mut self, old: &str, new: &str) -> Result<usize> {
         validate_keyword(new)?;
         let mut count = 0_usize;
@@ -215,8 +305,14 @@ impl Header {
         Ok(count)
     }
 
-    /// Render this header to padded bytes ending with `END` followed
-    /// by ASCII spaces out to the next 2880-byte boundary.
+    /// Render this header to bytes, ending with an `END` card and
+    /// ASCII spaces out to the next 2880-byte boundary.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when a card cannot be encoded into 80
+    /// bytes. A keyword longer than the card, or a `HIERARCH` name
+    /// that leaves no room for its value, causes this.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut out: Vec<u8> = Vec::with_capacity(BLOCK_SIZE);
         for entry in self.entries() {

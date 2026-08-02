@@ -1,20 +1,21 @@
 //! `HCOMPRESS_1` tile decompression (R. White 1992; FITS standard
 //! 2016 Sec.10.4.5; Pence et al. 2010 Sec.3.3).
 //!
-//! 1. **Decode** the bit-packed quadtree-coded payload into a 2-D
-//!    array of integer H-transform coefficients.
-//! 2. **Un-digitize** by multiplying every coefficient by the integer
-//!    `SCALE` factor that was used during compression
-//!    (lossy -- `SCALE > 1` discards low-order bits).
-//! 3. **Inverse H-transform** (`hinv`) reconstructs the image, with
-//!    optional `hsmooth` smoothing of coefficients between transform
-//!    levels (enabled by the `SMOOTH` parameter; off by default).
+//! Decoding runs in three steps:
 //!
-//! The [`Coeff`] trait makes the decoder generic over coefficient
-//! width, so one implementation covers both cfitsio's
-//! `fits_hdecompress` and `fits_hdecompress64`. Output pixels may be
-//! 1, 2, 4 or 8 byte signed integers; quantized floats use the i32
-//! path.
+//! 1. Decode the bit-packed quadtree-coded payload into a
+//!    two-dimensional array of integer H-transform coefficients.
+//! 2. Un-digitize, by multiplying every coefficient by the integer
+//!    `SCALE` factor that compression used. This step is lossy,
+//!    because a `SCALE` above 1 discards low-order bits.
+//! 3. Reconstruct the image with the inverse H-transform, `hinv`. The
+//!    `SMOOTH` parameter enables `hsmooth`, which smooths coefficients
+//!    between transform levels. It is off by default.
+//!
+//! The [`Coeff`] trait makes the decoder generic over the coefficient
+//! width, so one implementation covers both the 32-bit and the 64-bit
+//! form. An output pixel is a signed integer of 1, 2, 4 or 8 bytes. A
+//! quantized float takes the `i32` path.
 
 use std::ops::{Add, AddAssign, BitAnd, BitOr, BitOrAssign, BitXor, Neg, Shl, Shr, Sub};
 
@@ -72,6 +73,12 @@ pub(super) fn decompress_into(
     }
 }
 
+/// Run the three decode steps for one coefficient width.
+///
+/// This reads the header, decodes the quadtree-coded bit planes into
+/// `a`, un-digitizes by the `SCALE` factor, and applies the inverse
+/// H-transform. The result lands in `dst` as big-endian pixels of
+/// width `bp`.
 fn decompress_typed<T: Coeff>(
     payload: &[u8],
     n_pixels: usize,
@@ -121,9 +128,9 @@ fn decompress_typed<T: Coeff>(
 
 // -- Coeff trait --------------------------------------------------
 
-/// Integer type used for H-transform coefficients. Implemented for
-/// `i32` (matches cfitsio's `fits_hdecompress`) and `i64` (matches
-/// `fits_hdecompress64`).
+/// Integer type that holds an H-transform coefficient. This crate
+/// implements it for `i32` and for `i64`, which are the two widths the
+/// convention defines.
 pub(super) trait Coeff:
     Copy
     + PartialOrd
@@ -202,6 +209,7 @@ impl<'a> State<'a> {
         }
     }
 
+    /// Fail unless `n` more bytes remain in the payload.
     fn need(&self, n: usize) -> Result<()> {
         if self.pos + n > self.src.len() {
             Err(FitsError::Data(format!(
@@ -213,26 +221,33 @@ impl<'a> State<'a> {
             Ok(())
         }
     }
+    /// Take the next `n` bytes and advance the cursor.
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         self.need(n)?;
         let s = &self.src[self.pos..self.pos + n];
         self.pos += n;
         Ok(s)
     }
+    /// Read one big-endian `i32` from the byte stream.
     fn read_int_be(&mut self) -> Result<i32> {
         let b = self.read_bytes(4)?;
         Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
+    /// Read one big-endian `i64` from the byte stream.
     fn read_long_be(&mut self) -> Result<i64> {
         let b = self.read_bytes(8)?;
         Ok(i64::from_be_bytes([
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
         ]))
     }
+    /// Begin bit-level reading. The byte cursor keeps its position,
+    /// and the bit buffer starts empty.
     fn start_inputing_bits(&mut self) {
         self.buffer = 0;
         self.bits_to_go = 0;
     }
+    /// Read one bit, refilling the buffer from the next byte when it
+    /// runs out.
     fn input_bit(&mut self) -> Result<i32> {
         if self.bits_to_go == 0 {
             self.need(1)?;
@@ -243,6 +258,7 @@ impl<'a> State<'a> {
         self.bits_to_go -= 1;
         Ok(((self.buffer >> self.bits_to_go) & 1) as i32)
     }
+    /// Read `n` bits as an integer, most significant bit first.
     fn input_nbits(&mut self, n: i32) -> Result<i32> {
         debug_assert!((1..=8).contains(&n), "n={n} must be in range 1..=8");
         if self.bits_to_go < n {
@@ -255,15 +271,22 @@ impl<'a> State<'a> {
         let mask = (1_u32 << n) - 1;
         Ok(((self.buffer >> self.bits_to_go) & mask) as i32)
     }
+    /// Read one 4-bit nybble.
     fn input_nybble(&mut self) -> Result<i32> {
         self.input_nbits(4)
     }
+    /// Read `n` consecutive nybbles into `out`.
     fn input_nnybble(&mut self, n: usize, out: &mut [u8]) -> Result<()> {
         for slot in out.iter_mut().take(n) {
             *slot = self.input_nybble()? as u8;
         }
         Ok(())
     }
+    /// Decode one Huffman-coded 4-bit value.
+    ///
+    /// The quadtree coder uses this variable-length code for the
+    /// 16 possible 2 by 2 occupancy patterns, so a common pattern
+    /// costs fewer bits than a rare one.
     fn input_huffman(&mut self) -> Result<i32> {
         let mut c = self.input_nbits(3)?;
         if c < 4 {
@@ -294,6 +317,11 @@ impl<'a> State<'a> {
         c = self.input_bit()? | (c << 1);
         Ok(if c == 62 { 0 } else { 14 })
     }
+    /// Read the payload header and return `(nx, ny, scale)`.
+    ///
+    /// The header opens with the two magic bytes `DD 99`, then three
+    /// big-endian `i32` values: the two tile dimensions and the
+    /// digitization factor.
     fn read_decode_header(&mut self) -> Result<(i32, i32, i32)> {
         let magic = self.read_bytes(2)?;
         if magic != CODE_MAGIC {
@@ -312,9 +340,12 @@ impl<'a> State<'a> {
         }
         Ok((nx, ny, scale))
     }
+    /// Read the whole-tile sum that follows the header.
     fn read_sumall(&mut self) -> Result<i64> {
         self.read_long_be()
     }
+    /// Read the bit-plane count of each of the three coefficient
+    /// quadrants.
     fn read_nbitplanes(&mut self) -> Result<[u8; 3]> {
         let b = self.read_bytes(3)?;
         Ok([b[0], b[1], b[2]])
@@ -323,6 +354,11 @@ impl<'a> State<'a> {
 
 // -- decode -------------------------------------------------------
 
+/// Decode the four coefficient quadrants into `a`.
+///
+/// The H-transform splits a tile into one direct-current coefficient
+/// and three detail quadrants. This decodes each detail quadrant with
+/// [`qtree_decode`], then sets the sign bits that follow them.
 fn dodecode<T: Coeff>(
     state: &mut State<'_>,
     a: &mut [T],
@@ -370,6 +406,12 @@ fn dodecode<T: Coeff>(
     Ok(())
 }
 
+/// Decode one quadrant, one bit plane at a time, into `a`.
+///
+/// Each plane is quadtree-coded: a node holds four bits saying which
+/// of its four children are non-empty, and only a non-empty child is
+/// coded further. [`qtree_expand`] walks that tree down to the pixel
+/// level, and [`qtree_bitins`] inserts the resulting bits into `a`.
 fn qtree_decode<T: Coeff>(
     state: &mut State<'_>,
     a: &mut [T],
@@ -429,6 +471,11 @@ fn qtree_decode<T: Coeff>(
     Ok(())
 }
 
+/// Expand one quadtree level in place.
+///
+/// [`qtree_copy_inplace`] spreads the current level over the larger
+/// grid, then each non-zero node reads its own 4-bit occupancy pattern
+/// from the Huffman code.
 fn qtree_expand(state: &mut State<'_>, a: &mut [u8], nx: i32, ny: i32) -> Result<()> {
     qtree_copy_inplace(a, nx, ny);
     let n = (nx * ny) as usize;
@@ -440,6 +487,8 @@ fn qtree_expand(state: &mut State<'_>, a: &mut [u8], nx: i32, ny: i32) -> Result
     Ok(())
 }
 
+/// Spread an `nx/2` by `ny/2` quadtree level over the `nx` by `ny`
+/// grid, working backwards so the copy needs no scratch buffer.
 fn qtree_copy_inplace(a: &mut [u8], nx: i32, ny: i32) {
     let nx2 = (nx + 1) / 2;
     let ny2 = (ny + 1) / 2;
@@ -491,6 +540,8 @@ fn qtree_copy_inplace(a: &mut [u8], nx: i32, ny: i32) {
     }
 }
 
+/// Insert one decoded bit plane from `scratch` into the coefficient
+/// array `a`, at the bit position that `plane_val` selects.
 fn qtree_bitins<T: Coeff>(
     scratch: &[u8],
     nqx: i32,
@@ -548,6 +599,8 @@ fn qtree_bitins<T: Coeff>(
     }
 }
 
+/// Set `plane_val` in whichever of the four cells of one 2 by 2 block
+/// the occupancy pattern `v` marks.
 #[inline]
 fn apply_2x2<T: Coeff>(a: &mut [T], s00: usize, n: usize, v: u8, plane_val: T) {
     if v & 0b0001 != 0 {
@@ -566,6 +619,13 @@ fn apply_2x2<T: Coeff>(a: &mut [T], s00: usize, n: usize, v: u8, plane_val: T) {
 
 // -- inverse H-transform ------------------------------------------
 
+/// Inverse H-transform: rebuild the image from its coefficients.
+///
+/// The transform is a Haar-like pyramid. This walks it from the
+/// coarsest level down, undoing one 2 by 2 butterfly per step and
+/// interleaving the result with [`unshuffle`]. A `smooth` value of
+/// `true` runs [`hsmooth`] between levels, which reduces the blocking
+/// that a large `scale` introduces.
 fn hinv<T: Coeff>(a: &mut [T], nx: i32, ny: i32, smooth: bool, scale: i32) {
     let nmax = nx.max(ny);
     let mut log2n = f64::from(nmax).log2().round() as i32;
@@ -724,6 +784,8 @@ fn hinv<T: Coeff>(a: &mut [T], nx: i32, ny: i32, smooth: bool, scale: i32) {
     let _ = (mask1, mask2, bit1);
 }
 
+/// Interleave the two halves of one row or column, which reverses the
+/// de-interleaving the forward transform applied.
 fn unshuffle<T: Coeff>(a: &mut [T], offset: usize, n: i32, n2: usize, tmp: &mut [T]) {
     let nhalf = ((n + 1) >> 1) as usize;
     for i in 0..(n as usize - nhalf) {
@@ -739,6 +801,12 @@ fn unshuffle<T: Coeff>(a: &mut [T], offset: usize, n: i32, n2: usize, tmp: &mut 
 
 // -- hsmooth ------------------------------------------------------
 
+/// Smooth the coefficients of one pyramid level.
+///
+/// Quantizing by a large `scale` leaves visible blocking. This nudges
+/// each coefficient toward the value its neighbors imply, by at most
+/// half of `scale`, so the reconstruction stays within the
+/// quantization error.
 fn hsmooth<T: Coeff>(a: &mut [T], nxtop: i32, nytop: i32, ny: i32, scale: i32) {
     let smax = T::from_i64(i64::from(scale >> 1));
     if smax <= T::ZERO {

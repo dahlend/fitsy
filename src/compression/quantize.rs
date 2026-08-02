@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-/// Length of the pre-computed random table (cfitsio constant).
+/// Length of the pre-computed random table, fixed by the convention.
 pub(super) const N_RANDOM: usize = 10_000;
 
 /// Sentinel integer for "this float was originally NaN/Inf".
@@ -32,7 +32,7 @@ pub(super) enum DitherMethod {
 }
 
 /// Pre-computed Park-Miller table, lazily initialized once per
-/// process. Equivalent to cfitsio's `fits_rand_value[]`.
+/// process. This is the table that the convention defines.
 pub(super) fn random_values() -> &'static [f32; N_RANDOM] {
     static TABLE: OnceLock<[f32; N_RANDOM]> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -63,7 +63,7 @@ pub(super) fn random_values() -> &'static [f32; N_RANDOM] {
 }
 
 /// State machine that walks the dither table for a single tile,
-/// matching cfitsio's `unquantize_i4r4` / `imcomp_decompress_tile`.
+/// as the dequantization step of the convention defines it.
 struct DitherWalker {
     table: &'static [f32; N_RANDOM],
     iseed: usize,
@@ -85,10 +85,13 @@ impl DitherWalker {
             nextrand,
         }
     }
+    /// The dither value for the current pixel.
     #[inline]
     fn current(&self) -> f32 {
         self.table[self.nextrand]
     }
+    /// Advance to the next dither value, re-seeding from the table
+    /// once the walk reaches its end.
     #[inline]
     fn step(&mut self) {
         self.nextrand += 1;
@@ -167,13 +170,16 @@ pub(super) fn unquantize_to_f64_be(
     }
 }
 
-/// Decode a single quantized integer. Returns `None` for the
-/// blank sentinel (the caller substitutes its own NaN for the
-/// appropriate output type), `Some(0.0)` for `SUBTRACTIVE_DITHER_2`'s
-/// exact-zero sentinel, and the dequantized value otherwise. The
-/// dither walker is advanced exactly once per pixel -- including on
-/// blank / zero-sentinel values -- to keep phase alignment with
-/// cfitsio.
+/// Decode a single quantized integer.
+///
+/// The result is `None` for the blank sentinel, and the caller then
+/// substitutes the NaN of its own output type. It is `Some(0.0)` for
+/// the exact-zero sentinel of `SUBTRACTIVE_DITHER_2`. Otherwise it is
+/// the dequantized value.
+///
+/// The dither walker advances exactly once per pixel, including on a
+/// blank value and on the zero sentinel. That keeps its phase aligned
+/// with the phase the encoder used.
 #[inline]
 fn decode_one(
     v: i32,
@@ -214,8 +220,9 @@ fn decode_one(
 mod tests {
     use super::*;
 
-    /// First random value reproduces cfitsio's table[0] = ~7.826e-6.
-    /// Park-Miller seed 1 -> next state 16807; 16807 / 2147483647.
+    /// The first random value reproduces the tabulated 7.826e-6 that
+    /// the convention defines. A Park-Miller generator seeded with 1
+    /// advances to state 16807, and 16807 / 2147483647 is that value.
     #[test]
     fn random_table_matches_park_miller() {
         let t = random_values();

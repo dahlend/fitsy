@@ -26,9 +26,25 @@ use crate::wcs::wat;
 use crate::wcs::{Axis, WcsParts};
 
 impl Wcs {
-    /// Parse the WCS for alternate `alt` (use `' '` for the primary).
-    /// Returns `Ok(None)` if the header carries no recognizable WCS
-    /// for that alternate.
+    /// Parse the WCS of `header` for alternate descriptor `alt`.
+    ///
+    /// Pass `' '` for `alt` to select the primary description, or a
+    /// letter from `A` to `Z` for an alternate. The result is
+    /// `Ok(None)` when the header carries no WCS for that descriptor.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in four cases:
+    ///
+    /// - `alt` is neither a space nor a letter from `A` to `Z`.
+    /// - A `CTYPE` names a projection or a spectral algorithm outside
+    ///   the standard.
+    /// - The linear matrix is singular.
+    /// - A projection rejects its `PVi_m` parameters.
+    ///
+    /// [`crate::FitsError::MissingMandatory`] or
+    /// [`crate::FitsError::Value`] when `NAXIS` is absent or
+    /// malformed.
     pub fn from_header(header: &Header, alt: char) -> Result<Option<Self>> {
         let alt_suffix = crate::wcs::alt_suffix(alt)?;
         let header_naxis = header.naxis()?;

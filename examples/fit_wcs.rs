@@ -1,6 +1,9 @@
-//! Fit a celestial WCS from pixel / sky reference correspondences.
+//! Fit a celestial WCS from pixel and sky pairs.
 //!
-//! Run from the repo root with:
+//! This shows `fit_celestial_wcs` solving for a `TAN` description from
+//! four reference points, and the residuals it reports.
+//!
+//! Run from the repository root:
 //!
 //!     cargo run --example fit_wcs
 

@@ -14,9 +14,8 @@ an axis unresolved and using it raises.
 
 A ``-TAB`` axis is defined over its table plus half a sample step at
 each end (FITS Paper III Sec.6.1.2, covering the outer halves of the
-boundary pixels). Pixels beyond that have no coordinate: single-point
-calls raise and the batch methods return ``nan``, matching
-``astropy.wcs``.
+boundary pixels). A pixel beyond that range has no coordinate. A
+single-point call raises there, and a batch method returns ``nan``.
 
 .. literalinclude:: ../../examples/python/wcs.py
    :language: python
@@ -60,9 +59,9 @@ The Rust equivalents take ``&[(f64, f64)]`` slices.
 
 Most projections cover only part of the plane -- SIN's unit circle,
 ZPN below ``PV2_0``, AZP beyond the horizon -- so a wide field
-routinely mixes valid and invalid pixels. The batch methods put
-``nan`` in those slots and return everything else, matching
-``astropy.wcs``; mask with ``numpy.isfinite`` if you care:
+routinely mixes valid and invalid pixels. A batch method puts
+``nan`` in those slots and returns everything else. Mask the result
+with ``numpy.isfinite`` to drop them:
 
 .. code-block:: python
 

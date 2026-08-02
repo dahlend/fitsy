@@ -1,6 +1,10 @@
 //! Pixel scaling and `BLANK` handling (Standard Sec.4.4.2.4-Sec.4.4.2.5).
 
-/// Scaling parameters for an image.
+/// The parameters that convert a stored pixel into a physical value.
+///
+/// A physical value is `bzero + bscale * raw`, per Standard
+/// Sec.4.4.2.5. An integer image may also declare a `blank` sentinel,
+/// which Sec.4.4.2.4 marks as undefined; this type maps it to `NaN`.
 #[derive(Debug, Clone, Copy)]
 pub struct Scaling {
     /// `BZERO`, the additive offset. Defaults to 0.0.

@@ -14,6 +14,13 @@ categories = ["science", "command-line-utilities", "parser-implementations"]
 # but keep the logo so crates.io renders the readme correctly.
 exclude = ["tests/data/", "examples/data/", "docs/_build/", "docs/guide/", "docs/api/", "docs/conf.py", "docs/index.rst", "docs/Makefile"]
 
+# `docs.rs` builds with default features unless told otherwise, which
+# would omit `interop` and leave the crate-level link to it unresolved.
+# Build the documentation with every feature, the same command the
+# documentation checklist names.
+[package.metadata.docs.rs]
+all-features = true
+
 [lib]
 # `cdylib` is needed for the optional Python extension built by
 # maturin (only consumed when the `python` feature is enabled).
@@ -80,6 +87,12 @@ rust.trivial_casts = "deny"
 rust.elided_lifetimes_in_paths = "deny"
 rust.unexpected_cfgs = "deny"
 
+# `cargo doc` checks every intra-doc link. A link that names a moved or renamed
+# item is a documentation defect, so it fails the build rather than warning.
+rustdoc.broken_intra_doc_links = "deny"
+rustdoc.invalid_rust_codeblocks = "deny"
+rustdoc.private_intra_doc_links = "deny"
+
 
 clippy.perf = { level = "deny", priority = 1 }
 clippy.pedantic = { level = "deny", priority = 1 }
@@ -98,8 +111,9 @@ clippy.cast_sign_loss = {level = "allow", priority = 2}
 clippy.cast_possible_wrap = {level = "allow", priority = 2}
 # Mathematical / scientific code routinely uses short variable names (x, y, z, r, n, etc.)
 clippy.many_single_char_names = {level = "allow", priority = 2}
-# Adding # Errors sections to every Result-returning function is too broad for this codebase.
-clippy.missing_errors_doc = {level = "allow", priority = 2}
+# Every public function that returns `Result` documents its error conditions in
+# an `# Errors` section. See documentation_style.md Sec.3.
+clippy.missing_errors_doc = {level = "deny", priority = 2}
 
 # General list
 clippy.too_many_arguments = "allow"

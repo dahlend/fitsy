@@ -17,8 +17,13 @@ pub struct Hpx {
     pub k: f64,
 }
 impl Hpx {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_1` (`H`) or `PV2_2` (`K`) is not
+    /// positive.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         // The parsed PV2 slice is zero-filled, so an absent card reads as
         // 0.0; H = 0 or K = 0 is meaningless, so treat it as "use default".
@@ -116,10 +121,12 @@ impl Projection for Hpx {
 
 // -- XPH --------------------------------------------------------------
 
-/// Polar `HEALPix` `XPH` (Calabretta & Roukema 2007 Sec.6), aka the
-/// "butterfly" projection. Has no PV parameters. The output (x, y)
-/// is in degrees, scaled by 1/sqrt2 relative to the underlying HPX
-/// facet layout (matching the WCSLIB convention used by astropy).
+/// Polar `HEALPix` `XPH` (Calabretta & Roukema 2007 Sec.6), also
+/// called the butterfly projection.
+///
+/// This projection takes no `PV` parameter. Its output `(x, y)` is in
+/// degrees, scaled by `1/sqrt(2)` relative to the underlying HPX facet
+/// layout.
 #[derive(Debug, Clone, Copy)]
 pub struct Xph;
 impl Xph {

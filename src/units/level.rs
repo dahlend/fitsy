@@ -34,10 +34,9 @@ pub const ST: Zero = Zero {
 /// An object a level is measured against, whose value this unit string
 /// cannot pin down.
 ///
-/// `Vega` is the reason this is not just another [`Zero`]: its zero point
-/// is passband-dependent (and depends on the adopted Vega spectrum), so
-/// no single number defines it. `astropy` declines to define a Vega unit
-/// at all for the same reason.
+/// `Vega` is the reason this is a separate type rather than another
+/// [`Zero`]. Its zero point depends on the passband and on the adopted
+/// Vega spectrum, so no single number defines it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Object {
     /// Relative to the Sun -- `Sun`.
@@ -59,8 +58,8 @@ pub enum Reference {
 
 /// A value that is a *level* rather than the quantity itself.
 ///
-/// A value `v` in a unit with level `L` and linear part `scale` stands for
-/// the physical quantity
+/// A value `v` in a unit with level `L` and linear part `scale`
+/// stands for the physical quantity
 ///
 /// ```text
 /// base^(v / factor) * scale     logarithmic (`log_base` is `Some`)
@@ -70,18 +69,21 @@ pub enum Reference {
 /// Which is what makes rescaling the linear part *additive*: it moves
 /// inside the logarithm and comes out as an offset.
 ///
-/// As with [`super::Dimension`], [`PartialEq`] compares with a tolerance:
-/// `factor` is arithmetic's output once a prefix or numeric multiplier
-/// folds into it, so two spellings of the same level may differ in the
-/// last bit. Non-transitive, hence no `Eq`.
+/// [`PartialEq`] compares with a tolerance, as [`super::Dimension`]
+/// does. The `factor` field is the output of arithmetic once a prefix
+/// or a numeric multiplier folds into it. Two spellings of the same
+/// level can therefore differ in the last bit. Such a comparison is
+/// not transitive, so this type implements no `Eq`.
 #[derive(Debug, Clone, Copy)]
 pub struct Level {
     /// The logarithm's base; `None` for a plain ratio.
     pub log_base: Option<f64>,
-    /// The multiplier outside the logarithm: -2.5 for `mag`, 10 for `dB`,
-    /// 1 for `Np` and bare `log()`. A prefix or numeric multiplier on the
-    /// symbol scales the level's value, so it folds in here: `mmag` has
-    /// factor -2500, since `v` mmag stands for `10^(v / -2500)`.
+    /// The multiplier outside the logarithm. It is -2.5 for `mag`, 10
+    /// for `dB`, and 1 for `Np` and for a bare `log()`.
+    ///
+    /// A prefix or numeric multiplier on the symbol scales the value
+    /// of the level, so it folds in here. `mmag` therefore has factor
+    /// -2500, because `v` mmag stands for `10^(v / -2500)`.
     pub factor: f64,
     /// What the ratio is taken against.
     pub reference: Reference,

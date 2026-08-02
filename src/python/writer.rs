@@ -1,11 +1,12 @@
-//! Writer-side wrappers: ``image()``, ``bintable()``, ``ascii_table()``,
-//! ``write()``.
+//! Writer-side Python bindings: `image()`, `bintable()`,
+//! `ascii_table()`, `compressed_image()` and `write()`.
 //!
-//! The Python writing API is intentionally narrow. Users construct
-//! HDU specifications via :func:`fitsy.image`,
-//! :func:`fitsy.bintable`, or :func:`fitsy.ascii_table`, then hand
-//! the list to :func:`fitsy.write`. Anything more elaborate (custom
-//! TFORM, VLA columns, scaled storage) should drop down to Rust.
+//! A caller builds one HDU specification per call to `image()`,
+//! `bintable()`, `ascii_table()` or `compressed_image()`, then hands
+//! the list of specifications to `write()`. Each factory function
+//! covers a fixed, common set of dtypes and column kinds. A custom
+//! `TFORM` code for a binary table column, or column scaling
+//! (`TSCALn`/`TZEROn`), needs the Rust API instead.
 
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -54,23 +55,49 @@ pub struct PyAsciiTableBuilder {
 /// Parameters
 /// ----------
 /// data : array-like
-///   Image pixels -- a numpy array of any supported FITS dtype
-///   (``u8``, ``i16``, ``i32``, ``i64``, ``f32``, ``f64``), or
-///   anything :func:`numpy.asarray` accepts (nested lists,
-///   tuples, objects implementing ``__array__``). The returned
-///   HDU's NAXIS list is the *reverse* of ``data.shape`` (numpy
-///   is row-major while FITS is fastest-axis-first).
+///   Image pixels. A numpy array of dtype ``bool``, ``int8``,
+///   ``uint8``, ``int16``, ``uint16``, ``int32``, ``uint32``,
+///   ``int64``, ``uint64``, ``float32`` or ``float64``, or anything
+///   :func:`numpy.asarray` accepts (nested lists, tuples, objects
+///   implementing ``__array__``). The returned HDU's ``NAXIS`` list
+///   is the reverse of ``data.shape``, because numpy lists axes
+///   slowest-first and FITS lists them fastest-first.
 /// header : Header or mapping, optional
-///   Extra header cards to merge in -- a :class:`Header` or a
+///   Extra header cards to merge in. A :class:`Header` or a
 ///   ``dict``. Values may be scalars or ``(value, comment)`` tuples.
+///   Default ``None``, which adds no extra cards.
 /// primary : bool, optional
-///   If True (default) and this is the first HDU written, mark it
-///   as the primary HDU. Subsequent calls become image extensions.
+///   Default ``True``. Builds the header with ``SIMPLE = T``. Set
+///   to ``False`` to build an image extension header instead
+///   (``XTENSION = 'IMAGE'`` with ``PCOUNT`` and ``GCOUNT``).
 ///
 /// Returns
 /// -------
 /// ImageBuilder
 ///   Pass to :func:`write`.
+///
+/// Raises
+/// ------
+/// TypeError
+///   If `data` is neither an array of one of the dtypes above nor
+///   something :func:`numpy.asarray` accepts.
+///
+/// Notes
+/// -----
+/// ``int8``, ``uint16``, ``uint32`` and ``uint64`` have no direct
+/// FITS type. fitsy stores each one under the FITS unsigned-integer
+/// convention, which a conforming reader decodes back to the
+/// original values. fitsy keeps a ``BZERO`` or ``BSCALE`` card that
+/// `header` supplies, in place of the card it would compute. A
+/// ``bool`` array is stored as ``BITPIX = 8``.
+///
+/// Pass ``primary=False`` to every :func:`image` call after the
+/// first item passed to :func:`write`. :func:`write` raises
+/// :class:`fitsy.FitsError` if a later HDU still declares
+/// ``SIMPLE``, or if the first HDU does not.
+///
+/// A ``COMMENT``, ``HISTORY`` or blank-keyword card in `header` is
+/// not copied to the built HDU; only cards that carry a value are.
 #[pyfunction]
 #[pyo3(signature = (data, header=None, primary=true))]
 pub fn image(
@@ -91,37 +118,55 @@ pub fn image(
     })
 }
 
-/// Tile-compress a numpy array into a `BINTABLE` HDU (`ZIMAGE`).
+/// Tile-compress a numpy array into a ``BINTABLE`` HDU (``ZIMAGE``).
 ///
-/// The result is identical in structure to a CFITSIO/`fpack`-produced
-/// compressed image extension: a BINTABLE with `ZIMAGE = T` whose
-/// rows hold one compressed tile each.  Astropy and `funpack` will
-/// transparently decompress it; ``fitsy.open`` will too.
+/// The result is a tile-compressed image extension: a ``BINTABLE``
+/// with ``ZIMAGE = T`` whose rows each hold one compressed tile.
+/// :func:`fitsy.open` reads it back as an image.
 ///
 /// Parameters
 /// ----------
 /// data : array-like
-///   Image pixels (any supported FITS dtype), or anything
+///   Image pixels. A numpy array of dtype ``bool``, ``int8``,
+///   ``uint8``, ``int16``, ``uint16``, ``int32``, ``uint32``,
+///   ``int64``, ``uint64``, ``float32`` or ``float64``, or anything
 ///   :func:`numpy.asarray` accepts.
 /// header : Header or mapping, optional
 ///   Extra cards merged into the synthesized image header before
-///   compression -- a :class:`Header` or a ``dict``.  Structural
-///   keywords (``BITPIX``, ``NAXIS*``, etc.) are ignored.
-/// tile_shape : sequence[int], optional
-///   Tile shape in **FITS axis order** (`tile[0]` = `NAXIS1`
-///   direction).  Length must equal `data.ndim`.  Default is
-///   ``(NAXIS1, 1, 1, ...)`` per Pence & Seaman Sec.3 -- one row per
-///   tile, which is the convention `fpack` uses.
+///   compression. A :class:`Header` or a ``dict``. Default
+///   ``None``, which adds no extra cards.
+/// tile_shape : sequence of int, optional
+///   Tile shape in FITS axis order (``tile_shape[0]`` is the
+///   ``NAXIS1`` direction). Length must equal ``data.ndim``.
+///   Default ``None``, which tiles as ``(NAXIS1, 1, 1, ...)`` --
+///   one row per tile (Pence & Seaman 2010 Sec.3).
 /// extname : str, optional
-///   `EXTNAME` keyword on the resulting BINTABLE.  Default
+///   ``EXTNAME`` keyword on the resulting BINTABLE. Default
 ///   ``"COMPRESSED_IMAGE"``.
+///
+/// Returns
+/// -------
+/// BinTableBuilder
+///   Pass to :func:`write`.
+///
+/// Raises
+/// ------
+/// TypeError
+///   If `data` is neither an array of one of the dtypes above nor
+///   something :func:`numpy.asarray` accepts.
+/// FitsError
+///   If `data` has no axes (a 0-D array). Also raised if
+///   `tile_shape` is given and its length does not equal
+///   ``data.ndim``, or if one of its entries is ``0``.
 ///
 /// Notes
 /// -----
-/// The current Rust core only emits ``ZCMPTYPE = 'GZIP_1'``
-/// compressed tiles.  The output is fully standards compliant and
-/// readable by every FITS library; if you need RICE/HCOMPRESS use
-/// the Rust API directly or run ``fpack -r`` on the output.
+/// fitsy emits only ``ZCMPTYPE = 'GZIP_1'`` compressed tiles.
+///
+/// fitsy ignores a structural keyword (such as ``BITPIX``), a
+/// ``Z*`` keyword, and ``EXTNAME``, in `header`, keeping the value
+/// it computes for the compressed HDU instead. Set ``EXTNAME``
+/// through `extname`.
 #[pyfunction]
 #[pyo3(signature = (data, header=None, *, tile_shape=None, extname=None))]
 pub fn compressed_image(
@@ -208,6 +253,24 @@ pub fn compressed_image(
     })
 }
 
+/// Dispatch a numpy array to the matching [`ImageBuilder`] and
+/// render it, merging in `extra`.
+///
+/// Handles all eleven supported dtypes: `bool`, `int8`, `uint8`,
+/// `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64`,
+/// `float32` and `float64`. `bool` is promoted to `uint8`. Each of
+/// `uint16`, `uint32`, `uint64` and `int8` is re-encoded into the
+/// signed or unsigned FITS type of the same width, with a `BZERO`
+/// offset applied through [`with_unsigned_scaling`]. `primary`
+/// selects `SIMPLE` versus `XTENSION` on the built header; see
+/// [`ImageBuilder::primary`].
+///
+/// # Errors
+///
+/// Returns [`PyTypeError`] if `arr` is neither an array of one of
+/// the eleven dtypes above nor something [`super::as_native_ndarray`]
+/// accepts. Returns the error from [`apply_extra_header`] if a card
+/// in `extra` fails validation.
 pub(crate) fn build_image(
     arr: &Bound<'_, PyAny>,
     primary: bool,
@@ -253,9 +316,9 @@ pub(crate) fn build_image(
         return apply_extra_header(b, extra);
     }
     // FITS unsigned-int convention: pick the matching signed BITPIX
-    // and emit BZERO=2^(N-1) (BSCALE=1) so a conforming reader (us
-    // and astropy) returns the original unsigned values. Mirrors
-    // the inverse path in `src/python/hdu.rs::read_image_array`.
+    // and emit BZERO=2^(N-1) with BSCALE=1. A conforming reader then
+    // returns the original unsigned values. This is the inverse of
+    // the read path in `src/python/hdu.rs::read_image_array`.
     if let Ok(view) = arr.extract::<PyReadonlyArrayDyn<'_, u16>>() {
         let shape = view.shape().to_vec();
         let axes: Vec<u64> = shape.iter().rev().map(|&n| n as u64).collect();
@@ -293,8 +356,8 @@ pub(crate) fn build_image(
         let b: ImageBuilder<i64> = ImageBuilder::new(axes, pixels)
             .into_py_result()?
             .primary(primary);
-        // 2^63 is not representable as i64; emit as a real-valued
-        // BZERO card (matches astropy and the FITS convention).
+        // 2^63 is not representable as i64. Emit BZERO as a
+        // real-valued card, which the FITS convention permits.
         return apply_extra_header(
             b,
             with_unsigned_scaling(extra, 9_223_372_036_854_775_808.0_f64),
@@ -319,9 +382,11 @@ pub(crate) fn build_image(
     ))
 }
 
-/// Inject `BZERO`/`BSCALE` cards for the FITS unsigned-int (or
-/// signed-byte) convention. User-supplied cards in `extra` win --
-/// we only set defaults if the keyword is absent.
+/// Add `BZERO = bzero` and `BSCALE = 1` to `extra`, for the FITS
+/// unsigned-integer (or signed-byte) convention. Both are written as
+/// real-valued cards, because `bzero` is an `f64`. Sets a card only
+/// when `extra` does not already carry it, so a card the caller set
+/// wins.
 fn with_unsigned_scaling(mut extra: Header, bzero: f64) -> Header {
     if extra.first("BZERO").is_none() {
         let _ = extra.set(
@@ -336,6 +401,19 @@ fn with_unsigned_scaling(mut extra: Header, bzero: f64) -> Header {
     extra
 }
 
+/// Copy every value-bearing, non-structural card from `extra` onto
+/// `builder`, then render the finished `(Header, data)` pair.
+///
+/// Drops `SIMPLE`, `BITPIX`, `NAXIS`, `NAXISn`, `EXTEND`, `PCOUNT`,
+/// `GCOUNT` and `XTENSION` from `extra`: [`ImageBuilder::build`]
+/// writes those itself. Also drops a commentary card (`COMMENT`,
+/// `HISTORY`, or blank keyword), because `extra.entries()` carries
+/// no value for one.
+///
+/// # Errors
+///
+/// Returns the error from [`ImageBuilder::build`] if a copied card
+/// fails validation.
 fn apply_extra_header<T>(builder: ImageBuilder<T>, extra: Header) -> PyResult<(Header, Vec<u8>)>
 where
     T: crate::data::Pixel,
@@ -365,30 +443,45 @@ where
 /// Parameters
 /// ----------
 /// columns : dict[str, sequence]
-///   One entry per column. All columns must share the same
-///   row count. Supported value kinds:
+///   One entry per column. All columns must share the same row
+///   count. Supported value kinds:
 ///
-///   - numpy ``bool``/``u8``/``i16``/``i32``/``i64``/``f32``/``f64``
-///     arrays (1-D, or 2-D for fixed-repeat columns)
+///   - a numpy ``bool``, ``uint8``, ``int16``, ``int32``, ``int64``,
+///     ``float32`` or ``float64`` array (1-D, or 2-D for a
+///     fixed-repeat column)
 ///   - ``list[str]`` -> ``nA`` (right-padded to the longest string)
 ///   - ``list[complex]`` -> ``M`` (``C128``)
 ///   - ``list[list[float]]`` -> ``1PD`` variable-length column
-///     (heap-stored, ``f64`` element type). This applies to *any*
-///     nested numeric list, ragged or not; pass a 2-D numpy array
+///     (heap-stored, ``f64`` element type). This applies to any
+///     nested numeric list, ragged or not. Pass a 2-D numpy array
 ///     to get a fixed-repeat column instead.
 ///   - a flat sequence of numbers (``[1, 2, 3]``, a tuple, a
-///     ``range``) -- converted with :func:`numpy.asarray` and
-///     encoded as the dtype numpy infers
+///     ``range``), converted with :func:`numpy.asarray` and encoded
+///     as the dtype numpy infers
 /// units : dict[str, str], optional
-///   Per-column ``TUNITn`` strings. Keys must match column names
-///   in ``columns``; entries for unknown columns are ignored.
+///   Per-column ``TUNITn`` strings. Default ``None``, which adds no
+///   ``TUNITn`` cards. A key that names no column in `columns` is
+///   ignored.
 /// extname : str, optional
-///   Sets the ``EXTNAME`` keyword for this extension.
+///   ``EXTNAME`` keyword for this extension. Default ``None``,
+///   which adds no ``EXTNAME`` card.
 ///
 /// Returns
 /// -------
 /// BinTableBuilder
 ///   Pass to :func:`write`.
+///
+/// Raises
+/// ------
+/// ValueError
+///   If a column's values do not match one of the kinds listed
+///   above, or if the columns disagree on row count.
+///
+/// Notes
+/// -----
+/// A numpy array of ``int8``, ``uint16``, ``uint32`` or ``uint64``
+/// is not one of the supported kinds; convert it first, for example
+/// with ``arr.astype(numpy.int32)``.
 #[pyfunction]
 #[pyo3(signature = (columns, units=None, extname=None))]
 pub fn bintable(
@@ -760,8 +853,14 @@ fn encode_column(arr: &Bound<'_, PyAny>) -> PyResult<ColumnEncoding> {
     ))
 }
 
-/// Trait used by `write()` to accept a heterogeneous list of HDU
-/// builders without committing to a single Python class hierarchy.
+/// Extract the `(Header, data)` pair from a builder object, so
+/// `write()` can accept a heterogeneous list of HDU builders without
+/// committing to a single Python class hierarchy.
+///
+/// # Errors
+///
+/// Returns [`PyTypeError`] if `item` is none of [`PyImageBuilder`],
+/// [`PyBinTableBuilder`] or [`PyAsciiTableBuilder`].
 fn extract_built(item: Bound<'_, PyAny>) -> PyResult<(Header, Vec<u8>)> {
     if let Ok(b) = item.extract::<PyRef<'_, PyImageBuilder>>() {
         return Ok((b.header.clone(), b.data.clone()));
@@ -781,20 +880,43 @@ fn extract_built(item: Bound<'_, PyAny>) -> PyResult<(Header, Vec<u8>)> {
 ///
 /// Parameters
 /// ----------
-/// path : str or pathlib.Path
-///   Destination path. Overwritten if it already exists.
+/// path : str or os.PathLike
+///   Destination path.
 /// hdus : list
-///   Builders returned by :func:`image`, :func:`bintable`, or
-///   :func:`ascii_table`. If the first item is an image it becomes
-///   the primary HDU; otherwise an empty primary is written for
-///   you, so a table-only file needs no placeholder image.
+///   Builders returned by :func:`image`, :func:`bintable`,
+///   :func:`ascii_table` or :func:`compressed_image`. When the first
+///   item is an image builder, it becomes the primary HDU, and it
+///   must have been built with ``primary=True``. When the first item
+///   is any other builder, fitsy writes an empty primary HDU before
+///   it. A table-only file thus needs no placeholder image.
 /// overwrite : bool, optional
-///   If False (the default), raise :class:`FileExistsError`
-///   rather than truncating an existing file at ``path``.
+///   Default ``False``, which raises :class:`fitsy.FitsError`
+///   instead of truncating an existing file at `path`. ``True``
+///   truncates and overwrites it.
 /// checksums : bool, optional
-///   If True, compute and stamp ``CHECKSUM`` and ``DATASUM``
-///   cards on every emitted HDU (FITS Checksum Proposal).
-///   Defaults to False.
+///   Default ``False``. ``True`` computes and stamps ``CHECKSUM``
+///   and ``DATASUM`` cards on every emitted HDU (FITS Checksum
+///   Proposal).
+///
+/// Raises
+/// ------
+/// ValueError
+///   If `hdus` is empty.
+/// TypeError
+///   If an item of `hdus` is not an :class:`ImageBuilder`,
+///   :class:`BinTableBuilder` or :class:`AsciiTableBuilder`.
+/// FitsError
+///   If `path` cannot be opened for writing, for example because it
+///   already exists and `overwrite` is ``False``. Also raised if an
+///   HDU built with the wrong `primary` value reaches the writer --
+///   a non-first image HDU built with ``primary=True``, or a first
+///   image HDU built with ``primary=False``.
+///
+/// Notes
+/// -----
+/// When `checksums` is ``False``, fitsy writes a ``CHECKSUM`` or
+/// ``DATASUM`` card already present in a builder's header verbatim,
+/// unchanged.
 ///
 /// Examples
 /// --------
@@ -842,8 +964,9 @@ pub fn write(
     for item in hdus.iter() {
         let (mut h, data) = extract_built(item)?;
         if !emitted_primary {
-            // First emitted HDU must declare SIMPLE; builders that
-            // started life as extensions get their XTENSION promoted.
+            // The first emitted HDU must declare SIMPLE. An image
+            // builder built with `primary=True` already does; see
+            // `promote_to_primary` for why nothing else is done here.
             promote_to_primary(&mut h);
             emitted_primary = true;
         }
@@ -854,6 +977,8 @@ pub fn write(
     Ok(())
 }
 
+/// Build a zero-axis primary HDU with no data, for `write()` to emit
+/// when the caller's first HDU is not an image builder.
 fn empty_primary_image() -> (Header, Vec<u8>) {
     use crate::Value;
     let mut h = Header::empty();
@@ -864,11 +989,17 @@ fn empty_primary_image() -> (Header, Vec<u8>) {
     (h, Vec::new())
 }
 
+/// No-op placeholder for the first emitted HDU's header.
+///
+/// An image builder built with `primary=True` already carries
+/// `SIMPLE = T`; this function does nothing to it. A bintable or
+/// ascii-table builder is never passed here: `write()` only reaches
+/// this call when the first item is an image builder, and prepends
+/// [`empty_primary_image`] otherwise. Rewriting a table header's
+/// `XTENSION` into `SIMPLE` would still leave it missing `EXTEND`
+/// and produce an invalid primary HDU, so this function does not
+/// attempt it.
 fn promote_to_primary(h: &mut Header) {
-    // Image builders already produce a SIMPLE-headed primary; this
-    // is a no-op for them. We deliberately do not try to promote a
-    // bintable/ascii_table to primary since that produces an invalid
-    // FITS file.
     let _ = h;
 }
 
@@ -898,26 +1029,53 @@ impl PyAsciiTableBuilder {
 /// Parameters
 /// ----------
 /// columns : dict[str, sequence]
-///   One entry per column. Supported value kinds:
+///   One entry per column. All columns must share the same row
+///   count. Supported value kinds:
 ///
-///   - ``list[int]`` or numpy int array -> ``I{w}`` (use ``None``
-///     cells for ``TNULL``; combine with ``tnulls={col: "-9999"}``)
-///   - ``list[float]`` or numpy float array -> ``E{w}.{d}`` by default
 ///   - ``list[str]`` -> ``A{maxlen}``
+///   - ``list[int]``, ``list[Optional[int]]``, or a numpy integer
+///     array -> ``I{w}`` by default. A ``None`` cell needs a
+///     matching entry in `tnulls`.
+///   - ``list[float]`` or a numpy float array -> ``E{w}.{d}`` by
+///     default
 /// formats : dict[str, str], optional
-///   Per-column override for the auto-chosen ``TFORM``.
+///   Per-column override for the auto-chosen ``TFORM`` code, such
+///   as ``{"flux": "F10.3"}``. The format kind must match the
+///   column's value kind: ``I`` for an integer column, ``F``/``E``/
+///   ``D`` for a float column, ``A`` for a string column. Default
+///   ``None``, which auto-chooses every column's format.
 /// tnulls : dict[str, str], optional
-///   ``TNULL`` sentinel string for integer columns containing
-///   ``None``.
+///   ``TNULL`` sentinel string for a numeric column that holds an
+///   undefined cell (``None`` for an integer column, ``nan`` for a
+///   float column). Default ``None``, which sets no ``TNULL``.
 /// units : dict[str, str], optional
-///   Per-column ``TUNIT`` strings.
+///   Per-column ``TUNIT`` strings. Default ``None``, which adds no
+///   ``TUNIT`` cards.
 /// extname : str, optional
-///   Sets the ``EXTNAME`` keyword.
+///   ``EXTNAME`` keyword. Default ``None``, which adds no
+///   ``EXTNAME`` card.
 ///
 /// Returns
 /// -------
 /// AsciiTableBuilder
 ///   Pass to :func:`write`.
+///
+/// Raises
+/// ------
+/// TypeError
+///   If a column's values do not match ``list[str]``,
+///   ``list[Optional[int]]``, or ``list[float]``, or if `formats`
+///   gives a format kind that does not match the column's value
+///   kind.
+/// ValueError
+///   If a string cell holds a byte outside ASCII 32-126 (Standard
+///   Sec.7.2.5).
+/// FitsError
+///   If `formats` holds a string that is not a valid ``TFORM``
+///   code, if the columns disagree on row count, if a rendered
+///   cell or a ``TNULL`` sentinel does not fit the column's field
+///   width, or if a numeric column holds an undefined cell with no
+///   matching entry in `tnulls`.
 #[pyfunction]
 #[pyo3(signature = (columns, formats=None, tnulls=None, units=None, extname=None))]
 pub fn ascii_table(
@@ -960,10 +1118,27 @@ pub fn ascii_table(
     Ok(PyAsciiTableBuilder { header: h, data })
 }
 
+/// Parse a `TFORM` code such as `"F10.3"` into an [`AsciiFormat`].
+///
+/// # Errors
+///
+/// Returns `fitsy.FitsError` if `s` is not a valid ASCII-table
+/// `TFORM` code.
 fn parse_ascii_format(s: &str) -> PyResult<AsciiFormat> {
     AsciiFormat::parse(s).map_err(super::err_to_py)
 }
 
+/// Infer one ASCII-table column's data and format from a Python
+/// sequence. Tries a string column, then a nullable-integer column,
+/// then a float column, in that order; `name` only labels an error.
+///
+/// # Errors
+///
+/// Returns [`PyTypeError`] if `arr` matches none of the three kinds,
+/// or if `fmt_override` parses to a format kind that does not match
+/// the inferred kind. Returns [`PyValueError`] if a string cell
+/// holds a byte outside ASCII 32-126. Returns the error from
+/// [`parse_ascii_format`] if `fmt_override` does not parse.
 fn extract_ascii_column(
     arr: &Bound<'_, PyAny>,
     fmt_override: Option<&str>,

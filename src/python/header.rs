@@ -1,4 +1,20 @@
-//! `PyHeader` -- dict-like view of a fitsy `Header`.
+//! `PyHeader` / `PyHeaderCommentary` -- dict-like view of a fitsy
+//! `Header` and the list-like view returned for a commentary
+//! keyword.
+//!
+//! A card's FITS value converts to a native Python scalar: logical
+//! to `bool`, integer to `int`, real to `float`, complex to
+//! `complex`, string to `str`, and an undefined value to `None`. The
+//! reverse conversion, in [`py_to_value`], accepts the same six
+//! Python types. A `COMMENT`, `HISTORY` or blank-keyword card holds
+//! no value; reading one through `header[key]` returns a
+//! [`PyHeaderCommentary`] instead.
+//!
+//! [`is_layout_card`] rejects every mutation of a structural card --
+//! the keywords an HDU writer recomputes from the data array or
+//! column descriptors on `writeto`. A header obtained from a
+//! read-only file additionally rejects every mutating method with
+//! `ValueError`.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -11,6 +27,13 @@ use crate::header::{CARD_SIZE, Header, Level, Value};
 use crate::io::block::BLOCK_SIZE;
 
 /// Convert a fitsy `Value` to a native Python object.
+///
+/// `Logical` becomes `bool`, `Integer` becomes `int`, `Real` becomes
+/// `float`, `ComplexInteger` and `ComplexReal` both become
+/// `complex`, `String` and `Unparsed` both become `str`, and
+/// `Undefined` becomes `None`. `Unparsed` holds a card whose value
+/// field matched no standard FITS type during lenient parsing; its
+/// raw text is exposed verbatim rather than dropped.
 fn value_to_py(py: Python<'_>, v: &Value) -> Py<PyAny> {
     use pyo3::IntoPyObjectExt;
     match v {
@@ -39,17 +62,23 @@ fn value_to_py(py: Python<'_>, v: &Value) -> Py<PyAny> {
 /// FITS reserves uppercase ASCII for regular keywords and writes
 /// only uppercase to disk; case-sensitive lookup turns minor
 /// typos (``hdr["bitpix"]``) into silent ``None``/``KeyError`` and
-/// is the source of frequent bugs. Match astropy and fold every
-/// lookup to uppercase.
+/// is the source of frequent bugs. Fold every lookup to uppercase
+/// instead.
 fn norm_key(key: &str) -> String {
     key.to_ascii_uppercase()
 }
 
-/// True if `key` is a structural / layout card whose value is
-/// derived from the HDU's data array (image) or column descriptors
-/// (table). User edits to these cards are silently overwritten by
-/// :meth:`FitsFile.writeto`, which is a footgun -- we reject the
-/// mutation up front instead.
+/// True if `key` is a structural layout card. The value of such a
+/// card comes from the data array of an image HDU, or from the
+/// column descriptors of a table HDU.
+///
+/// `FitsFile::writeto` recomputes these cards and overwrites any
+/// user edit without a report. The bindings reject the mutation at
+/// the call site instead, so the caller sees the failure.
+///
+/// The rejected set is `SIMPLE`, `BITPIX`, `NAXIS`, `EXTEND`,
+/// `PCOUNT`, `GCOUNT`, `XTENSION`, `END`, `GROUPS`, and `NAXISn` for
+/// `n` of 1 to 3 ASCII digits.
 fn is_layout_card(key: &str) -> bool {
     let k = key.trim();
     if matches!(
@@ -84,8 +113,38 @@ fn is_layout_card(key: &str) -> bool {
 /// one is visible through all of them.
 ///
 /// Headers from a read-only :class:`FitsFile` raise
-/// :class:`ValueError` from every mutating method. Open the file with
-/// ``mode='update'`` to allow in-memory edits.
+/// :class:`ValueError` from every mutating method: :meth:`__setitem__`,
+/// :meth:`__delitem__`, :meth:`set`, :meth:`insert`,
+/// :meth:`add_commentary`, :meth:`rename_keyword`, and :meth:`update`.
+/// Open the file with ``mode='update'`` to allow in-memory edits.
+///
+/// Notes
+/// -----
+/// A card's value converts to a native Python scalar: a logical to
+/// ``bool``, an integer to ``int``, a real to ``float``, a complex
+/// value to ``complex``, and a string (including one assembled from
+/// ``CONTINUE`` cards) to ``str``. An undefined value converts to
+/// ``None``. Writing a value back accepts the same six Python types;
+/// any other type raises :class:`TypeError`. A ``COMMENT``,
+/// ``HISTORY`` or blank-keyword card holds no value of its own;
+/// ``header[key]`` returns a :class:`HeaderCommentary` for one of
+/// these three keywords instead.
+///
+/// A keyword is matched case-insensitively: ``hdr["bitpix"]`` and
+/// ``hdr["BITPIX"]`` name the same card. A hyphenated keyword such
+/// as ``MJD-OBS`` also matches a card some writers store with an
+/// underscore instead (``MJD_OBS``).
+///
+/// :meth:`__setitem__`, :meth:`__delitem__`, :meth:`set`,
+/// :meth:`insert` and :meth:`rename_keyword` reject a structural
+/// card: ``SIMPLE``, ``BITPIX``, ``NAXIS``, ``EXTEND``, ``PCOUNT``,
+/// ``GCOUNT``, ``XTENSION``, ``END``, ``GROUPS``, or ``NAXISn``. An
+/// HDU writer recomputes these from the data array or column
+/// descriptors, so a direct edit would be silently overwritten.
+/// Constructing a :class:`Header` from a mapping, and
+/// :meth:`update`, do not apply this check: a mapping or another
+/// :class:`Header` carrying a structural keyword is accepted
+/// unchanged.
 ///
 /// Examples
 /// --------
@@ -109,6 +168,8 @@ pub struct PyHeader {
 }
 
 impl PyHeader {
+    /// Wrap a clone of `h` in a new `PyHeader`. `read_only` controls
+    /// whether the mutating pymethods later reject an edit.
     pub(crate) fn from_header_with(h: &Header, read_only: bool) -> Self {
         Self {
             inner: Arc::new(Mutex::new(h.clone())),
@@ -170,6 +231,15 @@ impl PyHeader {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Reject a mutation on a read-only header; otherwise mark the
+    /// parent file dirty when one is attached.
+    ///
+    /// Every mutating pymethod calls this first, before touching the
+    /// underlying `Header`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Python `ValueError` if `self.read_only` is `true`.
     fn ensure_writable(&self) -> PyResult<()> {
         if self.read_only {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -185,6 +255,24 @@ impl PyHeader {
     /// Merge value cards from another `PyHeader` or a Python
     /// `Mapping` into `self`. Internal helper shared by the
     /// `update` pymethod and HDU constructors.
+    ///
+    /// Unlike `__setitem__`, this does not call [`is_layout_card`]:
+    /// a structural keyword present in `other` is copied into `self`
+    /// unchecked.
+    ///
+    /// Both branches reach `Header::set` with an upper-case keyword.
+    /// The `PyHeader` fast path reuses `other`'s own entries, whose
+    /// keywords are already upper case because every write path that
+    /// produced them enforced that. The mapping branch calls
+    /// [`norm_key`], as [`header_from_py`] and `__setitem__` do.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Python `TypeError` if `other` is neither a
+    /// `PyHeader` nor an object with an `.items()` method, or if one
+    /// of its values cannot convert to a FITS value ([`py_to_value`]).
+    /// Returns `fitsy.FitsError` if a copied keyword fails
+    /// validation -- too long, or an invalid character.
     pub(crate) fn update_from(&self, other: &Bound<'_, PyAny>) -> PyResult<()> {
         // Fast path: another PyHeader -> copy value cards directly,
         // preserving comments.
@@ -220,8 +308,11 @@ impl PyHeader {
             let key: String = pair.get_item(0)?.extract()?;
             let value = pair.get_item(1)?;
             let (val, comment) = parse_setitem_value(&value)?;
+            // `Header::set` requires an uppercase keyword. Normalize
+            // here so a mapping key behaves the same as `header[key]`
+            // and as a key passed to the constructor.
             self.lock()
-                .set(&key, val, comment.as_deref())
+                .set(&norm_key(&key), val, comment.as_deref())
                 .map_err(super::err_to_py)?;
         }
         Ok(())
@@ -241,11 +332,27 @@ impl PyHeader {
     ///   to upper case and accepting a ``(value, comment)`` tuple.
     ///   Omit for an empty header.
     ///
+    /// Raises
+    /// ------
+    /// TypeError
+    ///   If `mapping` is neither a :class:`Header` nor an object
+    ///   with an ``.items()`` method, or if one of its values is not
+    ///   a ``bool``, ``int``, ``float``, ``complex``, ``str`` or
+    ///   ``None``.
+    /// FitsError
+    ///   If a keyword in `mapping` exceeds 8 characters or contains
+    ///   an invalid character (a HIERARCH keyword is exempt from the
+    ///   length limit).
+    ///
     /// Notes
     /// -----
     /// The result is standalone and writable: attach it to an HDU or
     /// serialize it with :meth:`tostring`. Use :meth:`fromstring` /
     /// :meth:`frombytes` to parse existing card text.
+    ///
+    /// A ``dict`` entry does not go through the same structural-card
+    /// check as ``header[key] = value``: a mapping that carries
+    /// ``SIMPLE`` or another structural keyword is accepted here.
     ///
     /// Examples
     /// --------
@@ -266,6 +373,8 @@ impl PyHeader {
     }
 
     /// Test whether ``key`` is present (``key in header``).
+    ///
+    /// `key` is matched case-insensitively.
     fn __contains__(&self, key: &str) -> bool {
         self.lock().contains(&norm_key(key))
     }
@@ -283,21 +392,28 @@ impl PyHeader {
     /// -------
     /// bool, int, float, complex, str, None, or HeaderCommentary
     ///   The native Python scalar for the card's FITS type, or ``None``
-    ///   for an undefined value. ``"COMMENT"``, ``"HISTORY"`` and
-    ///   ``""`` return a list-like :class:`HeaderCommentary` of every
-    ///   text body. A duplicated keyword returns its first value; use
-    ///   ``header[(key, n)]`` or :meth:`cards` for the rest.
+    ///   for an undefined value. For a plain ``str`` `key` of
+    ///   ``"COMMENT"``, ``"HISTORY"`` or ``""``, a list-like
+    ///   :class:`HeaderCommentary` of every text body with that
+    ///   keyword. For a ``(key, n)`` tuple naming one of those three
+    ///   keywords, the single ``str`` text body of the n-th card
+    ///   instead. A duplicated value keyword returns its first
+    ///   value with a plain ``str`` `key`; use ``header[(key, n)]``
+    ///   or :meth:`cards` for the rest.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///   If no card with that keyword is present.
+    ///   If no card with that keyword is present, or if a
+    ///   ``(keyword, n)`` tuple names fewer than ``n`` occurrences.
+    /// TypeError
+    ///   If `key` is not a ``str`` or a 2-element tuple.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use crate::header::CardKind;
         use pyo3::IntoPyObjectExt;
 
         // Resolve (key, n)-tuple form: return the n-th occurrence's
-        // value (astropy idiom for disambiguating duplicate keywords).
+        // value, to disambiguate a duplicated keyword.
         if let Ok(tup) = key.cast::<PyTuple>()
             && tup.len() == 2
         {
@@ -335,8 +451,8 @@ impl PyHeader {
 
         // Commentary keywords (COMMENT, HISTORY, blank-keyword) get
         // a list-like view object that prints newline-joined and
-        // supports ``len()`` / iteration / indexing -- mirroring
-        // astropy's ``_HeaderCommentaryCards``.
+        // supports len() / iteration / indexing over every card
+        // sharing that keyword.
         if matches!(k.as_str(), "COMMENT" | "HISTORY" | "") {
             let texts: Vec<String> = header
                 .entries()
@@ -350,9 +466,8 @@ impl PyHeader {
             return Ok(Py::new(py, PyHeaderCommentary { lines: texts })?.into_any());
         }
 
-        // Regular value cards: return the first occurrence's value
-        // (astropy's documented behavior). Use ``header[(key, n)]``
-        // or ``header.cards(key)`` for the rest.
+        // Regular value cards: return the first occurrence's value.
+        // Use ``header[(key, n)]`` or ``header.cards(key)`` for the rest.
         match header.entries().iter().find(|e| e.keyword == k) {
             None => Err(PyKeyError::new_err(kw_str)),
             Some(e) => Ok(match e.value.as_ref() {
@@ -368,20 +483,32 @@ impl PyHeader {
     /// ----------
     /// key : str
     ///   Keyword (1-8 ASCII chars, or HIERARCH form).
-    /// value : bool, int, float, str, None, or tuple
+    /// value : bool, int, float, complex, str, None, or tuple
     ///   A bare scalar, or a ``(value, comment)`` tuple where
-    ///   ``comment`` is a string or ``None``.
+    ///   ``value`` is one of the same scalar types and ``comment``
+    ///   is a ``str`` or ``None``.
     ///
     /// Notes
     /// -----
-    /// If a card with this keyword already exists, its value (and
-    /// comment, if supplied) is updated in place; otherwise a new
-    /// card is appended.
+    /// If a card with this keyword already exists, its value is
+    /// replaced. Its comment is replaced too when `value` is a
+    /// ``(value, comment)`` tuple whose ``comment`` is not ``None``;
+    /// a bare `value`, or a tuple with a ``None`` comment, leaves the
+    /// existing comment untouched. If no card with this keyword
+    /// exists, a new one is appended.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///   If the header is read-only.
+    ///   If the header is read-only, or if `key` names a structural
+    ///   card (see the class Notes for the full list).
+    /// TypeError
+    ///   If `value` is not one of the accepted types, or is a tuple
+    ///   whose second element is not a ``str`` or ``None``.
+    /// FitsError
+    ///   If `key` exceeds 8 characters or contains an invalid
+    ///   character (a HIERARCH keyword is exempt from the length
+    ///   limit).
     fn __setitem__(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         let k = norm_key(key);
@@ -401,12 +528,17 @@ impl PyHeader {
 
     /// Remove every value card with the given keyword (``del header[key]``).
     ///
+    /// `key` is matched case-insensitively. Commentary cards
+    /// (``COMMENT``, ``HISTORY``, blank-keyword) are never removed by
+    /// this method, even when `key` names one of those keywords.
+    ///
     /// Raises
     /// ------
     /// KeyError
-    ///   If no card matches.
+    ///   If no value card matches.
     /// ValueError
-    ///   If the header is read-only.
+    ///   If the header is read-only, or if `key` names a structural
+    ///   card (see the class Notes for the full list).
     fn __delitem__(&mut self, key: &str) -> PyResult<()> {
         self.ensure_writable()?;
         let k = norm_key(key);
@@ -441,6 +573,13 @@ impl PyHeader {
     ///   If ``kind`` is not one of the recognized values.
     /// ValueError
     ///   If the header is read-only.
+    ///
+    /// Notes
+    /// -----
+    /// `text` is not checked for non-ASCII bytes here. A non-ASCII
+    /// byte only raises, as :class:`ValueError`, when the header is
+    /// later serialized with :meth:`tostring`, ``bytes(header)``, or
+    /// a file write.
     fn add_commentary(&mut self, kind: &str, text: &str) -> PyResult<()> {
         use crate::header::CommentaryKind;
         self.ensure_writable()?;
@@ -460,38 +599,48 @@ impl PyHeader {
 
     /// Set a header card with optional positional placement.
     ///
-    /// Equivalent to ``astropy.io.fits.Header.set``: if the keyword
-    /// already exists its value (and comment, if supplied) are
-    /// updated in place; otherwise a new card is appended unless
-    /// ``before`` or ``after`` is given, in which case the new card
-    /// is inserted at that position.
+    /// If `keyword` already exists, its value is replaced (or kept,
+    /// if `value` is omitted) and its comment is replaced when
+    /// `comment` is given. Otherwise a new card is appended, unless
+    /// `before` or `after` is given, in which case the new card is
+    /// inserted at that position.
     ///
     /// Parameters
     /// ----------
     /// keyword : str
     ///   Card keyword. May be a HIERARCH name.
-    /// value : Any, optional
-    ///   New value. If omitted (and the card already exists), only
-    ///   the comment is updated.
+    /// value : bool, int, float, complex, str, or None, optional
+    ///   New value. If omitted and the card already exists, only
+    ///   the comment is updated and the existing value is kept. If
+    ///   omitted and the card does not exist, the new card is
+    ///   inserted with an undefined value. Default ``None``.
     /// comment : str, optional
     ///   New comment. ``None`` leaves the existing comment intact
-    ///   when updating, or emits no comment when inserting.
+    ///   when updating, or emits no comment when inserting. Default
+    ///   ``None``.
     /// before : str, optional
     ///   Insert the new card immediately before the first card
     ///   whose keyword equals this. Ignored if `keyword` already
-    ///   exists.
+    ///   exists. Default ``None``.
     /// after : str, optional
     ///   Insert the new card immediately after the first card
     ///   whose keyword equals this. Ignored if `keyword` already
-    ///   exists. Mutually exclusive with `before`.
+    ///   exists. Mutually exclusive with `before`. Default ``None``.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///   If both `before` and `after` are supplied, or if the
-    ///   header is read-only.
+    ///   If both `before` and `after` are supplied, if the header
+    ///   is read-only, or if `keyword` names a structural card (see
+    ///   the class Notes for the full list).
     /// KeyError
     ///   If the named `before`/`after` card does not exist.
+    /// TypeError
+    ///   If `value` is not one of the accepted types.
+    /// FitsError
+    ///   If `keyword` exceeds 8 characters or contains an invalid
+    ///   character (a HIERARCH keyword is exempt from the length
+    ///   limit).
     #[pyo3(signature = (keyword, value=None, comment=None, *, before=None, after=None))]
     fn set(
         &mut self,
@@ -553,28 +702,42 @@ impl PyHeader {
 
     /// Insert a value card at a specified position.
     ///
+    /// A duplicate: if `keyword` already has a card, a second card
+    /// with the same keyword is inserted rather than replacing it.
+    ///
     /// Parameters
     /// ----------
     /// position : int or str
-    ///   Integer index (0 = first card), or the keyword of an
-    ///   existing card; in the latter case the new card is
-    ///   inserted before/after it depending on `after`.
+    ///   Integer index (0 = first card; an index at or past the
+    ///   current card count appends at the end), or the keyword of
+    ///   an existing card, in which case the new card is inserted
+    ///   before or after it depending on `after`.
     /// keyword : str
-    ///   Card keyword.
-    /// value : Any, optional
-    ///   Card value. ``None`` records an undefined-value card.
+    ///   Card keyword. May be a HIERARCH name.
+    /// value : bool, int, float, complex, str, or None, optional
+    ///   Card value. ``None`` (the default) records an
+    ///   undefined-value card.
     /// comment : str, optional
-    ///   Optional inline comment.
+    ///   Inline comment. Default ``None``, which emits no comment.
     /// after : bool, optional
     ///   When `position` is a keyword, set ``after=True`` to insert
     ///   the new card just after that card rather than before it.
+    ///   Default ``False``. Ignored when `position` is an integer.
     ///
     /// Raises
     /// ------
     /// KeyError
     ///   If `position` is a keyword that does not exist.
+    /// TypeError
+    ///   If `position` is neither ``int`` nor ``str``, or if `value`
+    ///   is not one of the accepted types.
     /// ValueError
-    ///   If the header is read-only.
+    ///   If the header is read-only, or if `keyword` names a
+    ///   structural card (see the class Notes for the full list).
+    /// FitsError
+    ///   If `keyword` exceeds 8 characters or contains an invalid
+    ///   character (a HIERARCH keyword is exempt from the length
+    ///   limit).
     #[pyo3(signature = (position, keyword, value=None, comment=None, *, after=false))]
     fn insert(
         &mut self,
@@ -631,11 +794,18 @@ impl PyHeader {
     ///
     /// Raises
     /// ------
+    /// ValueError
+    ///   If the header is read-only, or if `oldname` or `newname`
+    ///   names a structural card (see the class Notes for the full
+    ///   list). Checked before `newname` validity and before
+    ///   `oldname` is looked up.
+    /// FitsError
+    ///   If `newname` exceeds 8 characters or contains an invalid
+    ///   character (a HIERARCH keyword is exempt from the length
+    ///   limit). Checked before `oldname` is looked up, so this can
+    ///   fire even when `oldname` does not exist.
     /// KeyError
     ///   If no card with `oldname` exists.
-    /// ValueError
-    ///   If the header is read-only or `newname` is not a valid
-    ///   keyword.
     fn rename_keyword(&mut self, oldname: &str, newname: &str) -> PyResult<()> {
         self.ensure_writable()?;
         let old = norm_key(oldname);
@@ -657,9 +827,12 @@ impl PyHeader {
 
     /// Merge another header (or a ``str``-keyed mapping) into this one.
     ///
-    /// For each ``(key, value)`` in ``other``, behaves like
-    /// ``self[key] = value``: existing keywords are overwritten in
-    /// place, new keywords are appended.
+    /// For each ``(key, value)`` in ``other``, an existing keyword's
+    /// value is overwritten in place and a new keyword is appended.
+    /// A mapping value may be a bare scalar or a ``(value, comment)``
+    /// tuple, as for :meth:`__setitem__`. Unlike :meth:`__setitem__`,
+    /// a structural keyword (see the class Notes) is copied unchecked
+    /// rather than rejected.
     ///
     /// Commentary cards (``COMMENT``, ``HISTORY``, blank-keyword) are
     /// **not** copied; use :meth:`add_commentary` if you want to
@@ -676,8 +849,18 @@ impl PyHeader {
     /// ValueError
     ///   If the header is read-only.
     /// TypeError
-    ///   If ``other`` is neither a ``Header`` nor a string-keyed
-    ///   mapping.
+    ///   If ``other`` is neither a ``Header`` nor an object with an
+    ///   ``.items()`` method, or if one of its values is not a
+    ///   ``bool``, ``int``, ``float``, ``complex``, ``str`` or
+    ///   ``None``.
+    /// FitsError
+    ///   If a keyword copied from `other` exceeds 8 characters or
+    ///   contains an invalid character.
+    ///
+    /// Notes
+    /// -----
+    /// A mapping key is folded to upper case, as
+    /// ``header[key] = value`` folds its key.
     fn update(&mut self, other: &Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         self.update_from(other)
@@ -707,7 +890,7 @@ impl PyHeader {
     /// Parameters
     /// ----------
     /// key : str
-    ///   Keyword to look up.
+    ///   Keyword to look up (case-insensitive).
     /// default : object, optional
     ///   Value to return if ``key`` is absent. Defaults to ``None``.
     ///
@@ -715,6 +898,13 @@ impl PyHeader {
     /// -------
     /// object
     ///   The matching value, or ``default`` if absent.
+    ///
+    /// Notes
+    /// -----
+    /// Unlike ``header[key]``, this method never returns a
+    /// :class:`HeaderCommentary`: ``"COMMENT"``, ``"HISTORY"`` and
+    /// ``""`` have no value card to match, so ``get`` on one of
+    /// these three keywords always returns `default`.
     #[pyo3(signature = (key, default=None))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> Py<PyAny> {
         let k = norm_key(key);
@@ -771,7 +961,7 @@ impl PyHeader {
     /// -------
     /// str or None
     ///   The comment text, or ``None`` if no such card exists or
-    /// the matching card has no inline comment.
+    ///   the matching card has no inline comment.
     fn comment(&self, key: &str) -> Option<String> {
         self.lock()
             .entries()
@@ -782,9 +972,11 @@ impl PyHeader {
 
     /// Plain ``dict`` view of the header.
     ///
-    /// Comments are dropped; duplicate keywords are deduplicated by
-    /// last-seen value. Convenience for ad-hoc work; round-trip
-    /// fidelity requires :meth:`items`.
+    /// Inline comments are dropped. A commentary card (``COMMENT``,
+    /// ``HISTORY``, blank-keyword) carries no value and is omitted
+    /// entirely, not even as a ``None`` entry. A duplicated value
+    /// keyword is deduplicated to its last-seen value. Convenience
+    /// for ad-hoc work; round-trip fidelity requires :meth:`items`.
     fn to_dict(&self, py: Python<'_>) -> Py<PyDict> {
         let d = PyDict::new(py);
         for e in self.lock().entries() {
@@ -830,10 +1022,23 @@ impl PyHeader {
 
     /// Serialize the header as a single string of 80-character FITS
     /// cards (no separators, terminated by ``END`` and padded to a
-    /// 2880-byte block). Mirrors ``astropy.io.fits.Header.tostring``,
-    /// so the text round-trips through :meth:`fromstring` and can also
-    /// be fed to ``astropy.wcs.WCS`` via
-    /// ``astropy.io.fits.Header.fromstring(h.tostring())``.
+    /// 2880-byte block). The text round-trips through
+    /// :meth:`fromstring`.
+    ///
+    /// Returns
+    /// -------
+    /// str
+    ///   The serialized header text.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If a card cannot be serialized: a non-finite (``NaN`` or
+    ///   infinite) real value, or a string or commentary card
+    ///   holding a byte outside printable ASCII. These are accepted
+    ///   without checking by :meth:`__setitem__`, :meth:`set`,
+    ///   :meth:`insert` and :meth:`add_commentary`, and rejected only
+    ///   here.
     fn tostring(&self) -> PyResult<String> {
         let bytes = self.lock().to_bytes().map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("serialize header: {e}"))
@@ -866,6 +1071,13 @@ impl PyHeader {
     /// -------
     /// Header
     ///   A new, writable header.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If `data` does not parse as FITS header cards -- for
+    ///   example an unrecognized value, or (only when `lenient` is
+    ///   ``False``) a non-ASCII byte in a value field.
     #[staticmethod]
     #[pyo3(signature = (data, *, lenient=true))]
     fn fromstring(data: &str, lenient: bool) -> PyResult<Self> {
@@ -875,7 +1087,7 @@ impl PyHeader {
     /// Parse a header from raw FITS bytes -- the inverse of
     /// ``bytes(header)``. Behaves like :meth:`fromstring` but takes a
     /// ``bytes`` buffer (for example, header blocks read straight from
-    /// a file).
+    /// a file), including its `Raises` conditions.
     #[staticmethod]
     #[pyo3(signature = (data, *, lenient=true))]
     fn frombytes(data: &[u8], lenient: bool) -> PyResult<Self> {
@@ -884,6 +1096,11 @@ impl PyHeader {
 
     /// Raw FITS bytes (``bytes(header)``). Same content as
     /// :meth:`tostring` but returned as ``bytes``.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   Under the same conditions as :meth:`tostring`.
     fn __bytes__(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyBytes>> {
         let bytes = self.lock().to_bytes().map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("serialize header: {e}"))
@@ -892,12 +1109,11 @@ impl PyHeader {
     }
 
     fn __repr__(&self) -> String {
-        // Mirror astropy.io.fits.Header.__repr__: render every card
-        // as a fixed 80-character FITS string, one per line, in
-        // declaration order. Padding cards (trailing blanks added to
-        // round up to a 2880-byte block) and the closing ``END``
-        // card are omitted. Falls back to a one-line summary if
-        // serialization fails (e.g. malformed values).
+        // Render every card as a fixed 80-character FITS string, one
+        // per line, in declaration order. Padding cards (trailing
+        // blanks added to round up to a 2880-byte block) and the
+        // closing END card are omitted. Falls back to a one-line
+        // summary if serialization fails (e.g. malformed values).
         let header = self.lock();
         if let Ok(bytes) = header.to_bytes() {
             let mut out = String::with_capacity(bytes.len() + bytes.len() / 80);
@@ -910,8 +1126,8 @@ impl PyHeader {
                 if !out.is_empty() {
                     out.push('\n');
                 }
-                // Astropy keeps the 80-char card padded with
-                // trailing spaces; preserve that.
+                // Keep the 80-char card padded with trailing spaces;
+                // only a NUL fill byte (see Card::parse) is trimmed.
                 out.push_str(card.as_ref().trim_end_matches('\0'));
             }
             out
@@ -957,16 +1173,14 @@ impl PyHeader {
         })
     }
 
-    /// Active time scale (``TIMESYS``), upper-cased.
+    /// Active time scale (``TIMESYS``), trimmed and upper-cased.
     ///
     /// Returns ``"UTC"`` when the keyword is absent, per the FITS standard
-    /// default.
-    ///
-    /// Returns
-    /// -------
-    /// str
-    ///   One of ``"UTC"``, ``"TAI"``, ``"TT"``, ``"TDB"``, ``"TCG"``,
-    ///   ``"TCB"``, ``"GPS"``, ``"LOCAL"``, etc. (WCS Paper IV Table 1).
+    /// default. The value is read back verbatim, so a header with an
+    /// unrecognized or malformed ``TIMESYS`` still returns that text;
+    /// this getter does not validate it against the WCS Paper IV
+    /// Table 1 time scales that :attr:`mjd_obs_utc` and its siblings
+    /// understand.
     #[getter]
     fn time_sys(&self) -> String {
         self.lock().time_sys()
@@ -988,10 +1202,19 @@ impl PyHeader {
         self.lock().time_unit()
     }
 
-    /// Start of the observation as MJD in the native ``TIMESYS`` scale.
+    /// Effective exposure time in seconds, excluding dead time.
     ///
-    /// Effective exposure time in seconds (``XPOSURE``), excluding dead time.
-    /// ``None`` if absent or ``TIMEUNIT`` is unrecognized.
+    /// This reads ``XPOSURE``, scaled by ``TIMEUNIT`` or by a per-card
+    /// ``[unit]`` annotation when one is present. It falls back to
+    /// ``EXPTIME``, which predates the standard and is always in
+    /// seconds, when ``XPOSURE`` is absent.
+    ///
+    /// Returns
+    /// -------
+    /// float or None
+    ///   The exposure time in seconds. ``None`` when neither keyword
+    ///   is present, and when ``XPOSURE`` is present but its unit is
+    ///   not a recognized time unit.
     #[getter]
     fn time_exposure(&self) -> Option<f64> {
         self.lock().time_exposure()
@@ -1004,21 +1227,35 @@ impl PyHeader {
         self.lock().time_elapsed()
     }
 
-    /// Start of the observation as UTC MJD. Reads ``MJD-BEG``/``DATE-BEG``/``TSTART``
-    /// and converts from ``TIMESYS``; falls back to ``UTSTART``.
+    /// Start of the observation as UTC MJD.
+    ///
+    /// Tries, in order: ``MJD-BEG``; ``DATE-BEG``; ``TSTART`` added
+    /// to the reference epoch and ``TIMEOFFS``; ``UTSTART`` combined
+    /// with the date from ``DATE-OBS``. The first three are
+    /// converted from ``TIMESYS`` to UTC; ``UTSTART`` is UTC
+    /// already.
     #[getter]
     fn mjd_begin_utc(&self) -> Option<f64> {
         self.lock().mjd_begin_utc()
     }
 
-    /// End of the observation as UTC MJD. Reads ``MJD-END``/``DATE-END``/``TSTOP``
-    /// and converts from ``TIMESYS``; falls back to ``UTSTOP``.
+    /// End of the observation as UTC MJD.
+    ///
+    /// Tries, in order: ``MJD-END``; ``DATE-END``; ``TSTOP`` added
+    /// to the reference epoch and ``TIMEOFFS``; ``UTSTOP`` combined
+    /// with the date from ``DATE-OBS``. The first three are
+    /// converted from ``TIMESYS`` to UTC; ``UTSTOP`` is UTC already.
     #[getter]
     fn mjd_end_utc(&self) -> Option<f64> {
         self.lock().mjd_end_utc()
     }
 
-    /// Average/mid time of the observation as UTC MJD (``MJD-AVG``/``DATE-AVG``).
+    /// Average/mid time of the observation as UTC MJD.
+    ///
+    /// Reads ``MJD-AVG`` or ``DATE-AVG`` and converts from
+    /// ``TIMESYS``; falls back to the midpoint of
+    /// :attr:`mjd_begin_utc` and :attr:`mjd_end_utc` when neither is
+    /// present.
     #[getter]
     fn mjd_avg_utc(&self) -> Option<f64> {
         self.lock().mjd_avg_utc()
@@ -1074,18 +1311,40 @@ impl PyHeader {
 
     // -- Unit helpers ---------------------------------------------------------
 
-    /// Unit string for `key` extracted from the `[unit]` comment convention.
-    /// Returns ``None`` if the keyword is absent or carries no unit annotation.
+    /// Unit string for a keyword's ``[unit]`` comment annotation.
+    ///
+    /// Parameters
+    /// ----------
+    /// key : str
+    ///   Keyword to look up (case-insensitive).
+    ///
+    /// Returns
+    /// -------
+    /// str or None
+    ///   The unit text, or ``None`` if the keyword is absent or its
+    ///   comment carries no ``[unit]`` annotation.
     fn unit_for(&self, key: &str) -> Option<String> {
         self.lock().keyword_unit(key)
     }
 
-    /// Value of `key` converted to the canonical unit for its dimension
-    /// (SI base units, with angles in degrees).
+    /// Value of `key` converted to the canonical unit for its
+    /// physical dimension: meters for length, seconds for time,
+    /// degrees for angle, and so on.
     ///
-    /// Reads the unit from the `[unit]` comment annotation and applies the
-    /// conversion factor. Returns ``None`` if the keyword is absent,
-    /// non-numeric, unannotated, or the unit is unrecognized.
+    /// Reads the source unit from the keyword's ``[unit]`` comment
+    /// annotation and applies the conversion factor.
+    ///
+    /// Parameters
+    /// ----------
+    /// key : str
+    ///   Keyword to look up (case-insensitive).
+    ///
+    /// Returns
+    /// -------
+    /// float or None
+    ///   The converted value, or ``None`` if the keyword is absent,
+    ///   non-numeric, carries no ``[unit]`` annotation, or the
+    ///   annotation is not a recognized unit.
     fn value_in_si(&self, key: &str) -> Option<f64> {
         self.lock().real_in_canonical(key)
     }
@@ -1132,6 +1391,11 @@ impl PyHeader {
     }
 }
 
+/// Iterator over keyword strings, returned by ``iter(header)``.
+///
+/// Snapshots the keyword list at the time ``iter(header)`` was
+/// called; a later edit to the header does not extend or shrink an
+/// iterator already in progress.
 #[pyclass]
 #[derive(Debug)]
 pub struct HeaderKeyIter {
@@ -1145,6 +1409,7 @@ impl HeaderKeyIter {
         slf
     }
 
+    /// Next keyword, or ``None`` at the end of iteration.
     fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<String> {
         if slf.pos < slf.keys.len() {
             let i = slf.pos;
@@ -1158,8 +1423,7 @@ impl HeaderKeyIter {
 
 /// List-like view of every commentary card body that shares a
 /// keyword (``COMMENT``, ``HISTORY``, blank-keyword). Returned by
-/// :meth:`fitsy.Header.__getitem__` for those keywords; mirrors
-/// ``astropy.io.fits.header._HeaderCommentaryCards``.
+/// ``header[key]`` for one of those three keywords.
 ///
 /// - ``len(view)`` -- number of cards
 /// - ``view[i]``   -- text body of the i-th card
@@ -1173,10 +1437,27 @@ pub struct PyHeaderCommentary {
 
 #[pymethods]
 impl PyHeaderCommentary {
+    /// Number of cards: ``len(view)``.
     fn __len__(&self) -> usize {
         self.lines.len()
     }
 
+    /// Text body of the i-th card: ``view[i]``.
+    ///
+    /// Parameters
+    /// ----------
+    /// idx : int
+    ///   Index, accepts a negative value counting from the end.
+    ///
+    /// Returns
+    /// -------
+    /// str
+    ///   The card's text body.
+    ///
+    /// Raises
+    /// ------
+    /// KeyError
+    ///   If `idx` is outside ``range(-len(view), len(view))``.
     fn __getitem__(&self, mut idx: isize) -> PyResult<String> {
         let n = self.lines.len() as isize;
         if idx < 0 {
@@ -1190,6 +1471,7 @@ impl PyHeaderCommentary {
         Ok(self.lines[idx as usize].clone())
     }
 
+    /// Iterate over each card's text body, in declaration order.
     fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         Ok(PyList::new(py, &slf.lines)?
@@ -1197,6 +1479,7 @@ impl PyHeaderCommentary {
             .unbind())
     }
 
+    /// Every text body, joined with ``"\n"``.
     fn __str__(&self) -> String {
         self.lines.join("\n")
     }
@@ -1206,16 +1489,22 @@ impl PyHeaderCommentary {
     }
 }
 
-/// Build a `Header` from a Python `dict[str, value]`. Used by the
-/// writer wrappers. Comments are not supported via dict; callers
-/// who need them should use the lower-level builder.
 /// Convert a Python ``header=`` argument into a core [`Header`].
 ///
-/// Accepts a :class:`Header` (cloned, preserving every card), a
-/// ``dict``, or any object exposing ``.items()``. Keywords are folded
-/// to upper case and a ``(value, comment)`` tuple is accepted per
-/// entry, matching ``header[key] = value`` semantics. Shared by the
-/// ``Header(...)`` constructor and the writer builders.
+/// Accepts a [`PyHeader`] (cloned, preserving every card, including
+/// commentary and structural keywords), a `dict`, or any object
+/// exposing `.items()`. A mapping entry's keyword is folded to upper
+/// case and its value is a bare scalar or a `(value, comment)` tuple,
+/// as [`parse_setitem_value`] accepts. Unlike `header[key] = value`,
+/// a structural keyword in a mapping entry is not rejected. Shared by
+/// the `Header(...)` constructor and the writer builders.
+///
+/// # Errors
+///
+/// Returns a Python `TypeError` if `obj` is neither a [`PyHeader`]
+/// nor an object with an `.items()` method, or if one of its values
+/// does not convert through [`py_to_value`]. Returns `fitsy.FitsError`
+/// if a keyword fails validation (too long, or an invalid character).
 pub(crate) fn header_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Header> {
     // Another Header: clone every card (values, commentary, structural).
     if let Ok(h) = obj.extract::<PyRef<'_, PyHeader>>() {
@@ -1259,7 +1548,20 @@ fn is_end_card(card: &[u8], lenient: bool) -> bool {
 }
 
 /// Parse the right-hand side of `header[key] = ...`. Accepts either
-/// a bare scalar or a `(value, comment_str)` tuple.
+/// a bare scalar, converted through [`py_to_value`] with no comment,
+/// or a 2-element `(value, comment)` tuple where `comment` is a
+/// Python `str` or `None`.
+///
+/// A tuple of any other length is not treated as `(value, comment)`;
+/// it falls through to [`py_to_value`] on the whole object, which
+/// then fails with the same `TypeError` as any other unsupported
+/// type.
+///
+/// # Errors
+///
+/// Returns a Python `TypeError` if `v` (or a 2-tuple's first
+/// element) does not convert through [`py_to_value`], or if a
+/// 2-tuple's second element is not a `str` or `None`.
 fn parse_setitem_value(v: &Bound<'_, PyAny>) -> PyResult<(Value, Option<String>)> {
     if let Ok(t) = v.cast::<PyTuple>()
         && t.len() == 2
@@ -1276,7 +1578,23 @@ fn parse_setitem_value(v: &Bound<'_, PyAny>) -> PyResult<(Value, Option<String>)
     Ok((py_to_value(v)?, None))
 }
 
-/// Best-effort `PyAny` -> `Value` coercion.
+/// Convert a Python scalar to a FITS [`Value`].
+///
+/// Tries, in order: `bool` to [`Value::Logical`]; `int` to
+/// [`Value::Integer`] (an integer outside the `i64` range falls
+/// through to the next case rather than erroring here); `float` to
+/// [`Value::Real`]; `complex` to [`Value::ComplexInteger`] when both
+/// parts are whole numbers within the `i64` range, otherwise
+/// [`Value::ComplexReal`]; `str` to [`Value::String`]; and `None` to
+/// [`Value::Undefined`]. A numpy scalar (`numpy.int64`,
+/// `numpy.float64`, `numpy.bool_`, ...) converts through the same
+/// arms, because it supports the same `__index__` / `__float__`
+/// protocols PyO3 extracts through.
+///
+/// # Errors
+///
+/// Returns a Python `TypeError` naming `v`'s type if `v` matches
+/// none of the above -- for example a `list`, `dict`, or `tuple`.
 fn py_to_value(v: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(b) = v.extract::<bool>() {
         return Ok(Value::Logical(b));

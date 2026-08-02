@@ -14,11 +14,10 @@ use super::unit::Unit;
 /// all describe the same photon, but no unit algebra relates them --
 /// crossing between them needs `c` and `h`.
 ///
-/// It sits in `units` rather than in `wcs` because it is parameterless
-/// and universal, and because the table here already depends on `c`: a
-/// light year *is* the speed of light times a Julian year. `astropy`
-/// draws the line in the same place, with `u.spectral()` in its core
-/// units package rather than in `astropy.wcs`.
+/// This sits in `units` rather than in `wcs` because it takes no
+/// parameter and applies everywhere, and because the table here
+/// already depends on `c`. A light year is the speed of light times a
+/// Julian year.
 ///
 /// Vacuum wavelength only. `AWAV` is air wavelength and needs a
 /// refractive index, itself a function of the wavelength; that stays in
@@ -82,8 +81,7 @@ mod tests {
     /// photon but share no dimension, so plain unit algebra refuses them
     /// and the equivalency is what bridges the gap.
     ///
-    /// The reference values are `astropy`'s, from
-    /// `(500*u.nm).to(u.Hz, equivalencies=u.spectral())`.
+    /// The reference values come from converting 500 nm to Hz.
     #[test]
     fn spectral_equivalency_bridges_wavelength_and_frequency() {
         let eq: &[&dyn Equivalence] = &[&Spectral];

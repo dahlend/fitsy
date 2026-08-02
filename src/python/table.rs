@@ -1,14 +1,18 @@
 //! `PyBinTable` / `PyAsciiTable` -- table HDU wrappers.
 //!
-//! Tables are read into owned Python data eagerly. Scalar columns
-//! return 1-D numpy arrays; fixed-repeat columns return `(n_rows,
-//! repeat)` 2-D arrays; VLA and string columns return Python lists
-//! (the cells have non-uniform shape, so a single ndarray is not
-//! the right answer).
+//! Tables are read into owned Python data eagerly, one `PyColumn` or
+//! `AsciiPyColumn` per FITS column. `column()`, `table[name]` and
+//! `to_dict()` return a numpy array for a plain scalar float or
+//! integer column, and a Python list for every other column kind
+//! (logical, string, fixed-repeat, variable-length, bit, or
+//! complex). `data` instead assembles every column into one numpy
+//! structured array, encoding each list-returning column as
+//! `object` dtype. See `PyBinTable` and `PyAsciiTable` below for the
+//! exact `TFORM`-to-dtype mapping.
 
 use numpy::IntoPyArray;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyKeyError;
+use pyo3::exceptions::{PyIndexError, PyKeyError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -17,6 +21,13 @@ use crate::hdu::{AsciiCell, AsciiTableHdu, BinTableHdu, BinValue};
 /// Convert an `Option<i64>` column to a Python object: a plain
 /// `numpy.int64` array if there are no nulls, otherwise a
 /// `numpy.ma.MaskedArray` so callers don't lose the integer dtype.
+/// A masked position's underlying value is `0`; only the mask
+/// records that it is undefined.
+///
+/// # Errors
+///
+/// Returns the Python exception if the `numpy.ma` import or the
+/// `numpy.ma.array` call fails.
 fn nullable_int_to_py(py: Python<'_>, v: &[Option<i64>]) -> PyResult<Py<PyAny>> {
     if v.iter().all(Option::is_some) {
         let plain: Vec<i64> = v.iter().map(|x| x.unwrap()).collect();
@@ -41,11 +52,13 @@ use super::header::PyHeader;
 /// Binary table HDU (``BINTABLE``).
 ///
 /// Returned by :meth:`FitsFile.hdu` (or ``file[i]``) when the HDU
-/// kind is ``BINTABLE``. Columns are decoded eagerly:
-///
-/// - Scalar numeric columns return 1-D :class:`numpy.ndarray`.
-/// - Fixed-repeat columns return ``(n_rows, repeat)`` 2-D arrays.
-/// - Variable-length and string columns return Python lists.
+/// kind is ``BINTABLE``. Columns are decoded eagerly. A column with
+/// a repeat count of 1 and a plain integer or real ``TFORM`` code
+/// returns a 1-D :class:`numpy.ndarray`; every other column --
+/// logical, string, a repeat count above 1, or a bit, complex or
+/// variable-length code -- returns a Python ``list``, one entry per
+/// row. See :meth:`column` for the full mapping from ``TFORM`` code
+/// to Python type.
 ///
 /// Examples
 /// --------
@@ -63,14 +76,13 @@ pub struct PyBinTable {
     /// declaration order.
     columns: Vec<PyColumn>,
     /// Raw on-disk data bytes (rows + heap), captured at load time
-    /// so that :meth:`FitsFile.writeto` can re-emit the table
-    /// byte-for-byte. Column-level Python edits are *not* round
-    /// tripped in v0.1; reconstruct the table with
-    /// :func:`fitsy.bintable` to change column data.
+    /// so the table can be re-emitted byte-for-byte on write.
+    /// Column-level Python edits are not round-tripped; build a new
+    /// table with `fitsy.bintable()` to change column data.
     pub(crate) raw: Vec<u8>,
 }
 
-/// Owned column data. We materialise everything up front because
+/// Owned column data. We materialize everything up front because
 /// column access is the dominant Python idiom and lazy decode
 /// would mean keeping `BinTableHdu<'a>` alive in the Python wrapper.
 #[derive(Debug)]
@@ -78,21 +90,30 @@ enum PyColumn {
     /// Float-like scalars (any numeric BinValue flattened to f64
     /// row-by-row, including scaled ints). Length = `n_rows`.
     F64(Vec<f64>),
-    /// Integer scalars (B/I/J/K with no scaling). `None` => TNULL.
+    /// Integer scalars (B/I/J/K with no scaling, or B under the
+    /// FITS signed-byte convention, `TZERO = -128`). `None` => TNULL.
     I64(Vec<Option<i64>>),
     /// Strings (TFORM=`A`). One per row.
     Str(Vec<String>),
     /// Booleans. `None` => undefined logical (FITS `'\0'`).
     Bool(Vec<Option<bool>>),
-    /// Anything else (vector cells, complex, bits, VLA, ...) is held
-    /// as a list of per-cell Python objects built lazily. The
-    /// optional `Vec<usize>` is the column's `TDIMn` shape in FITS
-    /// order (fastest-varying first); when present, numeric cells
-    /// are reshaped accordingly when handed to Python.
+    /// Anything else (vector cells, complex, bits, VLA, I/J/K under
+    /// the FITS unsigned-integer convention, ...) is held as a list
+    /// of per-cell Python objects built lazily. The optional
+    /// `Vec<usize>` is the column's `TDIMn` shape in FITS order
+    /// (fastest-varying first); when present, numeric cells are
+    /// reshaped accordingly when handed to Python.
     Generic(Vec<BinValue>, Option<Vec<usize>>),
 }
 
 impl PyBinTable {
+    /// Decode every column of `t` eagerly into owned Python-ready
+    /// data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from [`BinTableHdu::cell_value`] if a cell
+    /// fails to decode.
     pub(crate) fn from_table(t: &BinTableHdu<'_>, header: PyHeader) -> PyResult<Self> {
         let n_rows = t.n_rows();
         let mut column_names = Vec::with_capacity(t.columns().len());
@@ -115,6 +136,30 @@ impl PyBinTable {
         self.header.lock().clone()
     }
 
+    /// Resolve a caller row index to an in-range `usize`.
+    ///
+    /// A negative `r` counts back from the end, as `table[-1]` does.
+    /// Every row accessor goes through this function, because
+    /// indexing a column `Vec` directly with an out-of-range value
+    /// panics, and a panic crosses into Python as a
+    /// `pyo3_runtime.PanicException` rather than an `IndexError`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PyIndexError`] if `r` is outside
+    /// `-n_rows .. n_rows`.
+    fn resolve_row(&self, r: isize) -> PyResult<usize> {
+        let n = self.n_rows as isize;
+        let idx = if r < 0 { r + n } else { r };
+        if idx < 0 || idx >= n {
+            return Err(PyIndexError::new_err(format!(
+                "row {r} out of range (n_rows = {})",
+                self.n_rows
+            )));
+        }
+        Ok(idx as usize)
+    }
+
     /// Reconstruct a `PyBinTable` from a builder snapshot. Columns
     /// are not re-decoded -- the table behaves as a raw byte blob
     /// (column accessors return KeyError).
@@ -135,6 +180,45 @@ fn freeze_if_array(py: Python<'_>, obj: &Py<PyAny>) {
     let _ = obj.bind(py).call_method1("setflags", ((), false));
 }
 
+/// Wrap `lst` in a 1-D `object` array of length `lst.len()`.
+///
+/// `numpy.array(lst, "object")` infers the shape from the contents.
+/// When every entry is a sequence of one common length, it infers a
+/// 2-D array. A structured array needs one entry per row, so a 2-D
+/// column makes `numpy.rec.fromarrays` reject the whole table
+/// against any column of a different shape. Allocating the array
+/// first pins the shape to 1-D, and the element-wise fill keeps each
+/// entry as one opaque object.
+///
+/// # Errors
+///
+/// Returns the Python exception if the `numpy.empty` call or an
+/// element assignment fails.
+fn object_array_1d(py: Python<'_>, np: &Bound<'_, PyAny>, lst: &Py<PyList>) -> PyResult<Py<PyAny>> {
+    let items = lst.bind(py);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let arr = np.call_method("empty", (items.len(),), Some(&kwargs))?;
+    for (i, item) in items.iter().enumerate() {
+        arr.set_item(i, item)?;
+    }
+    Ok(arr.unbind())
+}
+
+/// Decode `col` into the most specific `PyColumn` variant its data
+/// supports.
+///
+/// Peeks at row 0 to choose a variant. `F64`, `I64`, `Str` and
+/// `Bool` cover a scalar (repeat 1) real, plain-integer, string or
+/// logical column. Every other column -- a repeat count above 1,
+/// the unsigned-integer convention, `X`, `C`, `M`, `P`/`Q`, or a
+/// later row whose decoded shape disagrees with row 0 -- falls back
+/// to `Generic`, which keeps one decoded `BinValue` per row.
+///
+/// # Errors
+///
+/// Returns the error from [`BinTableHdu::cell_value`] if a cell
+/// fails to decode.
 fn decode_column(
     t: &BinTableHdu<'_>,
     col: &crate::hdu::BinColumn,
@@ -405,19 +489,32 @@ impl PyBinTable {
         self.column_names.clone()
     }
 
-    /// Return one column by name, or one row by integer/slice
-    /// (``table[name]`` / ``table[i]`` / ``table[i:j]``).
+    /// Return one column by name, or one row by integer or slice.
     ///
-    /// - ``str`` key: column accessor (numpy array or list).
-    /// - ``int`` key: a row dict ``{col_name: value, ...}``.
-    /// - ``slice`` key: a list of row dicts.
+    /// Equivalent to ``table[key]``.
+    ///
+    /// Parameters
+    /// ----------
+    /// key : str, int, or slice
+    ///   A column name selects a column. An integer selects one
+    ///   row, and accepts a negative index. A slice selects a range
+    ///   of rows.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray, list, dict, or list of dict
+    ///   For a ``str`` key, the column, as returned by
+    ///   :meth:`column`. For an ``int`` key, one row dict, as
+    ///   returned by :meth:`row`. For a ``slice`` key, a list of
+    ///   row dicts.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///   If a string key names no column.
+    ///   If `key` is a string that names no column, or if `key` is
+    ///   none of ``str``, ``int``, or ``slice``.
     /// IndexError
-    ///   If an integer key is out of range.
+    ///   If `key` is an integer outside ``range(len(table))``.
     fn __getitem__(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = key.extract::<String>() {
             return self.column(py, &name);
@@ -435,15 +532,8 @@ impl PyBinTable {
             return Ok(PyList::new(py, out)?.into_any().unbind());
         }
         if let Ok(i) = key.extract::<isize>() {
-            let n = self.n_rows as isize;
-            let r = if i < 0 { i + n } else { i };
-            if r < 0 || r >= n {
-                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                    "row {i} out of range (n_rows = {})",
-                    self.n_rows
-                )));
-            }
-            return self.row(py, r);
+            // `row` resolves a negative index and bounds-checks.
+            return self.row(py, i);
         }
         Err(PyKeyError::new_err(
             "BinTable index must be a column name (str), a row index (int), or a slice",
@@ -451,35 +541,80 @@ impl PyBinTable {
     }
 
     /// Build a row dict for row index `r`.
+    ///
+    /// Parameters
+    /// ----------
+    /// r : int
+    ///   Row index. Must satisfy ``0 <= r < n_rows``. Unlike
+    ///   ``table[r]``, this method does not accept a negative
+    ///   index.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///   One entry per column, keyed by column name, holding that
+    ///   row's value in the same form :meth:`column` would give for
+    ///   the whole column.
+    ///
+    /// Raises
+    /// ------
+    /// IndexError
+    ///   If `r` is outside ``-n_rows`` to ``n_rows - 1``.
+    ///
+    /// Notes
+    /// -----
+    /// A negative `r` counts back from the last row, as ``table[r]``
+    /// does. ``table[r]`` and this method accept the same indices.
     fn row(&self, py: Python<'_>, r: isize) -> PyResult<Py<PyAny>> {
+        let r = self.resolve_row(r)?;
         let dict = PyDict::new(py);
         for (i, name) in self.column_names.iter().enumerate() {
             let val: Py<PyAny> = match &self.columns[i] {
-                PyColumn::F64(v) => v[r as usize].into_py_any(py)?,
-                PyColumn::I64(v) => match v[r as usize] {
+                PyColumn::F64(v) => v[r].into_py_any(py)?,
+                PyColumn::I64(v) => match v[r] {
                     Some(x) => x.into_py_any(py)?,
                     None => py.None(),
                 },
-                PyColumn::Str(v) => v[r as usize].clone().into_py_any(py)?,
-                PyColumn::Bool(v) => match v[r as usize] {
+                PyColumn::Str(v) => v[r].clone().into_py_any(py)?,
+                PyColumn::Bool(v) => match v[r] {
                     Some(b) => b.into_py_any(py)?,
                     None => py.None(),
                 },
-                PyColumn::Generic(v, shape) => {
-                    bin_value_to_py(py, &v[r as usize], shape.as_deref())?
-                }
+                PyColumn::Generic(v, shape) => bin_value_to_py(py, &v[r], shape.as_deref())?,
             };
             dict.set_item(name, val)?;
         }
         Ok(dict.into_any().unbind())
     }
 
-    /// Pre-decoded columns assembled into a numpy structured array
-    /// (one record per row, dtype follows column types).
+    /// Pre-decoded columns assembled into one numpy structured
+    /// array, one record per row.
     ///
-    /// Variable-length and string columns are exposed via
-    /// ``object`` dtype; numeric scalars retain native dtype.
-    /// Returned array is read-only.
+    /// Returns
+    /// -------
+    /// numpy.recarray
+    ///   Every column, in declaration order. A column
+    ///   :meth:`column` returns as a numpy array keeps that array's
+    ///   dtype here. A column :meth:`column` returns as a ``list``
+    ///   is encoded as ``object`` dtype instead, one row's list
+    ///   entry per cell. The array is read-only.
+    ///
+    /// Raises
+    /// ------
+    /// Exception
+    ///   The numpy exception, unchanged, if a numpy call fails while
+    ///   fitsy assembles the array.
+    ///
+    /// Notes
+    /// -----
+    /// This array is rebuilt on every access. An edit never reaches
+    /// the file, or even the next call to :attr:`data`; the array
+    /// is frozen read-only so an edit raises instead of silently
+    /// vanishing.
+    ///
+    /// A masked ``int64`` column, or an ``L`` column holding
+    /// ``None``, loses that null marker here: the masked or
+    /// undefined cell reads back as ``0`` or ``False``.
     #[getter]
     fn data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let np = py.import("numpy")?;
@@ -499,7 +634,7 @@ impl PyBinTable {
                 }
                 PyColumn::Generic(v, shape) => {
                     let lst = generic_to_pylist(py, v, shape.as_deref());
-                    np.call_method1("array", (lst, "object"))?.unbind()
+                    object_array_1d(py, &np, &lst)?
                 }
             };
             arrays.append(arr)?;
@@ -518,6 +653,74 @@ impl PyBinTable {
     }
 
     /// Column accessor; equivalent to ``table[name]``.
+    ///
+    /// Parameters
+    /// ----------
+    /// name : str
+    ///   Column name (``TTYPEn``), case-sensitive.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray, numpy.ma.MaskedArray, or list
+    ///   The decoded column, keyed by ``TFORM`` code (Standard
+    ///   Table 18):
+    ///
+    ///   - ``B``, ``I``, ``J``, ``K``, repeat 1, with no
+    ///     ``TSCALn``/``TZEROn``, or ``B`` under the FITS
+    ///     signed-byte convention (``TSCALn = 1``,
+    ///     ``TZEROn = -128``): ``numpy.ndarray`` of ``int64``, or
+    ///     ``numpy.ma.MaskedArray`` of ``int64`` if a cell's stored
+    ///     value matches ``TNULLn``.
+    ///   - ``E`` or ``D``, repeat 1: ``numpy.ndarray`` of
+    ///     ``float64``. ``E`` is widened from its 32-bit storage.
+    ///     ``TNULLn`` has no effect on these two codes.
+    ///   - ``B``, ``I``, ``J``, ``K``, repeat 1, with any other
+    ///     ``TSCALn``/``TZEROn``: ``numpy.ndarray`` of ``float64``,
+    ///     scaled as ``TZEROn + TSCALn * stored``. A cell whose
+    ///     *stored* value matches ``TNULLn`` becomes ``nan``.
+    ///   - ``A``, repeat 1, no ``TDIMn``: ``list`` of ``str``,
+    ///     right-trimmed of trailing spaces and NUL bytes.
+    ///   - ``L``, repeat 1: ``list`` of ``bool`` or ``None``
+    ///     (``None`` marks an undefined logical, stored as a NUL
+    ///     byte).
+    ///   - Every other case -- a repeat count above 1 (a
+    ///     fixed-size vector cell, or ``A`` with ``TDIMn``), ``X``,
+    ///     ``C``, ``M``, ``P``/``Q``, or ``I``/``J``/``K`` under
+    ///     the FITS unsigned-integer convention
+    ///     (``TSCALn = 1``, ``TZEROn = 2**(8n-1)``): a ``list``,
+    ///     one entry per row:
+    ///
+    ///     * A numeric vector cell is a numpy array, reshaped to
+    ///       ``TDIMn`` in C order (fastest-varying last, the
+    ///       reverse of the ``TDIMn`` order) when present.
+    ///     * An ``X`` cell is a ``bool`` numpy array, unpacked
+    ///       most-significant bit first.
+    ///     * A ``C``/``M`` cell is a ``list`` of ``(re, im)`` float
+    ///       tuples, one per repeat element. fitsy does not build a
+    ///       Python ``complex`` value.
+    ///     * A ``P``/``Q`` cell is a numpy array decoded from the
+    ///       heap, in the descriptor's inner type, with that
+    ///       type's own null and scaling rule.
+    ///     * An ``A`` cell with ``TDIMn`` is a numpy array of
+    ///       ``str``.
+    ///
+    /// Raises
+    /// ------
+    /// KeyError
+    ///   If `name` names no column.
+    ///
+    /// Notes
+    /// -----
+    /// fitsy decides a column's representation from its first row.
+    /// If a later row disagrees, the whole column falls back to the
+    /// per-row ``list`` form. An empty table (``n_rows`` is 0)
+    /// always returns an empty ``list`` for every column.
+    ///
+    /// The returned array, when one is returned, is read-only.
+    /// fitsy freezes only that outer array. A numpy array held
+    /// inside a returned ``list`` stays writable, but fitsy rebuilds
+    /// the column on every call, so such an edit reaches neither the
+    /// file nor the next call.
     fn column(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let idx = self
             .column_names
@@ -553,6 +756,13 @@ impl PyBinTable {
     }
 
     /// Materialise every column as a plain ``dict[str, ndarray | list]``.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///   One entry per column, keyed by column name, in declaration
+    ///   order. Each value is what :meth:`column` returns for that
+    ///   name.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let dict = PyDict::new(py);
         for name in &self.column_names {
@@ -657,6 +867,13 @@ impl PyBinTable {
 
 /// Convert one BinValue cell to a single Python object using the
 /// same dtype rules as `generic_to_pylist`.
+///
+/// # Errors
+///
+/// Returns the Python exception if indexing the internal
+/// single-element list fails. `generic_to_pylist` always returns a
+/// list of exactly one item for a single-cell input, so this does
+/// not occur in practice.
 fn bin_value_to_py(
     py: Python<'_>,
     cell: &BinValue,
@@ -778,8 +995,8 @@ fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>
             BinValue::C64(v) => v.clone().into_py_any(py).unwrap_or_else(|_| py.None()),
             BinValue::C128(v) => v.clone().into_py_any(py).unwrap_or_else(|_| py.None()),
             BinValue::Bits(bytes, count) => {
-                // Unpack X-format bits (MSB first) into a numpy bool array
-                // of length `count`, matching astropy's representation.
+                // Unpack X-format bits (MSB first, Sec.7.3.3.1) into
+                // a numpy bool array of length `count`.
                 let mut bits: Vec<bool> = Vec::with_capacity(*count);
                 for i in 0..*count {
                     let byte = bytes.get(i / 8).copied().unwrap_or(0);
@@ -809,32 +1026,71 @@ fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>
 
 /// ASCII ``TABLE`` HDU.
 ///
-/// Returned by :meth:`FitsFile.hdu` when the HDU kind is
-/// ``TABLE``. Columns where every cell parses as numeric are
-/// returned as :class:`numpy.ndarray` (with ``NaN`` for null
-/// cells); mixed columns fall back to ``list[str]``.
+/// Returned by :meth:`FitsFile.hdu` (or ``file[i]``) when the HDU
+/// kind is ``TABLE``. A numeric column (``TFORM`` code ``I``,
+/// ``F``, ``E`` or ``D``) decodes to a :class:`numpy.ndarray` of
+/// ``float64``, with ``nan`` for a cell matching ``TNULLn``. A
+/// character column (``A``) decodes to a ``list`` of ``str``. See
+/// :meth:`column` for the full decoding rule.
 #[pyclass(name = "AsciiTable", module = "fitsy")]
 #[derive(Debug)]
 pub struct PyAsciiTable {
     pub(crate) header: PyHeader,
     pub(crate) n_rows: usize,
     pub(crate) column_names: Vec<String>,
-    /// One column per AsciiColumn, eagerly decoded. Mixed columns
-    /// (`I` with TNULL holes) are lifted to f64 with NaN for null,
-    /// matching the BinTable convention above.
+    /// One column per AsciiColumn, eagerly decoded. Every numeric
+    /// format (`I`, `F`, `E`, `D`) is lifted to `f64`; a `TNULLn`-
+    /// matching cell becomes `NaN` rather than a BinTable-style
+    /// mask.
     columns: Vec<AsciiPyColumn>,
-    /// Raw on-disk data bytes captured at load time, used by
-    /// :meth:`FitsFile.writeto` to round-trip the table.
+    /// Raw on-disk data bytes captured at load time, used to
+    /// round-trip the table when the file is written back out.
     pub(crate) raw: Vec<u8>,
 }
 
 #[derive(Debug)]
 enum AsciiPyColumn {
+    /// Any all-numeric column (``I``, ``F``, ``E``, or ``D``),
+    /// scaled by `TSCALn`/`TZEROn` when either is set. `NaN` marks
+    /// a cell matching `TNULLn`; a blank field is `TZEROn`, its
+    /// pre-scaling value being `0`.
     F64(Vec<f64>),
+    /// An ``A`` (character) column, one untrimmed field per row.
     Str(Vec<String>),
 }
 
 impl PyAsciiTable {
+    /// Resolve a caller row index to an in-range `usize`.
+    ///
+    /// A negative `r` counts back from the end, as `table[-1]` does.
+    /// Every row accessor goes through this function, because
+    /// indexing a column `Vec` directly with an out-of-range value
+    /// panics, and a panic crosses into Python as a
+    /// `pyo3_runtime.PanicException` rather than an `IndexError`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PyIndexError`] if `r` is outside
+    /// `-n_rows .. n_rows`.
+    fn resolve_row(&self, r: isize) -> PyResult<usize> {
+        let n = self.n_rows as isize;
+        let idx = if r < 0 { r + n } else { r };
+        if idx < 0 || idx >= n {
+            return Err(PyIndexError::new_err(format!(
+                "row {r} out of range (n_rows = {})",
+                self.n_rows
+            )));
+        }
+        Ok(idx as usize)
+    }
+
+    /// Decode every column of `t` eagerly into owned Python-ready
+    /// data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from [`AsciiTableHdu::cell_value`] if a
+    /// cell fails to decode.
     pub(crate) fn from_table(t: &AsciiTableHdu<'_>, header: PyHeader) -> PyResult<Self> {
         let n_rows = t.n_rows();
         let mut column_names = Vec::with_capacity(t.columns().len());
@@ -885,6 +1141,7 @@ impl PyAsciiTable {
         })
     }
 
+    /// Clone the underlying `Header` (for serialization).
     pub(crate) fn header_clone(&self) -> crate::Header {
         self.header.lock().clone()
     }
@@ -922,11 +1179,32 @@ impl PyAsciiTable {
         self.column_names.clone()
     }
 
-    /// Return one column by name, or one row by integer/slice.
+    /// Return one column by name, or one row by integer or slice.
     ///
-    /// - ``str`` key: column accessor.
-    /// - ``int`` key: a row dict ``{col_name: value, ...}``.
-    /// - ``slice`` key: a list of row dicts.
+    /// Equivalent to ``table[key]``.
+    ///
+    /// Parameters
+    /// ----------
+    /// key : str, int, or slice
+    ///   A column name selects a column. An integer selects one
+    ///   row, and accepts a negative index. A slice selects a range
+    ///   of rows.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray, list, dict, or list of dict
+    ///   For a ``str`` key, the column, as returned by
+    ///   :meth:`column`. For an ``int`` key, one row dict, as
+    ///   returned by :meth:`row`. For a ``slice`` key, a list of
+    ///   row dicts.
+    ///
+    /// Raises
+    /// ------
+    /// KeyError
+    ///   If `key` is a string that names no column, or if `key` is
+    ///   none of ``str``, ``int``, or ``slice``.
+    /// IndexError
+    ///   If `key` is an integer outside ``range(len(table))``.
     fn __getitem__(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = key.extract::<String>() {
             return self.column(py, &name);
@@ -944,15 +1222,8 @@ impl PyAsciiTable {
             return Ok(PyList::new(py, out)?.into_any().unbind());
         }
         if let Ok(i) = key.extract::<isize>() {
-            let n = self.n_rows as isize;
-            let r = if i < 0 { i + n } else { i };
-            if r < 0 || r >= n {
-                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                    "row {i} out of range (n_rows = {})",
-                    self.n_rows
-                )));
-            }
-            return self.row(py, r);
+            // `row` resolves a negative index and bounds-checks.
+            return self.row(py, i);
         }
         Err(PyKeyError::new_err(
             "AsciiTable index must be a column name (str), a row index (int), or a slice",
@@ -960,19 +1231,58 @@ impl PyAsciiTable {
     }
 
     /// Build a row dict for row index `r`.
+    ///
+    /// Parameters
+    /// ----------
+    /// r : int
+    ///   Row index. Must satisfy ``0 <= r < n_rows``. Unlike
+    ///   ``table[r]``, this method does not accept a negative
+    ///   index.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///   One entry per column, keyed by column name, holding that
+    ///   row's value in the same form :meth:`column` would give for
+    ///   the whole column.
+    ///
+    /// Raises
+    /// ------
+    /// IndexError
+    ///   If `r` is outside ``-n_rows`` to ``n_rows - 1``.
+    ///
+    /// Notes
+    /// -----
+    /// A negative `r` counts back from the last row, as ``table[r]``
+    /// does. ``table[r]`` and this method accept the same indices.
     fn row(&self, py: Python<'_>, r: isize) -> PyResult<Py<PyAny>> {
+        let r = self.resolve_row(r)?;
         let dict = PyDict::new(py);
         for (i, name) in self.column_names.iter().enumerate() {
             let val: Py<PyAny> = match &self.columns[i] {
-                AsciiPyColumn::F64(v) => v[r as usize].into_py_any(py)?,
-                AsciiPyColumn::Str(v) => v[r as usize].clone().into_py_any(py)?,
+                AsciiPyColumn::F64(v) => v[r].into_py_any(py)?,
+                AsciiPyColumn::Str(v) => v[r].clone().into_py_any(py)?,
             };
             dict.set_item(name, val)?;
         }
         Ok(dict.into_any().unbind())
     }
 
-    /// All columns assembled into a numpy structured array.
+    /// Every column assembled into one numpy structured array, one
+    /// record per row.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.recarray
+    ///   Every column, in declaration order, with the same dtype
+    ///   :meth:`column` gives it. The array is read-only.
+    ///
+    /// Notes
+    /// -----
+    /// This array is rebuilt on every access. An edit never reaches
+    /// the file, or even the next call to :attr:`data`; the array
+    /// is frozen read-only so an edit raises instead of silently
+    /// vanishing.
     #[getter]
     fn data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let np = py.import("numpy")?;
@@ -997,6 +1307,31 @@ impl PyAsciiTable {
     }
 
     /// Column accessor; equivalent to ``table[name]``.
+    ///
+    /// Parameters
+    /// ----------
+    /// name : str
+    ///   Column name (``TTYPEn``), case-sensitive.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray or list of str
+    ///   ``I``, ``F``, ``E`` and ``D`` (Standard Table 15) all
+    ///   return a 1-D :class:`numpy.ndarray` of ``float64``, scaled
+    ///   by ``TSCALn``/``TZEROn`` when either is set. A blank field
+    ///   parses as ``0`` before scaling, so it becomes ``TZEROn``
+    ///   once scaled. A field matching ``TNULLn`` becomes ``nan``.
+    ///   ``A`` returns a ``list`` of ``str``, one per row, padded to
+    ///   the field width; fitsy does not trim it.
+    ///
+    /// Raises
+    /// ------
+    /// KeyError
+    ///   If `name` names no column.
+    ///
+    /// Notes
+    /// -----
+    /// The returned array, when one is returned, is read-only.
     fn column(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let idx = self
             .column_names
@@ -1029,6 +1364,13 @@ impl PyAsciiTable {
     }
 
     /// Materialise every column as a plain ``dict[str, ndarray | list]``.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///   One entry per column, keyed by column name, in declaration
+    ///   order. Each value is what :meth:`column` returns for that
+    ///   name.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let dict = PyDict::new(py);
         for name in &self.column_names {

@@ -5,26 +5,27 @@
 //! the data section and is handled by [`Wcs::from_header`]. The other
 //! two live in a `BINTABLE` header:
 //!
-//! * **BINTABLE vector** -- an image stored in a vector cell of column
-//!   `n`, described by `iCTYPn`/`iCTYna`, `jCRPXn`, `ijPCna`, ... where
-//!   `i`/`j` are axis numbers *within the cell* and `n` is the column.
+//! * BINTABLE vector. An image stored in a vector cell of column `n`,
+//!   described by `iCTYPn`, `jCRPXn`, `ijPCna` and their siblings.
+//!   Here `i` and `j` are axis numbers within the cell, and `n` is the
+//!   column number.
 //!
-//! * **Pixel list** -- one image whose pixel coordinates are spread
-//!   across scalar columns, one per axis, described by
-//!   `TCTYPn`/`TCTYna`, `TCRPXn`, `TPn_ka`, ... where `n` is a column
-//!   number and *is* the axis. This is how every high-energy event list
-//!   georeferences its sky columns.
+//! * Pixel list. One image whose pixel coordinates are spread across
+//!   scalar columns, one per axis, described by `TCTYPn`, `TCRPXn`,
+//!   `TPn_ka` and their siblings. Here `n` is a column number and also
+//!   the axis number. An event list from a high-energy instrument
+//!   georeferences its sky columns this way.
 //!
 //! Both are translated into a synthetic image-form header and handed to
 //! the existing parser, so projections, `SIP`/`TPV`, spectral axes and
 //! `-TAB` all work unchanged.
 //!
-//! Two points the standard leaves open, resolved the way `wcslib`'s
-//! `wcsbth()` resolves them:
+//! The standard leaves two points open. This module resolves them as
+//! follows:
 //!
-//! 1. Sec.8.2 never says how pixel-list columns map to axis numbers.
-//!    The participating columns are sorted ascending and numbered from
-//!    1, which is what `wcsbth()` does when it fills `colax[]`.
+//! 1. Sec.8.2 does not say how pixel-list columns map to axis numbers.
+//!    This module sorts the participating columns in ascending order
+//!    and numbers them from 1.
 //! 2. For the table-scoped global keywords (`LONPna`, `EQUIna`,
 //!    `MJDOBn`, `OBSGXn`, ...) the column index `n` is ignored; they are
 //!    matched on the alternate letter alone. An image-form keyword in
@@ -115,11 +116,19 @@ const AXIS_ROOTS_TO_STRIP: &[&str] = &[
 ];
 
 impl TableWcs {
-    /// Parse the pixel-list representation `alt` (a space for the
-    /// primary description, `A`-`Z` for an alternate).
+    /// Parse the pixel-list representation for descriptor `alt`.
     ///
-    /// Returns `None` when the header carries no pixel-list axis
-    /// keyword for that alternate.
+    /// Pass a space for `alt` to select the primary description, or a
+    /// letter from `A` to `Z` for an alternate.
+    ///
+    /// The result is `Ok(None)` when the header carries no pixel-list
+    /// axis keyword for that descriptor.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `alt` is neither a space nor a letter
+    /// from `A` to `Z`, or when the keywords describe a WCS that the
+    /// parser rejects.
     pub fn from_pixel_list(header: &Header, alt: char) -> Result<Option<Self>> {
         let suffix = alt_suffix(alt)?;
         let mut columns: Vec<usize> = Vec::new();
@@ -192,11 +201,19 @@ impl TableWcs {
         }))
     }
 
-    /// Parse the image stored in vector cells of column `column`
-    /// (1-based), representation `alt`.
+    /// Parse the image stored in the vector cells of column `column`
+    /// for descriptor `alt`. The `column` argument is 1-based.
     ///
-    /// Returns `None` when the header carries no `iCTYPn`-style axis
-    /// keyword for that column and alternate.
+    /// The result is `Ok(None)` when the header carries no `iCTYPn`
+    /// axis keyword for that column and that descriptor.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - `alt` is neither a space nor a letter from `A` to `Z`.
+    /// - `column` falls outside the range 1 to 999.
+    /// - The keywords describe a WCS that the parser rejects.
     pub fn from_table_column(header: &Header, column: usize, alt: char) -> Result<Option<Self>> {
         let suffix = alt_suffix(alt)?;
         if column == 0 || column > 999 {

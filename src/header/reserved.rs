@@ -1,12 +1,24 @@
 //! Typed accessors for reserved keywords (Standard Sec.4.4).
+//!
+//! Each method here reads one reserved keyword from a [`Header`] and
+//! returns it as a Rust type. Two families exist. A `required_*` or
+//! mandatory accessor returns `Result` and fails when the keyword is
+//! absent or holds the wrong type. An `optional_*` accessor returns
+//! `Option` and treats a wrong type as absent.
 
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
 
 impl Header {
-    /// `BITPIX` (Sec.4.4.1.1) as one of the legal values
-    /// 8, 16, 32, 64, -32, -64.
+    /// `BITPIX` (Sec.4.4.1.1), as one of 8, 16, 32, 64, -32 and -64.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when the header omits
+    ///   `BITPIX`.
+    /// - [`FitsError::Value`] when `BITPIX` is not an integer, or when
+    ///   it holds a value outside those six.
     pub fn bitpix(&self) -> Result<i64> {
         let v = self.required_int("BITPIX")?;
         match v {
@@ -19,6 +31,13 @@ impl Header {
     }
 
     /// `NAXIS` (Sec.4.4.1.1).
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when the header omits
+    ///   `NAXIS`.
+    /// - [`FitsError::Value`] when `NAXIS` is not an integer, or when
+    ///   it falls outside 0 to 999.
     pub fn naxis(&self) -> Result<usize> {
         let v = self.required_int("NAXIS")?;
         if !(0..=999).contains(&v) {
@@ -30,7 +49,14 @@ impl Header {
         Ok(v as usize)
     }
 
-    /// `NAXISn` for `n` in `1..=NAXIS`.
+    /// `NAXISn` for `n` in the range 1 to `NAXIS`.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when the header omits
+    ///   `NAXISn`.
+    /// - [`FitsError::Value`] when `n` is 0 or above 999, when
+    ///   `NAXISn` is not an integer, or when it is negative.
     pub fn naxisn(&self, n: usize) -> Result<u64> {
         if n == 0 || n > 999 {
             return Err(FitsError::Value {
@@ -49,7 +75,11 @@ impl Header {
         Ok(v as u64)
     }
 
-    /// All `NAXISn` values in order.
+    /// Every `NAXISn` value, in order from `NAXIS1`.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Header::naxis`] and [`Header::naxisn`].
     pub fn axes(&self) -> Result<Vec<u64>> {
         let n = self.naxis()?;
         (1..=n).map(|i| self.naxisn(i)).collect()
@@ -67,11 +97,13 @@ impl Header {
         self.optional_real("BSCALE").unwrap_or(1.0)
     }
 
-    /// `BLANK` (Sec.4.4.2.4) for integer images. Returns `None` if
-    /// absent **or** if the current header has a floating-point
-    /// `BITPIX` (in which case BLANK has no defined meaning per
-    /// Sec.4.4.2.4 -- undefined floats are signalled by IEEE NaN). A
-    /// non-integer BLANK value is also treated as absent.
+    /// `BLANK` (Sec.4.4.2.4), the undefined-pixel sentinel of an
+    /// integer image.
+    ///
+    /// The result is `None` in three cases: the card is absent, the
+    /// header declares a floating-point `BITPIX`, or the value is not
+    /// an integer. Sec.4.4.2.4 gives `BLANK` no meaning for a float
+    /// image, which signals an undefined pixel with IEEE NaN.
     #[must_use]
     pub fn blank(&self) -> Option<i64> {
         if let Ok(b) = self.bitpix()
@@ -91,7 +123,13 @@ impl Header {
         })
     }
 
-    /// Mandatory integer keyword. Errors on absence or wrong type.
+    /// Read a mandatory integer keyword.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when `key` is absent.
+    /// - [`FitsError::Value`] when `key` holds a value that is not an
+    ///   integer.
     pub fn required_int(&self, key: &str) -> Result<i64> {
         match self.first(key).ok_or_else(|| FitsError::MissingMandatory {
             keyword: key.into(),
@@ -104,12 +142,14 @@ impl Header {
         }
     }
 
-    /// Optional integer keyword. Returns `None` if absent. A
-    /// floating-point value is accepted if and only if it is an exact
-    /// integer fitting in `i64` -- many real-world headers write
-    /// supposedly-integer reserved keywords (`BLANK`, `PCOUNT`,
-    /// `GCOUNT`, `BITPIX`, `NAXIS*`) as `1.0` or `-32768.` instead of
-    /// the spec-strict integer literal.
+    /// Read an optional integer keyword. The result is `None` when
+    /// `key` is absent.
+    ///
+    /// This accepts a floating-point value when that value is an exact
+    /// integer that fits in `i64`. Real headers write a reserved
+    /// integer keyword such as `BLANK`, `PCOUNT`, `GCOUNT`, `BITPIX`
+    /// or `NAXISn` as `1.0` or `-32768.` rather than as the integer
+    /// literal that the standard requires.
     #[must_use]
     pub fn optional_int(&self, key: &str) -> Option<i64> {
         match self.first(key)? {

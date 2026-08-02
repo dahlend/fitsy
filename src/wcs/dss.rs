@@ -2,13 +2,14 @@
 //!
 //! The Digitized Sky Survey distributes images of POSS / SERC plates
 //! together with a 13-term positional plate model (AMD terms 14-20
-//! are magnitude/color terms, evaluated as zero for image astrometry). The model is
+//! are magnitude and color terms, which evaluate to zero for image
+//! astrometry). The model is
 //! signalled by the simultaneous presence of `PLTRAH`, `PLTDECD`,
 //! `PPO1..6`, `XPIXELSZ`, `YPIXELSZ`, `CNPIX1`, `CNPIX2`, and
-//! `AMDX1..20` / `AMDY1..20`. Headers usually also carry a dummy
-//! `RA---TAN` / `DEC--TAN` description with `CRVAL` ~= 0, but that
-//! description is **not** the astrometry -- it is a fallback for
-//! readers that cannot parse the plate model.
+//! `AMDX1..20` and `AMDY1..20`. Such a header usually also carries a
+//! placeholder `RA---TAN` and `DEC--TAN` description with `CRVAL` near
+//! 0. That description is not the astrometry. It is a fallback for a
+//! reader that cannot parse the plate model.
 //!
 //! ## Algorithm
 //!
@@ -17,7 +18,8 @@
 //!    ```text
 //!    xpix = pix_x + CNPIX1 - 0.5
 //!    ypix = pix_y + CNPIX2 - 0.5
-//!    xmm  = (PPO3 - xpix * XPIXELSZ) / 1000   (sign flip: x increases east -> west)
+//!    xmm  = (PPO3 - xpix * XPIXELSZ) / 1000
+//!    (the sign flips because x increases from east to west)
 //!    ymm  = (ypix * YPIXELSZ - PPO6) / 1000
 //!    ```
 //!
@@ -41,11 +43,13 @@
 //! - <http://tdc-www.harvard.edu/wcstools/dsswcs.wcs.html>
 //!
 //! ## Validation
-//! Astropy does not implement the DSS plate model -- it falls back to
-//! the dummy TAN. We validate by (a) round-tripping
-//! `pix -> world -> pix` to sub-millipixel precision and (b) checking
-//! that the plate center projects to the plate-center RA/Dec
-//! recovered from the `PLT*` sexagesimal fields.
+//!
+//! No reference implementation of the plate model was available to
+//! compare against. The unit tests cover two things instead. First,
+//! they round-trip pixel to world and back to sub-millipixel
+//! precision. Second, they check that the plate center projects to the
+//! plate-center RA and Dec recovered from the `PLT` sexagesimal
+//! fields.
 
 use crate::error::{FitsError, Result};
 use crate::header::Header;
@@ -84,8 +88,18 @@ pub struct Dss {
 }
 
 impl Dss {
-    /// Parse from a header. Returns `Ok(None)` when the required
-    /// plate keywords are not all present.
+    /// Parse a DSS plate solution from a header.
+    ///
+    /// The result is `Ok(None)` when any gating keyword is absent,
+    /// which means the header describes no DSS plate. Those keywords
+    /// are `PLTRAH`, `PLTDECD`, `PPO3`, `PPO6`, `XPIXELSZ`,
+    /// `YPIXELSZ`, `AMDX1` and `AMDY1`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when a gating keyword is present but holds a
+    /// value that is not numeric, or when the plate center keywords
+    /// are inconsistent.
     pub fn from_header(header: &Header) -> Result<Option<Self>> {
         // Required gating keys: if any one is absent, this is not a
         // DSS plate header.
@@ -163,8 +177,13 @@ impl Dss {
         (ra, dec)
     }
 
-    /// Inverse map: (RA, Dec) in degrees -> 1-based pixel via Newton
-    /// iteration on the forward map.
+    /// Inverse map, from (RA, Dec) in degrees to a 1-based pixel, by
+    /// Newton iteration on the forward map.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the Jacobian is singular, or when the
+    /// iteration does not converge within its step limit.
     pub fn world_to_pixel(&self, ra: f64, dec: f64) -> Result<(f64, f64)> {
         // Forward gnomonic: (alpha, delta) -> (xi, eta) at plate center, then
         // invert the polynomial via Newton on the (xmm, ymm) plane.

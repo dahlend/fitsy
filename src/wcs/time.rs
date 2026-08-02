@@ -1,24 +1,25 @@
 //! Time coordinate axes (Standard Sec.9).
 //!
-//! Sec.9.5.3 defines an image time axis as the ordinary *linear*
-//! transform: `CRVALia` holds elapsed time in `TIMEUNIT` or `CUNITia`,
-//! `CDELTia` the interval, and the `PCi_j` diagonal element "would take
-//! the exact value 1, the default". So there is no algorithm here, only
-//! recognition -- the pipeline in [`crate::Wcs`] transforms a time axis
-//! exactly as it does any other linear one, which is what `wcslib` does
-//! too.
+//! # Purpose
 //!
-//! What this module adds is the *identity* of the axis: which one is
-//! time, and on which scale. Without it the elapsed value has no
-//! meaning, since the zero point lives in `MJDREF`/`JDREF`/`DATEREF`
-//! and the scale in `TIMESYS`.
+//! Sec.9.5.3 defines an image time axis as an ordinary linear
+//! transform. `CRVALia` holds elapsed time in `TIMEUNIT` or `CUNITia`,
+//! `CDELTia` holds the interval, and the `PCi_j` diagonal element
+//! "would take the exact value 1, the default". There is therefore no
+//! algorithm here, only recognition. The pipeline in [`crate::Wcs`]
+//! transforms a time axis as it transforms any other linear one.
+//!
+//! This module supplies the identity of the axis: which axis is time,
+//! and on which scale. Without that, the elapsed value has no meaning,
+//! because the zero point lives in `MJDREF`, `JDREF` or `DATEREF`, and
+//! the scale lives in `TIMESYS`.
 //!
 //! # Absolute times
 //!
-//! [`TimeAxis`] deliberately reports elapsed time, not an epoch, since
-//! that is what the axis stores and what `wcslib` returns. Combine it
-//! with [`Header::mjd_ref`](crate::Header::mjd_ref) -- which already
-//! folds in `TIMEOFFS` -- to get an MJD.
+//! [`TimeAxis`] reports elapsed time, not an epoch, because elapsed
+//! time is what the axis stores. Combine it with
+//! [`Header::mjd_ref`](crate::Header::mjd_ref), which already folds in
+//! `TIMEOFFS`, to obtain an MJD.
 
 use crate::header::time::base_time_scale;
 

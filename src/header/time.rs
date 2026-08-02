@@ -1,4 +1,25 @@
-//! Time keyword access per WCS Paper IV (Rots et al. 2015) and FITS Standard Sec.9.
+//! Time keyword access (WCS Paper IV, Rots et al. 2015, and FITS
+//! Standard Sec.9).
+//!
+//! # Purpose
+//!
+//! This module adds `impl Header` methods that read the time keywords
+//! and convert between time scales. [`IsoDateTime`] holds one parsed
+//! `DATE-OBS`-style stamp.
+//!
+//! # Design constraints
+//!
+//! Every day here counts as exactly 86400 seconds. A day that carries
+//! a leap second is therefore compressed rather than stretched. This
+//! affects the label alone, and only on the days that carry one.
+//! [`IsoDateTime::mjd_tai`] still resolves each stamp to the correct
+//! TAI instant.
+//!
+//! The leap-second table comes from IERS Bulletin 69. A stamp after
+//! the last tabulated entry uses the final offset.
+//!
+//! `TIMEOFFS` applies to `TSTART` and `TSTOP`, not to the reference
+//! epoch. [`Header::mjd_ref`] therefore excludes it (Sec.9.4.1).
 
 use std::sync::OnceLock;
 
@@ -91,8 +112,9 @@ pub struct IsoDateTime {
     pub minute: u8,
     /// Second, `0..=60` -- 60 is a leap second (Sec.9.1.1).
     pub second: u8,
-    /// Fractional second in `[0.0, 1.0)`. `f64` precision limits this to ~30 us
-    /// near J2000; split into integer + fractional days for sub-microsecond work.
+    /// Fractional second, in the range `[0.0, 1.0)`. The precision of
+    /// `f64` limits this to about 30 microseconds near J2000. Split
+    /// the value into integer and fractional days for finer work.
     pub frac_second: f64,
 }
 
@@ -169,15 +191,15 @@ impl IsoDateTime {
     ///
     /// # Leap seconds
     ///
-    /// Every day counts as exactly 86400 seconds, so a day with a leap
-    /// second is compressed: `23:59:60` reports the same MJD as the
-    /// following midnight, and earlier stamps that day sit a second
-    /// later than in `astropy.time`, which stretches the day instead.
-    /// Labelling UTC with a real number is ambiguous either way.
+    /// Every day counts as exactly 86400 seconds here, so a day that
+    /// carries a leap second is compressed. `23:59:60` reports the
+    /// same MJD as the following midnight, and an earlier stamp on
+    /// that day sits one second later than it would under a stretched
+    /// day. A real number cannot label UTC without such an ambiguity.
     ///
-    /// This affects only the ~27 days that carry a leap second, and
-    /// only the label: [`Self::mjd_tai`] still resolves each stamp to
-    /// the right TAI instant. Prefer TAI across one.
+    /// This affects the label alone, and only on the days that carry a
+    /// leap second. [`Self::mjd_tai`] still resolves each stamp to the
+    /// correct TAI instant. Use TAI across such a day.
     #[must_use]
     pub fn mjd(&self) -> f64 {
         // Fliegel & Van Flandern (1968) algorithm, as cited by the
@@ -263,8 +285,10 @@ pub(crate) fn base_time_scale(timesys: &str) -> &str {
         .trim()
 }
 
-/// Convert an MJD in the given `TIMESYS` scale to UTC MJD.
-/// Returns `None` for scales that have no closed-form UTC reduction (`LOCAL`, `UT1`).
+/// Convert an MJD in the given `TIMESYS` scale to a UTC MJD.
+///
+/// The result is `None` for a scale with no closed-form reduction to
+/// UTC, which means `LOCAL` and `UT1`.
 fn mjd_to_utc(mjd: f64, timesys: &str) -> Option<f64> {
     let timesys = base_time_scale(timesys);
     let mjd_tai = |m: f64| m - f64::from(tai_minus_utc_at(m)) / 86_400.0;
@@ -338,7 +362,8 @@ impl Header {
         Some(date_mjd + secs / 86_400.0)
     }
 
-    /// Time scale (`TIMESYS`), upper-cased. Defaults to `"UTC"` per WCS Paper IV Sec.3.1.2.
+    /// Time scale from `TIMESYS`, in upper case. This defaults to
+    /// `"UTC"`, per WCS Paper IV Sec.3.1.2.
     #[must_use]
     pub fn time_sys(&self) -> String {
         self.optional_string("TIMESYS")
@@ -416,8 +441,12 @@ impl Header {
         self.ut_keyword_to_mjd("UTSTOP", &["DATE-OBS"])
     }
 
-    /// Average time as UTC MJD: `MJD-AVG` -> `DATE-AVG` (converted via `TIMESYS`)
-    /// -> mean of [`Self::mjd_begin_utc`] and [`Self::mjd_end_utc`].
+    /// Average time as a UTC MJD.
+    ///
+    /// The search runs in this order and stops at the first match:
+    /// `MJD-AVG`, then `DATE-AVG` converted through `TIMESYS`, then
+    /// the mean of [`Self::mjd_begin_utc`] and
+    /// [`Self::mjd_end_utc`].
     #[must_use]
     pub fn mjd_avg_utc(&self) -> Option<f64> {
         if let Some(mjd) = self.optional_real("MJD-AVG").or_else(|| {
@@ -537,11 +566,15 @@ impl Header {
         self.read_time_in_seconds("TIMRDER")
     }
 
-    /// Reference epoch as MJD: `MJDREFI`+`MJDREFF` -> `MJDREF` -> `JDREFI`+`JDREFF`
-    /// -> `JDREF` -> `DATEREF`. Zero point for relative time values in the HDU.
+    /// Reference epoch as MJD, the zero point for a relative time
+    /// value in this HDU.
     ///
-    /// Does **not** include `TIMEOFFS` -- that offset applies to
-    /// `TSTART`/`TSTOP`, not to the reference epoch itself (Sec.9.4.1).
+    /// The search runs in this order and stops at the first match:
+    /// `MJDREFI` with `MJDREFF`, then `MJDREF`, then `JDREFI` with
+    /// `JDREFF`, then `JDREF`, then `DATEREF`.
+    ///
+    /// This excludes `TIMEOFFS`. Sec.9.4.1 applies that offset to
+    /// `TSTART` and `TSTOP`, not to the reference epoch.
     #[must_use]
     pub fn mjd_ref(&self) -> Option<f64> {
         // MJDREF family (highest precedence). Sec.9.2.2 defaults
@@ -833,11 +866,8 @@ mod tests {
         assert!((h.mjd_begin_utc().unwrap() - expected).abs() < 1e-12);
     }
 
-    /// Standard Sec.9.4.1: `TSTART`/`TSTOP` are relative to the
-    /// reference time **and `TIMEOFFS`**.
-    ///
-    /// Regression: `TIMEOFFS` was parsed nowhere, so every
-    /// `TSTART`/`TSTOP`-derived time was short by the offset.
+    /// Standard Sec.9.4.1 makes `TSTART` and `TSTOP` relative to the
+    /// reference time plus `TIMEOFFS`.
     #[test]
     fn tstart_tstop_include_timeoffs() {
         let mut h = Header::empty();

@@ -192,9 +192,8 @@ fn lookup_prefix(p: &str) -> Option<f64> {
 /// Sec.4.3 allows prefixes on the Table 4 (SI and IAU-derived) units
 /// generally, but Table 5's `(dagger)` note restricts them to the
 /// extended units it marks. So `keV` and `Mpc` are legal while
-/// `marcsec` is not -- `arcsec` carries no dagger, and `mas` is a
+/// `marcsec` is not. `arcsec` carries no dagger, and `mas` is a
 /// tabulated symbol in its own right rather than a prefixed one.
-/// `wcslib` draws the line in the same place.
 fn allows_prefix(sym: &str) -> bool {
     matches!(
         sym,

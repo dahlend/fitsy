@@ -1,18 +1,29 @@
 //! In-place patch updates for image HDUs.
 //!
-//! [`FitsUpdater`] opens an existing FITS file read/write and
-//! exposes [`FitsUpdater::write_image_subarray`] for writing a
-//! rectangular patch into one image HDU's data section without
-//! touching the rest of the file.
+//! # Purpose
 //!
-//! This backs ``hdu.data[a:b, c:d] = patch`` under ``mode='update'``,
-//! where a small edit to a large file costs O(patch). Writes use
-//! positional `pwrite`, so there is no `unsafe` and a truncated file
-//! gives an `Err` rather than SIGBUS.
+//! [`FitsUpdater`] opens an existing FITS file for reading and
+//! writing. [`FitsUpdater::write_image_subarray`] writes a rectangular
+//! patch into the data section of one image HDU and leaves the rest of
+//! the file untouched. A small edit to a large file therefore costs
+//! the size of the patch.
 //!
-//! Patches are **not** crash-safe, as in astropy's mmap update mode:
-//! dying mid-write leaves a torn file. For atomicity, snapshot first
-//! or write to a temp file and rename.
+//! This backs the Python `hdu.data[a:b, c:d] = patch` under
+//! `mode='update'`.
+//!
+//! # Design constraints
+//!
+//! Writes go through positional `pwrite`. The module holds no
+//! `unsafe` code, and a truncated file returns an error rather than
+//! raising SIGBUS.
+//!
+//! A patch is not crash-safe. A process that dies mid-write leaves the
+//! file torn, with some rows updated and others not. A caller that
+//! needs atomicity takes a snapshot first, or writes to a temporary
+//! file and renames it.
+//!
+//! An HDU cannot change size here. A resize would move every later
+//! HDU, and the cached offsets would then be wrong.
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -46,11 +57,12 @@ struct ImageMeta {
 ///
 /// The caller must ensure nothing else mutates the file meanwhile.
 ///
-/// # Safety
+/// # Limits
 ///
-/// Resizing an HDU is **not** supported: it would invalidate every
-/// following HDU's offset. Patches are bounds-checked against the
-/// cached axis lengths and the file length.
+/// This type cannot resize an HDU. A resize would move every later
+/// HDU, and the cached offsets would then be wrong. Each patch is
+/// bounds-checked against the cached axis lengths and the file
+/// length.
 #[derive(Debug)]
 pub struct FitsUpdater {
     file: File,
@@ -73,18 +85,37 @@ pub struct FitsUpdater {
 impl FitsUpdater {
     /// Open `path` for in-place updates.
     ///
-    /// Parses the file once for its HDU layout, then keeps a plain
-    /// read/write handle. Headers are parsed leniently, like
-    /// [`FitsFile::open`](crate::FitsFile::open); use
-    /// [`Self::open_with`] for strict parsing.
+    /// This parses the file once for its HDU layout, then keeps a
+    /// read/write handle. It parses headers leniently, as
+    /// [`FitsFile::open`](crate::FitsFile::open) does. Call
+    /// [`Self::open_with`] with `lenient = false` for strict parsing.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::open_with`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with(path, true)
     }
 
-    /// As [`Self::open`], but propagates the `lenient` flag through
-    /// to the read-only probe so that non-conforming files (e.g.
-    /// `SIMPLE = F`) can be patched in place when the caller has
-    /// already opted into lenient parsing.
+    /// Open `path` for in-place updates, with explicit control over
+    /// lenient parsing.
+    ///
+    /// The `lenient` flag reaches the read-only probe that reads the
+    /// layout. A caller that has opted into lenient parsing can
+    /// therefore patch a non-conforming file, such as one with
+    /// `SIMPLE = F`.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Io`] when `path` cannot be opened for reading
+    ///   and writing.
+    /// - The conditions of
+    ///   [`FitsFile::open_with`](crate::FitsFile::open_with), because
+    ///   this reads the layout first.
+    /// - [`FitsError::Data`] when an image HDU declares a pixel count
+    ///   that overflows `u64`.
+    /// - [`FitsError::Header`] when an image HDU reports no data
+    ///   offset.
     pub fn open_with(path: impl AsRef<Path>, lenient: bool) -> Result<Self> {
         let path = path.as_ref();
         let probe = crate::FitsFile::open_with(path, lenient)?;
@@ -212,15 +243,28 @@ impl FitsUpdater {
     /// `NAXIS1`, the fastest-varying axis) and must both have length
     /// `NAXIS`. Only the touched byte range is written.
     ///
-    /// `pixels` holds `shape.iter().product()` elements in C order
-    /// with `NAXIS1` fastest -- the layout of a numpy array of the
-    /// reversed `shape`.
+    /// The `pixels` argument holds `shape.iter().product()` elements
+    /// in C order, with `NAXIS1` varying fastest. This is the layout
+    /// of a numpy array whose shape is the reverse of `shape`.
     ///
     /// # Crash safety
     ///
-    /// None: dying mid-patch leaves some rows updated and others not,
-    /// as in astropy's mmap update mode. Snapshot first, or rewrite
-    /// via `FitsFile.flush()`, if you need atomicity.
+    /// A patch is not atomic. A process that dies mid-patch leaves
+    /// some rows updated and others not. Take a snapshot first when
+    /// you need atomicity.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] in five cases:
+    ///
+    /// - HDU `i` is not an image, or lies out of range.
+    /// - `start` or `shape` has the wrong length.
+    /// - The region escapes the array.
+    /// - `pixels.len()` does not match the product of `shape`.
+    /// - A byte offset overflows `u64`.
+    ///
+    /// [`FitsError::HduMismatch`] when `T` does not match the `BITPIX`
+    /// of the HDU. [`FitsError::Io`] when the write fails.
     pub fn write_image_subarray<T: Pixel>(
         &mut self,
         i: usize,
@@ -335,11 +379,14 @@ impl FitsUpdater {
 
     /// Force a `fsync` of the data pages to disk.
     ///
-    /// After a successful `flush` the patches issued via
-    /// [`Self::write_image_subarray`] since the last flush are
-    /// considered durable. There is no transactional rollback: a
-    /// crash before `flush` returns may still leave the file with
-    /// some patched rows committed and others not.
+    /// After this returns, every patch that
+    /// [`Self::write_image_subarray`] issued since the last flush is
+    /// durable. There is no rollback. A crash before this returns can
+    /// still leave some patched rows committed and others not.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Io`] when the `fsync` fails.
     pub fn flush(&self) -> Result<()> {
         self.file.sync_data().map_err(FitsError::Io)?;
         Ok(())

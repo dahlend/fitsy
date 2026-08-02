@@ -1,9 +1,10 @@
-//! Owning, in-memory FITS byte buffer used by [`crate::FitsFile`].
+//! Owning, in-memory FITS byte buffer, used by [`crate::FitsFile`].
 //!
-//! FITS data is big-endian, so a little-endian host has to byteswap
-//! on read, which allocates a fresh buffer anyway. Mapping the file
-//! would buy no zero-copy, and owning the bytes keeps this layer free
-//! of `unsafe` and immune to SIGBUS if the file is truncated.
+//! FITS data is big-endian, so a little-endian host changes the byte
+//! order on read. That step allocates a fresh buffer, so a memory map
+//! would yield no zero-copy read. Owning the bytes also keeps this
+//! layer free of `unsafe`, and it returns an error rather than raising
+//! SIGBUS when the file is truncated.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
@@ -22,9 +23,16 @@ pub struct ByteSource {
 }
 
 impl ByteSource {
-    /// Open `path` and read its entire contents into memory.
-    /// If the `compression` feature is enabled and the file begins
-    /// with the gzip magic, it is transparently inflated.
+    /// Open `path` and read its whole contents into memory.
+    ///
+    /// Under the `compression` feature, a file that starts with the
+    /// gzip magic bytes inflates here.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::FitsError::Io`] when `path` cannot be opened or
+    ///   read, or when a gzip stream fails to inflate.
+    /// - [`crate::FitsError::Block`] when the file is empty.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_file(path: impl AsRef<Path>) -> Result<Self> {
         let mut f = fs::File::open(path)?;
@@ -33,9 +41,15 @@ impl ByteSource {
         Self::from_vec(buf)
     }
 
-    /// Wrap an in-memory buffer. If the `compression` feature is
-    /// enabled and the buffer begins with the gzip magic, it is
-    /// transparently inflated.
+    /// Wrap an in-memory buffer.
+    ///
+    /// Under the `compression` feature, a buffer that starts with the
+    /// gzip magic bytes inflates here.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::FitsError::Io`] when a gzip stream fails to inflate.
+    /// - [`crate::FitsError::Block`] when `buf` is empty.
     pub fn from_vec(buf: Vec<u8>) -> Result<Self> {
         #[cfg(feature = "compression")]
         let buf = crate::compression::maybe_gunzip(buf)?;
@@ -60,10 +74,10 @@ impl ByteSource {
     }
 
     /// Zero-pad an in-memory buffer to a multiple of `BLOCK_SIZE`.
-    /// FITS requires HDUs to end on a 2880-byte boundary, but real
-    /// observatory files (e.g. CFHT/MegaCam) sometimes truncate the
-    /// last padding block. CFITSIO and astropy silently pad-on-read,
-    /// so we do too.
+    ///
+    /// The standard ends every HDU on a 2880-byte boundary. Some
+    /// observatory files truncate the last padding block instead, so
+    /// this restores it rather than rejecting the file.
     fn pad_to_block(mut buf: Vec<u8>) -> Result<Vec<u8>> {
         Self::validate_nonempty(buf.len())?;
         let rem = buf.len() % BLOCK_SIZE;

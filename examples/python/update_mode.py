@@ -1,6 +1,6 @@
-"""Edit a FITS file in place: header, pixel patches, and structural changes.
+"""Edit a FITS file in place: header, pixel patch, and structure.
 
-Run from the repo root::
+Run from the repository root:
 
     python examples/python/update_mode.py
 """

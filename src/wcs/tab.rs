@@ -6,10 +6,10 @@
 //!
 //! - `CTYPE<i><a> = '<kind>-TAB'` -- flags the axis as tabular.
 //! - `PS<i>_0<a>` -- `EXTNAME` of the binary table (required).
-//! - `PS<i>_1<a>` -- `TTYPE` of the **coordinate array** column
-//!   (required; the same value on every axis of a group).
-//! - `PS<i>_2<a>` -- `TTYPE` of this axis's **index vector** column.
-//!   Absent -> the index is `1, 2, ... K`.
+//! - `PS<i>_1<a>` -- `TTYPE` of the coordinate-array column. This is
+//!   required, and every axis of a group carries the same value.
+//! - `PS<i>_2<a>` -- `TTYPE` of the index-vector column of this axis.
+//!   When it is absent, the index runs `1, 2, ... K`.
 //! - `PV<i>_1<a>` / `PV<i>_2<a>` -- `EXTVER` / `EXTLEVEL` (default 1).
 //! - `PV<i>_3<a>` -- which axis `m` of the coordinate array this WCS
 //!   axis indexes (1-based, default 1).
@@ -20,10 +20,10 @@
 //! length *K*, optionally addressed through an index vector. An
 //! irregular wavelength or time grid.
 //!
-//! Sec.6.1.1 then generalises to *M* **non-separable** axes -- axes
-//! whose coordinates cannot be computed independently of one another,
-//! the obvious case being a celestial pair whose longitude depends on
-//! both pixel axes. Those share a single `(1 + M)`-dimensional
+//! Sec.6.1.1 then generalizes to `M` non-separable axes. Those are
+//! axes whose coordinates cannot be computed independently of one
+//! another. A celestial pair whose longitude depends on both pixel
+//! axes is such a case. They share a single `(1 + M)`-dimensional
 //! coordinate array of shape `(M, K_1, ..., K_M)`, one index vector
 //! each, and are interpolated together: `M`-linear interpolation over
 //! `2^M` corners, not *M* separate lookups.
@@ -165,11 +165,17 @@ impl TabGroup {
     ///
     /// # Domain
     ///
-    /// Sec.6.1.2 defines each axis over `0.5 <= Upsilon_m <= K_m + 0.5`
-    /// -- the table plus half a sample step at each end, which covers
-    /// the outer halves of the boundary pixels. Beyond that the
-    /// coordinate is undefined and this errors, where `wcslib` returns
-    /// NaN.
+    /// Sec.6.1.2 defines each axis over
+    /// `0.5 <= Upsilon_m <= K_m + 0.5`. That is the table plus half a
+    /// sample step at each end, which covers the outer halves of the
+    /// boundary pixels. The coordinate is undefined beyond that range,
+    /// so this function reports an error there rather than
+    /// extrapolating.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `psi.len()` does not equal the rank of
+    /// the group, or when a coordinate falls outside the domain above.
     pub fn forward(&self, psi: &[f64]) -> Result<Vec<f64>> {
         let m = self.rank();
         if psi.len() != m {
@@ -188,8 +194,14 @@ impl TabGroup {
         Ok(self.interpolate_value(&upsilon))
     }
 
-    /// [`Self::forward`] for a separable (`M = 1`) group, without the
-    /// per-point allocation.
+    /// [`Self::forward`] for a separable group, where `M = 1`. This
+    /// form allocates nothing per point.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the group has rank other than 1, or
+    /// when `psi` falls outside the domain that [`Self::forward`]
+    /// describes.
     pub fn forward_scalar(&self, psi: f64) -> Result<f64> {
         self.require_rank_1("forward_scalar")?;
         let c = self.checked_upsilon(0, psi)?;
@@ -237,9 +249,17 @@ impl TabGroup {
     ///
     /// # Asymmetry with [`Self::forward`]
     ///
-    /// This extrapolates without limit, where `forward` refuses past
-    /// the Sec.6.1.2 margin, so a world value off the end of the table
-    /// yields an index `forward` would reject.
+    /// This extrapolates without limit, while [`Self::forward`]
+    /// refuses to go past the Sec.6.1.2 margin. A world value off the
+    /// end of the table therefore yields an index that
+    /// [`Self::forward`] would reject.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `world.len()` does not equal the rank
+    /// of the group, when the coordinate array is not monotonic along
+    /// an axis, or when the multi-dimensional inverse does not
+    /// converge.
     // Deliberate: `celestial_to_pixel` fills the axes the caller did
     // not ask about with `CRVAL`, routinely nowhere near a `-TAB`
     // axis's tabulated range.
@@ -258,10 +278,17 @@ impl TabGroup {
         Ok((0..m).map(|d| self.upsilon_to_psi(d, upsilon[d])).collect())
     }
 
-    /// [`Self::inverse`] for a separable group: an exact monotonic
-    /// search rather than Newton, so a non-monotonic table is reported
-    /// instead of silently resolved. Extrapolates without limit, as
-    /// [`Self::inverse`] describes.
+    /// [`Self::inverse`] for a separable group.
+    ///
+    /// This runs an exact monotonic search rather than a Newton
+    /// iteration, so it reports a non-monotonic table rather than
+    /// resolving it to one of several answers. It extrapolates without
+    /// limit, as [`Self::inverse`] describes.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the group has rank other than 1, or
+    /// when the coordinate array is not monotonic.
     pub fn inverse_scalar(&self, world: f64) -> Result<f64> {
         self.require_rank_1("inverse_scalar")?;
         // A single-sample axis is the constant `coord[0]`; every world

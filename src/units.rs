@@ -19,32 +19,37 @@
 //! `expr` may be a signed integer, a decimal, or a ratio of integers;
 //! the last two must be parenthesised. Multiplication and division
 //! share a precedence level and associate left to right, so
-//! `erg/s/cm2/Angstrom` reads as `erg s^-1 cm^-2 Angstrom^-1` -- the
-//! form flux-calibrated spectra actually use.
+//! `erg/s/cm2/Angstrom` reads as `erg s^-1 cm^-2 Angstrom^-1`, which
+//! is the form a flux-calibrated spectrum uses.
 //!
-//! Per the IAU convention the standard cites, **case is significant**.
+//! Case is significant, per the IAU convention that the standard
+//! cites.
 //!
 //! # Canonical units
 //!
-//! [`Unit::scale`] is relative to metre, kilogram, second,
-//! **degree**, kelvin, ampere, mole and candela. Degree rather than
-//! radian because every angular FITS keyword is specified in degrees.
+//! [`Unit::scale`] is relative to metre, kilogram, second, degree,
+//! kelvin, ampere, mole and candela. The angular base is degree rather
+//! than radian, because the standard specifies every angular FITS
+//! keyword in degrees.
 //!
 //! # Levels
 //!
-//! `mag`, `dB` and `Sun` are not dimensions. They are *levels*: a value
-//! measured against a reference, in `mag`'s case logarithmically. That
-//! makes them convert by an offset rather than a factor -- `mag/arcsec2`
-//! and `mag/deg2` differ by an additive -17.78, not by 3600^2 -- which
-//! is why conversion here yields a [`Converter`] and not an `f64`.
-//! [`Level`] carries the log base, the multiplier outside it, and the
-//! [`Reference`] the ratio is taken against.
+//! `mag`, `dB` and `Sun` are not dimensions. They are levels: a value
+//! measured against a reference. For `mag` that measurement is
+//! logarithmic.
+//!
+//! A level therefore converts by an offset, not by a factor.
+//! `mag/arcsec2` and `mag/deg2` differ by an additive -17.78, not by
+//! `3600^2`. Conversion here yields a [`Converter`] rather than an
+//! `f64` for that reason. [`Level`] carries the log base, the
+//! multiplier outside it, and the [`Reference`] that the ratio is
+//! taken against.
 //!
 //! A prefix or numeric multiplier on a logarithmic level scales the
-//! level's *value*: 5 `mmag` (or `0.001 mag`) is 0.005 `mag`, as
-//! `astropy` and `wcslib` read it. A dimensioned linear part -- the
-//! `arcsec^-2` above -- instead stays the reference underneath the
-//! logarithm, which is what keeps that conversion additive.
+//! value of that level. 5 `mmag`, written also as `0.001 mag`, is
+//! 0.005 `mag`. A dimensioned linear part, such as the `arcsec^-2`
+//! above, instead remains the reference underneath the logarithm. That
+//! is what keeps the conversion additive.
 //!
 //! # Equivalencies
 //!

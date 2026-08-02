@@ -1,23 +1,33 @@
 //! Streaming HDU appender (Standard Sec.3.1, Sec.4.4).
 //!
 //! [`FitsAppender`] seeks past the last HDU of an existing file and
-//! writes further extension HDUs in place, copying nothing.
+//! writes further extension HDUs there. It copies nothing.
 //!
-//! Every appended HDU must be an extension: appending a primary HDU
-//! is an error.
+//! Every appended HDU must be an extension. A header that declares
+//! `SIMPLE` rather than `XTENSION` is an error, because a file holds
+//! one primary HDU and it already has one.
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```
+//! # use fitsy::FitsWriter;
+//! # let path = std::env::temp_dir().join("fitsy_doc_append.fits");
+//! # let (h, d) = fitsy::ImageBuilder::new(vec![4_u64, 4], vec![0_u8; 16])?
+//! #     .primary(true)
+//! #     .build()?;
+//! # let mut out = std::fs::File::create(&path)?;
+//! # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+//! # drop(out);
 //! use fitsy::{FitsAppender, ImageBuilder};
 //!
-//! let pixels = vec![0u8; 32 * 32];
-//! let (header, data) = ImageBuilder::new(vec![32u64, 32], pixels)?
+//! let pixels = vec![0_u8; 32 * 32];
+//! let (header, data) = ImageBuilder::new(vec![32_u64, 32], pixels)?
 //!     .build()?;
 //!
-//! let mut app = FitsAppender::open("existing.fits")?;
+//! let mut app = FitsAppender::open(&path)?;
 //! app.append_hdu(&header, &data)?;
-//! app.finish()?;
+//! assert_eq!(app.finish()?, 2);
+//! # std::fs::remove_file(&path)?;
 //! # Ok::<(), fitsy::FitsError>(())
 //! ```
 
@@ -43,13 +53,22 @@ pub struct FitsAppender {
 }
 
 impl FitsAppender {
-    /// Open `path` for append. The file is parsed in full to
-    /// validate it and to locate the byte offset just after the
-    /// last HDU's padded data; the file is then re-opened in
-    /// read/write mode for streaming writes.
+    /// Open `path` for append.
     ///
-    /// Opening does not modify the file. Any bytes after the last HDU
-    /// are kept until something is appended over them.
+    /// This parses the whole file, to validate it and to find the byte
+    /// offset just past the padded data of the last HDU. It then
+    /// re-opens the file for reading and writing.
+    ///
+    /// Opening changes no byte of the file. Bytes after the last HDU
+    /// survive until an append writes over them.
+    ///
+    /// # Errors
+    ///
+    /// - The conditions of
+    ///   [`FitsFile::open`](crate::FitsFile::open), because this
+    ///   parses the file first.
+    /// - [`FitsError::Io`] when `path` cannot be re-opened for
+    ///   writing, or when the seek fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         // Parse the file to discover its HDU count and end-of-data
@@ -69,9 +88,18 @@ impl FitsAppender {
         })
     }
 
-    /// Append a single HDU. Same validation as
-    /// [`FitsWriter::write_hdu`]; the HDU must declare `XTENSION`
-    /// (primary HDUs cannot be appended).
+    /// Append one HDU.
+    ///
+    /// The `header` argument describes the HDU, and the `data`
+    /// argument holds its raw data section with no padding.
+    ///
+    /// This applies the same validation as
+    /// [`FitsWriter::write_hdu`]. The header must declare `XTENSION`,
+    /// because a file holds one primary HDU and it already has one.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`FitsWriter::write_hdu`].
     pub fn append_hdu(&mut self, header: &Header, data: &[u8]) -> Result<()> {
         self.inner.write_hdu(header, data)
     }
@@ -82,19 +110,24 @@ impl FitsAppender {
         self.initial_hdu_count
     }
 
-    /// Number of HDUs in the file after the appends performed so
-    /// far (initial count plus successful `append_hdu` calls).
+    /// Number of HDUs in the file after the appends so far. This is
+    /// the initial count plus each successful `append_hdu` call.
     #[must_use]
     pub fn hdu_count(&self) -> usize {
         self.inner.hdu_count()
     }
 
-    /// Flush, sync, and close. Returns the number of HDUs now in
+    /// Flush, sync and close. The result is the number of HDUs now in
     /// the file.
     ///
-    /// If anything was appended the file is truncated to the end of
-    /// the last HDU, so no fragment of the previous tail survives. If
-    /// nothing was, the file is left untouched.
+    /// After an append, this truncates the file to the end of the last
+    /// HDU, so no fragment of the previous tail survives. Without an
+    /// append, this changes no byte of the file.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Io`] when the flush, the truncation or the sync
+    /// fails.
     pub fn finish(self) -> Result<usize> {
         let n = self.inner.hdu_count();
         let appended = n > self.initial_hdu_count;

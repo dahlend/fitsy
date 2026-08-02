@@ -10,17 +10,18 @@ use crate::wcs::Wcs;
 use super::IntoPyResult;
 use super::header::PyHeader;
 
-/// Validate the `origin` argument and return the offset to add to a
-/// caller-supplied pixel coordinate before handing it to the
-/// (now 0-based) Rust API.
+/// Validate `origin` and return the offset that converts a
+/// caller-supplied pixel coordinate to the 0-based Rust API.
 ///
-/// `origin = 0` (default, numpy / C convention): caller pixels are
-/// 0-based, matching the Rust API, so we add 0.
+/// `origin = 0` (default) is the numpy and C convention. Caller
+/// pixels are already 0-based, so the offset is `0`.
 ///
-/// `origin = 1` (FITS convention): caller pixels are 1-based, so we
-/// subtract 1 to convert to the Rust API's 0-based convention.
+/// `origin = 1` is the FITS convention. Caller pixels are 1-based,
+/// so the offset is `-1`, which converts them to 0-based.
 ///
-/// Matches the semantics of `astropy.wcs.WCS.{wcs_,all_}pix2world`.
+/// # Errors
+///
+/// Returns [`PyValueError`] if `origin` is neither `0` nor `1`.
 fn pixel_offset(origin: u8) -> PyResult<f64> {
     match origin {
         0 => Ok(0.0),
@@ -34,9 +35,9 @@ fn pixel_offset(origin: u8) -> PyResult<f64> {
 /// World Coordinate System for an HDU.
 ///
 /// Constructed via :meth:`FitsFile.wcs`, :meth:`ImageHdu.wcs`, or
-/// directly from a header. Supports celestial, spectral, time and
-/// generic linear axes; SIP, TPV, TNX, ``-TAB`` and DSS distortion
-/// conventions are recognized.
+/// directly from a header. Supports celestial, spectral, time,
+/// phase and generic linear axes. Recognizes the SIP, TPV,
+/// TNX/ZPX, ``-TAB`` and DSS distortion conventions.
 ///
 /// Examples
 /// --------
@@ -56,10 +57,9 @@ impl From<Wcs> for PyWcs {
 }
 
 impl PyWcs {
-    /// Astropy-style multi-line summary used by ``__repr__`` and
-    /// ``__str__``. Mirrors the ``WCS Keywords`` block printed by
-    /// :class:`astropy.wcs.WCS` so users get the same at-a-glance
-    /// information (CTYPE / CUNIT / CRVAL / CRPIX / CD or PC).
+    /// Multi-line summary of the WCS keywords, used by `__repr__`
+    /// and `__str__`. Lists `CTYPE`, `CUNIT`, `CRVAL`, `CRPIX` and
+    /// the linear matrix, always labeled `CD`.
     fn format_summary(&self) -> String {
         use std::fmt::Write as _;
         let w = &self.inner;
@@ -69,7 +69,7 @@ impl PyWcs {
         let _ = writeln!(out, "Number of WCS axes: {n}");
 
         // Quoted, space-separated lists of the per-axis string
-        // metadata, matching astropy's exact formatting.
+        // metadata.
         let quoted = |items: &[String]| -> String {
             let mut s = String::new();
             for (i, v) in items.iter().enumerate() {
@@ -103,9 +103,9 @@ impl PyWcs {
         let _ = writeln!(out, "CRVAL : {}", nums(w.crval()));
         let _ = writeln!(out, "CRPIX : {}", nums(w.linear.crpix()));
 
-        // Linear matrix as CD<i>_<j> rows. We don't carry the
-        // PC-vs-CD distinction at this layer, so always label as
-        // CD; mirrors what astropy prints for SIP/CD-based headers.
+        // Linear matrix as CD<i>_<j> rows. This layer does not
+        // carry the PC-vs-CD distinction, so it always labels the
+        // matrix as CD.
         let m = w.linear.matrix_row_major();
         if m.len() == n * n && n > 0 {
             for i in 0..n {
@@ -149,6 +149,9 @@ impl PyWcs {
     ///
     /// Raises
     /// ------
+    /// FitsError
+    ///   If ``alt`` is not ``' '`` or ``'A'``-``'Z'``, or if the
+    ///   header carries a malformed WCS description.
     /// ValueError
     ///   If the header carries no WCS for ``alt``.
     ///
@@ -165,7 +168,8 @@ impl PyWcs {
         Ok(Self { inner })
     }
 
-    /// Number of axes (``NAXIS``).
+    /// Number of WCS axes. May exceed the header's ``NAXIS`` when
+    /// ``WCSAXESa`` sets a higher axis count.
     #[getter]
     fn naxis(&self) -> usize {
         self.inner.naxis()
@@ -177,13 +181,16 @@ impl PyWcs {
         self.inner.axes().iter().map(|a| a.ctype.clone()).collect()
     }
 
-    /// Per-axis ``CUNIT`` strings.
+    /// Per-axis ``CUNIT`` strings. Empty for an axis whose header
+    /// carries no ``CUNIT`` card; that axis then uses the default
+    /// unit for its axis type.
     #[getter]
     fn cunit(&self) -> Vec<String> {
         self.inner.axes().iter().map(|a| a.cunit.clone()).collect()
     }
 
-    /// Per-axis ``CRVAL`` reference values.
+    /// Per-axis ``CRVAL`` reference values, in the unit given by
+    /// :attr:`cunit`.
     #[getter]
     fn crval(&self) -> Vec<f64> {
         self.inner.crval().to_vec()
@@ -207,20 +214,15 @@ impl PyWcs {
     }
 
     /// Size of the image this WCS came from, in FITS axis order
-    /// (``NAXIS1`` first).
+    /// (``NAXIS1`` first), or ``None`` when unknown.
     ///
-    /// This is a **snapshot of the ``NAXISn`` cards** taken when the
-    /// WCS was parsed, not part of the coordinate description. It is
-    /// ``None`` for a WCS from :func:`fit_wcs` (no image exists) or
-    /// from a header without ``NAXISn``. Nothing in the transform
-    /// pipeline reads it and nothing validates against it, so if the
-    /// image has since been cropped or rebinned this still describes
-    /// the original.
-    ///
-    /// Returns
-    /// -------
-    /// tuple of int or None
-    ///   Axis lengths, or ``None`` when unknown.
+    /// This is a snapshot of the ``NAXISn`` cards taken when the WCS
+    /// was parsed. It is not part of the coordinate description: no
+    /// transform reads it, and no transform checks a pixel
+    /// coordinate against it. It is ``None`` for a WCS from
+    /// :func:`fit_wcs`, which has no image, or for a header without
+    /// ``NAXISn`` cards. A cropped or rebinned image leaves this
+    /// value stale.
     #[getter]
     fn pixel_shape<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
         self.inner
@@ -232,11 +234,10 @@ impl PyWcs {
 
     /// Sky positions of the image's four corner pixels.
     ///
-    /// Corners are the *centers* of the corner pixels -- ``(0, 0)``,
-    /// ``(nx-1, 0)``, ``(nx-1, ny-1)``, ``(0, ny-1)`` -- matching the
-    /// default of astropy's ``WCS.calc_footprint()``, and are
-    /// returned counter-clockwise in pixel space starting at the
-    /// origin. For the outer edge of the grid instead, call
+    /// Corners are the centers of the corner pixels -- ``(0, 0)``,
+    /// ``(nx-1, 0)``, ``(nx-1, ny-1)``, ``(0, ny-1)`` -- returned
+    /// counter-clockwise in pixel space starting at the origin. For
+    /// the outer edge of the grid instead, call
     /// :meth:`pixel_to_celestial` with ``-0.5`` and ``n - 0.5``.
     ///
     /// Returns
@@ -247,9 +248,11 @@ impl PyWcs {
     /// Raises
     /// ------
     /// FitsError
-    ///   If the WCS has no celestial axis pair, or if
-    ///   :attr:`pixel_shape` is unknown -- a fitted WCS has no image
-    ///   to take corners from.
+    ///   If the WCS has no celestial axis pair. Also raised if
+    ///   :attr:`pixel_shape` is ``None`` -- a fitted WCS has no
+    ///   image to take corners from -- if it has too few axes to
+    ///   cover the celestial pair, or if a celestial axis has
+    ///   length zero.
     fn footprint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let corners = self.inner.footprint().into_py_result()?;
         let mut flat = Vec::with_capacity(8);
@@ -268,14 +271,22 @@ impl PyWcs {
     /// pix : sequence of float
     ///   Length-``naxis`` pixel coordinate.
     /// origin : int, optional
-    ///   ``0`` (default) treats ``pix`` as 0-based (numpy/C
-    ///   convention, matching ``astropy.wcs``); ``1`` treats
-    ///   it as 1-based FITS coordinates.
+    ///   ``0`` (default) treats ``pix`` as 0-based, ``1`` treats it as
+    ///   1-based FITS coordinates.
     ///
     /// Returns
     /// -------
     /// list of float
     ///   World coordinates with units given by :attr:`cunit`.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If ``origin`` is neither ``0`` nor ``1``.
+    /// FitsError
+    ///   If ``pix`` does not have :attr:`naxis` elements, if the WCS
+    ///   has unresolved ``-TAB`` axes, or if ``pix`` falls outside
+    ///   the projection's valid domain.
     #[pyo3(signature = (pix, origin=0))]
     fn pixel_to_world(&self, pix: Vec<f64>, origin: u8) -> PyResult<Vec<f64>> {
         let off = pixel_offset(origin)?;
@@ -297,6 +308,15 @@ impl PyWcs {
     /// -------
     /// list of float
     ///   Pixel coordinate in the chosen origin.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If ``origin`` is neither ``0`` nor ``1``.
+    /// FitsError
+    ///   If ``world`` does not have :attr:`naxis` elements, if the
+    ///   WCS has unresolved ``-TAB`` axes, or if the inverse
+    ///   transform does not converge.
     #[pyo3(signature = (world, origin=0))]
     fn world_to_pixel(&self, world: Vec<f64>, origin: u8) -> PyResult<Vec<f64>> {
         let off = pixel_offset(origin)?;
@@ -321,6 +341,19 @@ impl PyWcs {
     /// -------
     /// tuple of float
     ///   ``(ra, dec)`` (or ``(lon, lat)``) in degrees.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If the WCS has no celestial axis pair, if it has
+    ///   unresolved ``-TAB`` axes, or if ``(px, py)`` falls outside
+    ///   the projection's valid domain.
+    ///
+    /// Notes
+    /// -----
+    /// For a WCS with more than two axes, every axis besides the
+    /// celestial pair is evaluated at its reference pixel
+    /// (``CRPIX``).
     #[pyo3(signature = (px, py, origin=0))]
     fn pixel_to_celestial(&self, px: f64, py: f64, origin: u8) -> PyResult<(f64, f64)> {
         let off = pixel_offset(origin)?;
@@ -343,6 +376,19 @@ impl PyWcs {
     /// -------
     /// tuple of float
     ///   Pixel coordinates in the chosen origin.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If the WCS has no celestial axis pair, if it has
+    ///   unresolved ``-TAB`` axes, or if ``(ra, dec)`` has no
+    ///   corresponding point in the projection.
+    ///
+    /// Notes
+    /// -----
+    /// For a WCS with more than two axes, every axis besides the
+    /// celestial pair is fixed at its reference value (``CRVAL``),
+    /// which resolves to its reference pixel.
     #[pyo3(signature = (ra, dec, origin=0))]
     fn celestial_to_pixel(&self, ra: f64, dec: f64, origin: u8) -> PyResult<(f64, f64)> {
         let off = pixel_offset(origin)?;
@@ -365,6 +411,22 @@ impl PyWcs {
     /// tuple of float
     ///   Pixel scale in arcseconds per pixel along the two
     ///   celestial axes.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If the WCS has no celestial axis pair, if it has
+    ///   unresolved ``-TAB`` axes, or if ``(px, py)`` or an
+    ///   adjacent pixel used for the finite difference falls
+    ///   outside the projection's valid domain.
+    ///
+    /// Notes
+    /// -----
+    /// fitsy measures this by finite difference on the sphere, so
+    /// the result includes projection distortion and any local
+    /// skew. It is a great-circle distance, always positive, not
+    /// the signed ``CDELT`` value. An image with flipped RA still
+    /// reports a positive scale.
     #[pyo3(signature = (px, py, origin=0))]
     fn pixel_scale_at(&self, px: f64, py: f64, origin: u8) -> PyResult<(f64, f64)> {
         let off = pixel_offset(origin)?;
@@ -389,8 +451,8 @@ impl PyWcs {
     /// numpy.ndarray
     ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees. Pixels
     ///   outside the projection's valid domain come back as ``nan``
-    ///   rather than aborting the call, matching ``astropy.wcs``;
-    ///   mask them with ``numpy.isfinite`` if you need to.
+    ///   rather than aborting the call. Mask them with
+    ///   ``numpy.isfinite`` if needed.
     ///
     /// Raises
     /// ------
@@ -447,7 +509,7 @@ impl PyWcs {
     /// numpy.ndarray
     ///   Shape ``(N, 2)`` array of pixel coordinates. Sky positions
     ///   the projection cannot represent come back as ``nan``
-    ///   rather than aborting the call, matching ``astropy.wcs``.
+    ///   rather than aborting the call.
     ///
     /// Raises
     /// ------
@@ -495,30 +557,37 @@ impl PyWcs {
 
     /// Serialize this WCS to a fresh :class:`Header`.
     ///
-    /// Round-trips: re-parsing the result gives back this WCS.
-    /// Everything the reader understands is written -- the linear
-    /// pipeline, LONPOLE/LATPOLE and the projection's PV parameters,
-    /// SIP, TPV, TNX/ZPX, DSS plate solutions, spectral rest
-    /// quantities, and the ``-TAB`` pointer cards.
-    ///
-    /// Two caveats, both inherent to returning a bare header:
-    ///
-    /// - ``NAXISn`` are emitted as zero placeholders, since a WCS
-    ///   carries no image dimensions. Merge into a header that has
-    ///   the real values.
-    /// - A ``-TAB`` axis names its lookup table by ``EXTNAME``; that
-    ///   BINTABLE is a separate HDU and must be written alongside.
-    ///
     /// Parameters
     /// ----------
     /// alt : str, optional
     ///   ``' '`` (default) for the primary description, or
     ///   ``'A'`` through ``'Z'`` for an alternate.
     ///
+    /// Returns
+    /// -------
+    /// Header
+    ///   A new header holding every WCS keyword fitsy's reader
+    ///   understands: the linear pipeline, ``LONPOLE``/``LATPOLE``
+    ///   and the projection's ``PV`` parameters, SIP, TPV, TNX/ZPX,
+    ///   DSS plate solutions, spectral rest quantities, and the
+    ///   ``-TAB`` pointer cards.
+    ///
     /// Raises
     /// ------
     /// FitsError
     ///   If ``alt`` is not ``' '`` or ``'A'``-``'Z'``.
+    ///
+    /// Notes
+    /// -----
+    /// Parsing the returned header reproduces this WCS. Two things a
+    /// bare header cannot carry:
+    ///
+    /// - ``NAXISn`` are written as zero placeholders, because a WCS
+    ///   carries no image dimensions. Merge the result into a
+    ///   header that already has the real values.
+    /// - A ``-TAB`` axis names its lookup table by ``EXTNAME``. That
+    ///   BINTABLE is a separate HDU and must be written alongside
+    ///   this header.
     #[pyo3(signature = (alt=' '))]
     fn to_header(&self, alt: char) -> PyResult<PyHeader> {
         let h = self.inner.to_header(alt).into_py_result()?;
@@ -554,13 +623,9 @@ pub struct PyWcsFit {
 
 #[pymethods]
 impl PyWcsFit {
-    /// Per-point residuals as a numpy array.
-    ///
-    /// Returns
-    /// -------
-    /// numpy.ndarray
-    ///   Shape ``(N, 2)`` of ``(delta_alpha * cos(delta), delta_dec)``
-    ///   in arcseconds.
+    /// Per-point residuals as a numpy array of shape ``(N, 2)``,
+    /// holding ``(delta_alpha * cos(delta), delta_dec)`` in
+    /// arcseconds.
     #[getter]
     fn residuals_arcsec<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         let n = self.residuals.len();
@@ -595,22 +660,35 @@ impl PyWcsFit {
 ///   more generally ``(lon, lat)`` in the chosen ``frame``
 ///   (numpy array, list of lists, tuple of tuples, etc.).
 /// projection : str, optional
-///   Three-letter projection code (default ``"TAN"``).
+///   Three-letter projection code (Paper II Table 13),
+///   case-insensitive. One of
+///   ``AZP``, ``SZP``, ``TAN``, ``STG``, ``SIN``, ``ARC``, ``ZPN``,
+///   ``ZEA``, ``AIR``, ``CYP``, ``CEA``, ``CAR``, ``MER``, ``SFL``,
+///   ``PAR``, ``MOL``, ``AIT``, ``COP``, ``COE``, ``COD``, ``COO``,
+///   ``BON``, ``PCO``, ``TSC``, ``CSC``, ``QSC``, ``HPX`` or
+///   ``XPH``. Default ``"TAN"``.
 /// crpix : tuple of float, optional
-///   Pin the reference pixel; otherwise solved as part of the fit.
-///   Interpreted in the same ``origin`` as ``pixels``.
+///   Pin the reference pixel. Interpreted in the same ``origin`` as
+///   ``pixels``. Default ``None``, which solves for the reference
+///   pixel as part of the fit.
 /// crval : tuple of float, optional
-///   Pin the tangent point; otherwise defaults to the spherical
-///   centroid of the sky points.
+///   Pin the tangent point, in degrees. Default ``None``, which
+///   uses the spherical centroid of the sky points.
 /// sip_order : int, optional
-///   Enable a SIP polynomial distortion fit of the given order
-///   (typically 2-4).
+///   Order of a SIP polynomial distortion fit. Valid range is 2 to
+///   9. Default ``None``, which fits no SIP distortion. Orders 0
+///   and 1 are rejected, because ``CRPIX`` and the ``CD`` matrix
+///   already absorb those terms.
 /// fit_sip_inverse : bool, optional
 ///   When ``sip_order`` is given, also fit the AP/BP inverse
-///   polynomial. Default True.
-/// frame : {'equatorial', 'galactic', 'ecliptic', 'supergalactic', 'helioecliptic'}, optional
-///   Celestial frame for the sky coordinates. ``'equatorial'`` is
-///   the default and emits ``RA-/DEC-`` CTYPE pairs.
+///   polynomial. Default ``True``.
+/// frame : str, optional
+///   Celestial frame for the sky coordinates, case-insensitive.
+///   ``'equatorial'`` (default), ``'icrs'``, ``'fk5'`` and
+///   ``'fk4'`` are synonyms; all four emit the ``RA--``/``DEC-``
+///   CTYPE prefixes. The other accepted values are
+///   ``'galactic'``, ``'ecliptic'``, ``'supergalactic'`` and
+///   ``'helioecliptic'``.
 /// origin : int, optional
 ///   ``0`` (default, numpy/C convention) treats ``pixels`` and
 ///   ``crpix`` as 0-based; ``1`` treats them as 1-based FITS
@@ -625,7 +703,14 @@ impl PyWcsFit {
 /// Raises
 /// ------
 /// ValueError
-///   On shape mismatches or unknown ``projection``/``frame``.
+///   If ``pixels`` or ``sky`` is not an ``(N, 2)`` array, if they
+///   have different numbers of rows, or if ``frame`` names none of
+///   the values above.
+/// FitsError
+///   If ``projection`` names none of the codes above, if fewer
+///   than 2 points are given (or fewer than 3 without a pinned
+///   ``crpix``), or if the fit is ill-conditioned, for example from
+///   collinear points.
 ///
 /// Examples
 /// --------
@@ -633,8 +718,8 @@ impl PyWcsFit {
 /// >>> pix = np.array([[100.0, 100.0], [200.0, 100.0], [100.0, 200.0]])
 /// >>> sky = np.array([[10.00, -5.00], [10.05, -5.00], [10.00, -4.95]])
 /// >>> fit = fitsy.fit_wcs(pix, sky, projection="TAN")
-/// >>> fit.rms_arcsec
-/// 0.0
+/// >>> fit.rms_arcsec < 1e-6
+/// True
 #[pyfunction]
 #[pyo3(signature = (
     pixels,

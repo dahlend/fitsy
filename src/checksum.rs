@@ -77,8 +77,16 @@ pub fn checksum_is_valid(header_bytes: &[u8], data_bytes_padded: &[u8]) -> bool 
     folded == 0xFFFF_FFFF
 }
 
-/// Verify that the integer-decimal `DATASUM` value matches the
-/// 1's-complement sum of `data_bytes_padded`.
+/// Verify a `DATASUM` card against the data it describes.
+///
+/// The `stored_decimal` argument holds the value field of the
+/// `DATASUM` card, which is an ASCII-decimal integer. Surrounding
+/// quotes and spaces are trimmed before parsing. The
+/// `data_bytes_padded` argument holds the data unit, already padded to
+/// the next 2880-byte boundary.
+///
+/// The result is `false` when `stored_decimal` does not parse as a
+/// number.
 #[must_use]
 pub fn datasum_matches(stored_decimal: &str, data_bytes_padded: &[u8]) -> bool {
     let want: u32 = match stored_decimal.trim().trim_matches('\'').trim().parse() {
@@ -157,19 +165,22 @@ pub fn encode_checksum(value: u32) -> [u8; 16] {
 /// (the header is multiple of 2880 bytes ending with `END`+spaces; the
 /// data is the data section already padded to a 2880 boundary).
 ///
-/// The header **must** already contain placeholder cards
-/// `CHECKSUM = '0000000000000000'` and `DATASUM = '0         '` (any
-/// 10-char value placeholder is fine -- the writer rewrites the value
-/// field in place). `stamp_checksum` rewrites those two value fields
-/// so that:
+/// The header must already contain the placeholder cards
+/// `CHECKSUM = '0000000000000000'` and `DATASUM = '0         '`. Any
+/// 10-character placeholder works for `DATASUM`, because this function
+/// rewrites the value field in place. It rewrites both value fields so
+/// that:
 ///
 /// * `DATASUM` decodes to `checksum_bytes(data_padded)`.
 /// * `CHECKSUM` decodes to a value whose 1's-complement sum, combined
 ///   with the data sum, is `0xFFFFFFFF` (i.e. [`checksum_is_valid`]
 ///   returns `true`).
 ///
-/// Returns an error if the placeholder cards are absent or if the
-/// header is not block-aligned.
+/// # Errors
+///
+/// A static message when `header_bytes` is not a multiple of 2880
+/// bytes, or when the `CHECKSUM` or `DATASUM` placeholder card is
+/// absent.
 pub fn stamp_checksum(header_bytes: &mut [u8], data_padded: &[u8]) -> Result<(), &'static str> {
     use crate::header::card::CARD_SIZE;
     use crate::io::block::BLOCK_SIZE;

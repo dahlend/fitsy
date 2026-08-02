@@ -1,9 +1,13 @@
-//! Module-level convenience functions matching `astropy.io.fits`:
-//! `getdata`, `getheader`, `getval`, `setval`, `delval`, `info`, `append`.
+//! Module-level convenience functions: `getdata`, `getheader`,
+//! `getval`, `setval`, `delval`, `info` and `append`.
 //!
-//! These mirror the astropy module API. They open the file, perform
-//! one operation, and close. For repeated access prefer
-//! ``with fitsy.open(...) as f``.
+//! Each function opens `path`, performs one operation, then closes
+//! the file. `setval` and `delval` rewrite the file. `append` writes
+//! past the last HDU and rewrites nothing. The rest only read.
+//!
+//! Each call thus pays the open and parse cost once. A caller that
+//! performs more than one operation on one file should use
+//! `file::open` instead.
 
 use std::path::PathBuf;
 
@@ -13,13 +17,37 @@ use pyo3::types::{PyList, PyTuple};
 
 use super::IntoPyResult;
 
-/// An HDU's data, falling back to its dict form for the kinds that
-/// expose no `data` attribute.
+/// Return an HDU's pixel or column data.
+///
+/// Reads the `data` attribute first. Falls back to `to_dict()`,
+/// which [`super::table::PyBinTable`] and
+/// [`super::table::PyAsciiTable`] define.
+///
+/// # Errors
+///
+/// Returns the `to_dict()` error when both calls fail.
+/// [`super::hdu::PyRandomGroups`] defines neither name, so this
+/// function fails on one with an `AttributeError`.
+///
+/// The fallback catches every `data` failure, not only a missing
+/// attribute. A pixel read error on an [`super::hdu::PyImageHdu`]
+/// thus surfaces as an `AttributeError` about `to_dict`.
 fn data_of<'py>(hdu: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     hdu.getattr("data").or_else(|_| hdu.call_method0("to_dict"))
 }
 
-/// Open `path` and return one HDU resolved by `ext` (int or `EXTNAME` str).
+/// Open `path` and resolve one HDU.
+///
+/// Opens the file in `mode`, then indexes into the returned
+/// [`super::file::PyFitsFile`] with `ext`. `ext` selects HDU 0 when
+/// absent.
+///
+/// # Errors
+///
+/// Returns `fitsy.FitsError` if `path` cannot be opened or parsed.
+/// Returns a Python `IndexError` if `ext` is an out-of-range
+/// integer, a `KeyError` if `ext` is a string that names no HDU, or
+/// a `TypeError` if `ext` is some other type.
 fn open_and_get<'py>(
     py: Python<'py>,
     path: PathBuf,
@@ -36,27 +64,45 @@ fn open_and_get<'py>(
     Ok((file_obj, hdu))
 }
 
-/// Read one HDU's data (and optionally its header) from `path`.
+/// Read one HDU's data, and optionally its header, from `path`.
 ///
 /// Parameters
 /// ----------
-/// path : str | os.PathLike
+/// path : str or os.PathLike
 ///   File to read.
-/// ext : int | str, optional
-///   HDU index or ``EXTNAME``. When omitted, HDU 0 is read; if the
-///   primary HDU carries no data the first extension is used
-///   instead, matching ``astropy.io.fits.getdata``. The overwhelmingly
-///   common layout -- an empty primary followed by the real data in
-///   HDU 1 -- therefore works without naming an extension.
-/// header : bool, keyword-only
-///   When True, return ``(data, header)`` for whichever HDU the
-///   data actually came from.
+/// ext : int or str, optional
+///   HDU index or ``EXTNAME``. Default is HDU 0. When `ext` is
+///   omitted and HDU 0 carries no data, fitsy reads HDU 1 instead.
+/// header : bool, keyword-only, optional
+///   Default ``False``. When ``True``, return ``(data, header)``
+///   instead of only ``data``.
+///
+/// Returns
+/// -------
+/// numpy.ndarray or tuple
+///   Pixel data for an image HDU. A read-only structured array, one
+///   record per row, for a binary or ASCII table HDU. When `header`
+///   is ``True``, returns ``(data, header)`` instead, paired with
+///   the :class:`Header` of the HDU the data came from.
 ///
 /// Raises
 /// ------
+/// FitsError
+///   If `path` cannot be opened or parsed as FITS.
 /// IndexError
-///   If the selected HDU has no data (and, when `ext` was omitted,
-///   neither does the first extension).
+///   If `ext` is an out-of-range integer. Also raised if the
+///   selected HDU has no data, and, when `ext` was omitted, HDU 1
+///   has no data either.
+/// KeyError
+///   If `ext` is a string that names no HDU.
+/// TypeError
+///   If `ext` is neither an int, a str, nor omitted.
+///
+/// Notes
+/// -----
+/// A random-groups primary HDU (``GROUPS = T``) has neither a data
+/// array nor a dict form. Reading one with `ext` omitted raises
+/// ``AttributeError`` instead of the exceptions above.
 #[pyfunction]
 #[pyo3(signature = (path, ext=None, *, header=false))]
 pub fn getdata(
@@ -105,6 +151,29 @@ pub fn getdata(
 }
 
 /// Read one HDU's header from `path`.
+///
+/// Parameters
+/// ----------
+/// path : str or os.PathLike
+///   File to read.
+/// ext : int or str, optional
+///   HDU index or ``EXTNAME``. Default is HDU 0.
+///
+/// Returns
+/// -------
+/// Header
+///   Header of the selected HDU.
+///
+/// Raises
+/// ------
+/// FitsError
+///   If `path` cannot be opened or parsed as FITS.
+/// IndexError
+///   If `ext` is an out-of-range integer.
+/// KeyError
+///   If `ext` is a string that names no HDU.
+/// TypeError
+///   If `ext` is neither an int, a str, nor omitted.
 #[pyfunction]
 #[pyo3(signature = (path, ext=None))]
 pub fn getheader(
@@ -118,7 +187,32 @@ pub fn getheader(
 
 /// Read one header keyword from `path`.
 ///
-/// Raises `KeyError` if the keyword is absent.
+/// Parameters
+/// ----------
+/// path : str or os.PathLike
+///   File to read.
+/// key : str
+///   Header keyword to read.
+/// ext : int or str, optional
+///   HDU index or ``EXTNAME``. Default is HDU 0.
+///
+/// Returns
+/// -------
+/// bool, int, float, complex, str, or None
+///   Value of the card. A :class:`HeaderCommentary` object for a
+///   ``COMMENT``, ``HISTORY``, or blank keyword.
+///
+/// Raises
+/// ------
+/// FitsError
+///   If `path` cannot be opened or parsed as FITS.
+/// IndexError
+///   If `ext` is an out-of-range integer.
+/// KeyError
+///   If `ext` is a string that names no HDU, or if `key` is absent
+///   from the selected header.
+/// TypeError
+///   If `ext` is neither an int, a str, nor omitted.
 #[pyfunction]
 #[pyo3(signature = (path, key, ext=None))]
 pub fn getval(
@@ -135,10 +229,38 @@ pub fn getval(
     Ok(bound.get_item(key)?.unbind())
 }
 
-/// Set one header keyword in `path` (rewrites the file).
+/// Set one header keyword in `path`. Rewrites the file.
 ///
-/// `value` defaults to `None`, which writes a card with an undefined
-/// value -- the same default `astropy.io.fits.setval` uses.
+/// Parameters
+/// ----------
+/// path : str or os.PathLike
+///   File to edit.
+/// key : str
+///   Header keyword to set.
+/// value : bool, int, float, complex, str, or None, optional
+///   New card value. Default ``None``, which writes a card with an
+///   undefined value.
+/// ext : int or str, keyword-only, optional
+///   HDU index or ``EXTNAME``. Default is HDU 0.
+/// comment : str, keyword-only, optional
+///   New card comment. Default ``None``, which leaves an existing
+///   card's comment unchanged.
+///
+/// Raises
+/// ------
+/// FitsError
+///   If `path` cannot be opened or parsed as FITS, if `key` is not
+///   a valid FITS keyword, or if the rewrite fails.
+/// IndexError
+///   If `ext` is an out-of-range integer.
+/// KeyError
+///   If `ext` is a string that names no HDU.
+/// TypeError
+///   If `ext` is neither an int, a str, nor omitted. Also raised if
+///   `value` is a type fitsy cannot store in a header card.
+/// ValueError
+///   If `key` names a structural card managed by the writer, such
+///   as ``BITPIX`` or ``NAXIS``.
 #[pyfunction]
 #[pyo3(signature = (path, key, value=None, *, ext=None, comment=None))]
 pub fn setval(
@@ -166,14 +288,33 @@ pub fn setval(
     file.bind(py).call_method0("flush").map(|_| ())
 }
 
-/// Remove one header keyword from `path` (rewrites the file).
+/// Remove one header keyword from `path`. Rewrites the file.
+///
+/// Parameters
+/// ----------
+/// path : str or os.PathLike
+///   File to edit.
+/// key : str
+///   Header keyword to remove.
+/// ext : int or str, keyword-only, optional
+///   HDU index or ``EXTNAME``. Default is HDU 0.
 ///
 /// Raises
 /// ------
+/// FitsError
+///   If `path` cannot be opened or parsed as FITS, or if the
+///   rewrite fails.
+/// IndexError
+///   If `ext` is an out-of-range integer.
 /// KeyError
-///   If the keyword is absent, matching `astropy.io.fits.delval`
-///   and `fitsy.getval`. Guard with `getval` (or open the file and
-///   test `key in header`) when the card is optional.
+///   If `ext` is a string that names no HDU, or if `key` is absent
+///   from the selected header. Call :func:`getval`, or test
+///   ``key in header`` on an open file, to guard an optional card.
+/// TypeError
+///   If `ext` is neither an int, a str, nor omitted.
+/// ValueError
+///   If `key` names a structural card managed by the writer, such
+///   as ``BITPIX`` or ``NAXIS``.
 #[pyfunction]
 #[pyo3(signature = (path, key, *, ext=None))]
 pub fn delval(
@@ -185,7 +326,7 @@ pub fn delval(
     let (file, hdu) = open_and_get(py, path.clone(), ext, "update")?;
     let header = hdu.getattr("header")?;
     // Deliberately unguarded: `__delitem__` raises KeyError for a
-    // missing card, which is the behaviour callers expect. Silently
+    // missing card, which is the behavior callers expect. Silently
     // succeeding hid typo'd keywords.
     header.del_item(key)?;
     file.bind(py).call_method0("flush").map(|_| ())
@@ -193,8 +334,33 @@ pub fn delval(
 
 /// Return a brief HDU summary table for `path`.
 ///
-/// Returns a list of `(index, name, ver, kind, dims_or_n_rows)` tuples.
-/// `kind` is the wrapper class name (`"ImageHdu"`, `"BinTable"`, ...).
+/// Parameters
+/// ----------
+/// path : str or os.PathLike
+///   File to read.
+///
+/// Returns
+/// -------
+/// list of tuple
+///   One ``(index, name, ver, kind, dims_or_n_rows)`` tuple per HDU,
+///   in file order.
+///
+///   * ``index`` -- 0-based HDU position (``int``).
+///   * ``name`` -- ``EXTNAME``, or an empty string if absent
+///     (``str``).
+///   * ``ver`` -- ``EXTVER``, or ``1`` if absent (``int``).
+///   * ``kind`` -- wrapper class name: ``"ImageHdu"``,
+///     ``"BinTable"``, ``"AsciiTable"``, or ``"RandomGroups"``.
+///     ``"Unknown"`` in the unexpected case where fitsy cannot read
+///     the HDU's Python type name.
+///   * ``dims_or_n_rows`` -- axis lengths (``list`` of ``int``) for
+///     an image HDU, row count (``int``) for a table HDU, or
+///     ``None`` for a random-groups HDU.
+///
+/// Raises
+/// ------
+/// FitsError
+///   If `path` cannot be opened or parsed as FITS.
 #[pyfunction]
 #[pyo3(signature = (path))]
 pub fn info(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyList>> {
@@ -243,10 +409,40 @@ pub fn info(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyList>> {
 
 /// Append one image HDU to an existing FITS file.
 ///
-/// The HDU is streamed in place at the end of the file -- existing
-/// HDUs are not read or rewritten. The Python data array is
-/// converted to a non-primary (`XTENSION = 'IMAGE   '`) HDU before
-/// being written.  Matches `astropy.io.fits.append` semantics.
+/// Writes the new HDU directly after the last existing HDU. fitsy
+/// rewrites no existing HDU.
+///
+/// Parameters
+/// ----------
+/// path : str or os.PathLike
+///   FITS file to append to. The file must already exist and must
+///   parse as FITS.
+/// data : array-like
+///   Image pixels for the new HDU. A numpy array of dtype
+///   ``bool``, ``int8``, ``uint8``, ``int16``, ``uint16``,
+///   ``int32``, ``uint32``, ``int64``, ``uint64``, ``float32`` or
+///   ``float64``, or anything :func:`numpy.asarray` accepts.
+/// header : Header or mapping, optional
+///   Extra header cards for the new HDU. Default ``None``.
+///
+/// Raises
+/// ------
+/// FitsError
+///   If `path` cannot be opened for append, or the write fails.
+/// TypeError
+///   If `data` is not an image array or array-like, or its dtype is
+///   not one fitsy supports.
+///
+/// Notes
+/// -----
+/// fitsy writes the new HDU as an extension, with ``XTENSION =
+/// 'IMAGE'``. fitsy parses the whole file first, to check it and to
+/// find the offset of the append. Any bytes after the last HDU are
+/// overwritten.
+///
+/// fitsy builds the new HDU with :func:`fitsy.image`. See that
+/// function for the dtype rule, and for the ``BZERO`` and
+/// ``BSCALE`` cards it adds for an unsigned dtype.
 #[pyfunction]
 #[pyo3(signature = (path, data, header=None))]
 pub fn append(

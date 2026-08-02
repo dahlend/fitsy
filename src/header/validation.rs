@@ -1,4 +1,12 @@
 //! Header diagnostics for deprecated and non-standard keywords.
+//!
+//! [`Header::validate`](crate::Header::validate) walks a header and
+//! reports a [`Diagnostic`] for each problem it finds. A diagnostic
+//! carries a [`Level`], the keyword involved, a message, and an
+//! optional [`Fix`] that names the replacement.
+//!
+//! This module reports. It changes no header. A caller decides what to
+//! do with each diagnostic.
 
 use crate::header::Header;
 use crate::header::value::Value;

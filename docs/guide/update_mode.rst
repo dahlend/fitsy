@@ -8,20 +8,20 @@ mutations (append/delete/insert HDUs).
 
 Two persistence paths, with different durability guarantees:
 
-* **Header edits, structural mutations, and ``set_data``** are
+* Header edits, structural mutations and ``set_data`` are
   staged in memory and committed on a clean ``__exit__``,
   :meth:`~fitsy.FitsFile.flush`, or :meth:`~fitsy.FitsFile.close`
   via a sibling temp file + atomic ``rename``. A crash mid-flush
   leaves either the old bytes or the new ones -- never a
   half-written file.
-* **In-place pixel patches** via ``hdu.section[...] = arr`` write
-  only the touched bytes via positional ``pwrite`` and are
-  therefore ``O(patch)`` rather than ``O(file)``. They are
-  persisted as soon as the assignment returns and require no
-  flush, but they are **not** crash-atomic: a process death
-  mid-patch can leave some rows updated and others not (matches
-  astropy's mmap-backed update path). Snapshot the file first if
-  you need atomicity.
+* In-place pixel patches through ``hdu.section[...] = arr`` write
+  only the touched bytes, using positional ``pwrite``. They cost
+  ``O(patch)`` rather than ``O(file)``, and they persist as soon as
+  the assignment returns, so they need no flush.
+  
+  Such a patch is not crash-atomic. A process death mid-patch can
+  leave some rows updated and others not. Snapshot the file first
+  when you need atomicity.
 
 Save-as
 -------

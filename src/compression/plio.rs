@@ -214,6 +214,10 @@ pub(super) fn decompress_into(
     Ok(())
 }
 
+/// Reject a decoded pixel value outside the range the mask allows.
+///
+/// The opcodes adjust a running value, so a corrupt stream can drive
+/// it negative or past the declared maximum.
 #[inline]
 fn validate_pv(pv: i64, max_pixel: i64) -> Result<()> {
     if pv < 0 || pv > max_pixel {
@@ -224,6 +228,7 @@ fn validate_pv(pv: i64, max_pixel: i64) -> Result<()> {
     Ok(())
 }
 
+/// Store pixel `idx` into `dst` as `bp` big-endian bytes.
 #[inline]
 fn write_pixel(dst: &mut [u8], idx: usize, bp: usize, value: u64) {
     let off = idx * bp;

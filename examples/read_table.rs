@@ -1,6 +1,9 @@
-//! Read a binary table: column metadata and per-cell decoding.
+//! Walk the columns of a binary table and decode each cell.
 //!
-//! Run from the repo root:
+//! This shows the column metadata that `TFORMn` carries, and the
+//! typed cell values that come back from it.
+//!
+//! Run from the repository root:
 //!
 //!     cargo run --example read_table
 //!

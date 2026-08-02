@@ -1,6 +1,6 @@
 """WCS pixel <-> sky transforms on the bundled NGC 2403 image.
 
-Run from the repo root:
+Run from the repository root:
 
     python examples/python/wcs.py
 """

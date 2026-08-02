@@ -12,10 +12,10 @@
 //! marked as such below; the rest carry measurement uncertainty that
 //! this module does not track.
 //!
-//! Solar, terrestrial and jovian values are the IAU 2015 Resolution B3
-//! **nominal** values. Those are conventional constants, deliberately
-//! fixed so published results do not shift when the measurements
-//! improve; they are not best estimates and should not be used as such.
+//! The solar, terrestrial and jovian values are the nominal values of
+//! IAU 2015 Resolution B3. Those are conventional constants, fixed so
+//! that a published result does not shift when the measurement
+//! improves. They are not best estimates. Do not use them as such.
 //! The Resolution defines `GM` for each body rather than a mass, because
 //! `GM` is measured far better than `G` -- masses here are `GM/G` and
 //! inherit `G`'s uncertainty, which is the worst of any constant here at
@@ -65,22 +65,22 @@ const WAVENUMBER: Dimension = LENGTH.powf(-1.0);
 
 // -- exact by the 2019 SI definitions -----------------------------------
 
-/// Speed of light in vacuum, `c`. **Exact** -- it defines the metre.
+/// Speed of light in vacuum, `c`. This value is exact; it defines the metre.
 pub const SPEED_OF_LIGHT: Quantity = c(299_792_458.0, VELOCITY);
 
-/// Planck constant, `h`. **Exact** -- it defines the kilogram.
+/// Planck constant, `h`. This value is exact; it defines the kilogram.
 pub const PLANCK: Quantity = c(6.626_070_15e-34, ACTION);
 
 /// Reduced Planck constant, `hbar = h / 2 pi`.
 pub const REDUCED_PLANCK: Quantity = c(6.626_070_15e-34 / (2.0 * std::f64::consts::PI), ACTION);
 
-/// Boltzmann constant, `k`. **Exact** -- it defines the kelvin.
+/// Boltzmann constant, `k`. This value is exact; it defines the kelvin.
 pub const BOLTZMANN: Quantity = c(1.380_649e-23, HEAT_CAPACITY);
 
-/// Elementary charge, `e`. **Exact** -- it defines the ampere.
+/// Elementary charge, `e`. This value is exact; it defines the ampere.
 pub const ELEMENTARY_CHARGE: Quantity = c(1.602_176_634e-19, CHARGE);
 
-/// Avogadro constant, `N_A`. **Exact** -- it defines the mole.
+/// Avogadro constant, `N_A`. This value is exact; it defines the mole.
 pub const AVOGADRO: Quantity = c(6.022_140_76e23, PER_SUBSTANCE);
 
 // -- CODATA 2018, measured ----------------------------------------------
@@ -134,7 +134,7 @@ pub const JULIAN_CENTURY: Quantity = c(3_155_760_000.0, TIME);
 
 // -- length -------------------------------------------------------------
 
-/// Astronomical unit, `au`. **Exact** by IAU 2012 Resolution B2.
+/// Astronomical unit, `au`. This value is exact, by IAU 2012 Resolution B2.
 pub const ASTRONOMICAL_UNIT: Quantity = c(1.495_978_707e11, LENGTH);
 
 /// Parsec -- the distance subtending one arcsecond of parallax across one
@@ -190,10 +190,10 @@ pub const DEGREES_PER_RADIAN: Quantity = c(180.0 / std::f64::consts::PI, ANGLE);
 /// Raw `f64` forms, for the interior of numeric transforms where wrapping
 /// every operand in a [`Quantity`] would cost more than it checks.
 ///
-/// [`crate::wcs::spectral`] is the caller that matters: its analytic
-/// derivatives run once per coordinate, and their intermediate
-/// quantities -- `d(wavelength)/d(frequency)` is `m s` -- have no
-/// standard names to check against anyway.
+/// [`crate::wcs::spectral`] is the caller that matters. Its analytic
+/// derivatives run once per coordinate. Their intermediate quantities
+/// have no standard names to check against; `d(wavelength)/d(frequency)`
+/// carries the dimension `m s`.
 pub mod raw {
     /// [`super::SPEED_OF_LIGHT`] in m/s.
     pub const SPEED_OF_LIGHT: f64 = 299_792_458.0;

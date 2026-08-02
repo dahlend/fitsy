@@ -45,6 +45,7 @@ struct RiceParams {
 }
 
 impl RiceParams {
+    /// The three parameters that a given pixel width fixes.
     fn for_bytepix(bytepix: u32) -> Result<Self> {
         Ok(match bytepix {
             1 => Self {
@@ -132,6 +133,7 @@ pub(super) fn decompress(bytepix: u32, nblock: u32, nx: u32, src: &[u8]) -> Resu
 
 // -- Internal decoder ------------------------------------------------
 
+/// Store pixel `i` into `dst` as `bp` big-endian bytes.
 #[inline]
 fn write_be_pixel(dst: &mut [u8], i: usize, bp: usize, v: u32) {
     let off = i * bp;
@@ -143,6 +145,7 @@ fn write_be_pixel(dst: &mut [u8], i: usize, bp: usize, v: u32) {
     }
 }
 
+/// Reads the payload one bit at a time, most significant bit first.
 struct BitReader<'a> {
     src: &'a [u8],
     pos: usize,
@@ -152,6 +155,7 @@ struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
+    /// Start reading at byte `pos`, priming the bit buffer.
     fn new(src: &'a [u8], pos: usize) -> Result<Self> {
         let mut r = Self {
             src,
@@ -162,6 +166,7 @@ impl<'a> BitReader<'a> {
         r.b = u32::from(r.read_byte()?);
         Ok(r)
     }
+    /// Take the next byte, or fail at the end of the stream.
     fn read_byte(&mut self) -> Result<u8> {
         let b = *self
             .src
@@ -172,6 +177,14 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// Decode every block of one tile into `dst`.
+///
+/// Each block opens with its split parameter `fs`. A value of 0 marks
+/// an all-zero block, and a value at or above `fsmax` marks a block
+/// stored as raw values. Any other value selects the Rice-coded path,
+/// where each pixel is a unary high part followed by `fs` low bits.
+/// Every decoded difference is un-zigzagged and added to the running
+/// previous pixel.
 fn decode_blocks(
     r: &mut BitReader<'_>,
     dst: &mut [u8],
@@ -265,6 +278,8 @@ fn mask32(n: u32) -> u32 {
     if n >= 32 { u32::MAX } else { (1_u32 << n) - 1 }
 }
 
+/// Undo the zigzag mapping, turning an unsigned code back into the
+/// signed difference it stands for.
 #[inline]
 fn unzigzag(d: u32) -> u32 {
     if d & 1 == 0 { d >> 1 } else { !(d >> 1) }
@@ -272,6 +287,8 @@ fn unzigzag(d: u32) -> u32 {
 
 // -- Encoder (test-only) ---------------------------------------------
 
+/// Map a signed difference onto an unsigned code, so that a small
+/// magnitude of either sign becomes a small code.
 #[cfg(test)]
 #[inline]
 fn zigzag(d: i64) -> u32 {
@@ -282,6 +299,8 @@ fn zigzag(d: i64) -> u32 {
     }
 }
 
+/// Writes a bit stream, most significant bit first. Used by the
+/// test-only encoder.
 #[cfg(test)]
 struct BitWriter {
     out: Vec<u8>,
@@ -291,6 +310,7 @@ struct BitWriter {
 
 #[cfg(test)]
 impl BitWriter {
+    /// An empty writer, positioned at the first bit of the first byte.
     fn new() -> Self {
         Self {
             out: Vec::new(),
@@ -327,6 +347,7 @@ impl BitWriter {
         }
     }
 
+    /// Flush any partial byte and return the encoded stream.
     fn finish(mut self) -> Vec<u8> {
         if self.bits_to_go < 8 {
             self.out
@@ -336,6 +357,10 @@ impl BitWriter {
     }
 }
 
+/// Encode `pixels` with the Rice coder, mirroring [`decode_blocks`].
+///
+/// This exists so the tests can round-trip a tile. The crate writes no
+/// `RICE_1` tile in production.
 #[cfg(test)]
 fn encode_inner(pixels: &[i64], bytepix: u32, nblock: usize, first_bits: i32) -> Vec<u8> {
     let p = RiceParams::for_bytepix(bytepix).unwrap();
@@ -402,16 +427,19 @@ fn encode_inner(pixels: &[i64], bytepix: u32, nblock: usize, first_bits: i32) ->
     w.finish()
 }
 
+/// [`encode_inner`] for 1-byte pixels.
 #[cfg(test)]
 pub(super) fn encode_byte(pixels: &[i8], nblock: usize) -> Vec<u8> {
     let v: Vec<i64> = pixels.iter().map(|&p| i64::from(p)).collect();
     encode_inner(&v, 1, nblock, 8)
 }
+/// [`encode_inner`] for 2-byte pixels.
 #[cfg(test)]
 pub(super) fn encode_short(pixels: &[i16], nblock: usize) -> Vec<u8> {
     let v: Vec<i64> = pixels.iter().map(|&p| i64::from(p)).collect();
     encode_inner(&v, 2, nblock, 16)
 }
+/// [`encode_inner`] for 4-byte pixels.
 #[cfg(test)]
 pub(super) fn encode_int(pixels: &[i32], nblock: usize) -> Vec<u8> {
     let v: Vec<i64> = pixels.iter().map(|&p| i64::from(p)).collect();

@@ -33,16 +33,14 @@
 //! constant (`A_0_0`, `B_0_0`) and linear (`A_1_0`, `A_0_1`,
 //! `B_1_0`, `B_0_1`) terms are forbidden because they are
 //! algebraically absorbed into `CRPIX` and the `CD`/`PC` matrix.
-//! Real-world WISE / NEOWISE Level-1b archive files (e.g.
-//! `74721b067-w2-int-1b.fits`, where `A_0_0 ~= 0.81`) emit them
-//! anyway as additional offsets, and astropy silently honours them.
-//! This implementation matches that lenient behaviour: any
-//! `A_p_q`/`B_p_q` with `p + q <= order` is accepted and added to
-//! the polynomial without warning.
+//! Some archive files emit them anyway, as additional offsets. A WISE
+//! or NEOWISE Level-1b file does so, and one such file carries
+//! `A_0_0` near 0.81. This module accepts any `A_p_q` or `B_p_q` with
+//! `p + q <= order` and adds it to the polynomial.
 
 use crate::error::{FitsError, Result};
 
-/// Maximum polynomial order accepted (matches WCSLIB / astropy).
+/// Highest polynomial order that this module accepts.
 pub const SIP_MAX_ORDER: u32 = 9;
 
 /// One SIP polynomial: a triangular table of coefficients indexed
@@ -58,8 +56,13 @@ pub struct SipPoly {
 }
 
 impl SipPoly {
-    /// Build from a list of `(p, q, value)` tuples. The order is the
-    /// maximum `p + q` seen; entries not provided are zero.
+    /// Build from a list of `(p, q, value)` tuples. A term that is
+    /// absent from `terms` holds 0.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `order` exceeds the supported maximum,
+    /// or when a term has `p + q` greater than `order`.
     pub fn from_terms(order: u32, terms: &[(u32, u32, f64)]) -> Result<Self> {
         if order > SIP_MAX_ORDER {
             return Err(FitsError::Wcs(format!(
@@ -177,20 +180,28 @@ pub struct Sip {
 }
 
 impl Sip {
-    /// Forward distortion `(u, v) -> (u + f(u,v), v + g(u,v))`. The
-    /// SIP convention adds the polynomial to the pixel offset; the
-    /// constant + linear terms (`A_0_0`, `A_1_0`, `A_0_1` etc.) are
-    /// part of the polynomial and applied additively per the spec.
+    /// Forward distortion, `(u, v) -> (u + f(u,v), v + g(u,v))`.
+    ///
+    /// The SIP convention adds the polynomial to the pixel offset. The
+    /// constant and linear terms, such as `A_0_0`, `A_1_0` and
+    /// `A_0_1`, belong to the polynomial and add in the same way.
     #[must_use]
     pub fn forward(&self, u: f64, v: f64) -> (f64, f64) {
         (u + self.a.eval(u, v), v + self.b.eval(u, v))
     }
 
-    /// Inverse distortion `(u', v') -> (u, v)`. Uses `AP`/`BP` for an
-    /// initial guess when available (the spec only requires AP/BP to
-    /// be a "best-fit" inverse, typically accurate to ~10^-6 px), and
-    /// always refines via Newton iteration on the exact forward map
-    /// to converge to machine precision.
+    /// Inverse distortion, `(u', v') -> (u, v)`.
+    ///
+    /// The `AP` and `BP` polynomials give the initial guess when the
+    /// header carries them. The convention requires those two to be a
+    /// best-fit inverse alone, so this always refines the guess by
+    /// Newton iteration on the exact forward map. The iteration
+    /// converges to machine precision.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the Jacobian is singular, or when the
+    /// iteration does not converge within its step limit.
     pub fn inverse(&self, up: f64, vp: f64) -> Result<(f64, f64)> {
         // Initial guess: AP/BP if available, else identity.
         let (mut u, mut v) = if let (Some(ap), Some(bp)) = (&self.ap, &self.bp) {

@@ -1,6 +1,6 @@
-"""Write a new FITS file: image + binary table.
+"""Write a new FITS file holding an image and a binary table.
 
-Run from the repo root:
+Run from the repository root:
 
     python examples/python/writing_files.py
 """

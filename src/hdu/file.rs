@@ -1,22 +1,40 @@
-//! [`FitsFile`]: top-level reader (Standard Sec.3.4).
+//! [`FitsFile`], the top-level reader (Standard Sec.3.4).
 //!
-//! Open a file with [`FitsFile::open`]. Access individual HDUs by
-//! index with [`FitsFile::hdu`], by name with [`FitsFile::hdu_by_name`],
-//! or iterate all of them with [`FitsFile::iter`].
+//! # Purpose
 //!
-//! Headers are parsed **leniently** by default (tolerating e.g.
-//! `SIMPLE = F`); use [`FitsFile::open_with`] with `lenient = false` to
-//! require strict FITS conformance.
+//! [`FitsFile`] owns the bytes of one FITS file. It parses every
+//! header when it opens the file, and it hands out a borrowed view of
+//! each HDU.
 //!
-//! # Memory model
+//! Open a file with [`FitsFile::open`]. Reach one HDU by index with
+//! [`FitsFile::hdu`] or by name with [`FitsFile::hdu_by_name`]. Walk
+//! every HDU with [`FitsFile::iter`].
 //!
-//! `FitsFile::open` does **not** read pixel or table bytes up front.
-//! It scans the headers and records where each HDU's data section
-//! starts and ends. Those bytes are `pread` on the first `hdu(i)` and
-//! cached until the file is dropped, so opening a 50-GB mosaic costs
-//! only the headers and reading HDU 3 costs only HDU 3.
+//! # Design constraints
 //!
-//! [`FitsFile::from_bytes`] keeps the whole buffer in memory instead.
+//! Four facts explain the shape of this module.
+//!
+//! First, a data section loads on first use. [`FitsFile::open`] reads
+//! the headers and records the byte span of each data section. It
+//! reads no pixel bytes and no table bytes. The first call to
+//! [`FitsFile::hdu`] reads that one data section and caches it until
+//! the [`FitsFile`] drops. Opening a 50 GB file therefore costs the
+//! headers alone, and reading HDU 3 costs HDU 3 alone.
+//!
+//! Second, [`FitsFile::from_bytes`] holds the whole buffer in memory.
+//! It adds no further cache, because the bytes are already present.
+//!
+//! Third, parsing is lenient by default. [`FitsFile::open`] accepts
+//! the deviations that real files contain. [`FitsFile::open_with`]
+//! takes a `lenient` flag, and `false` requires strict conformance.
+//! The flag is stored on the [`FitsFile`], so each later re-parse of a
+//! header applies the same rule.
+//!
+//! Fourth, a trailing region that is not an HDU ends the scan. Some
+//! capture programs append zero bytes or vendor metadata after the
+//! last HDU. The scan stops at an all-zero region, and at any later
+//! region that does not begin with an `XTENSION` card. Neither case is
+//! an error.
 
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,6 +66,27 @@ use crate::io::source::ByteSource;
 
 /// Top-level FITS file. `Send` and `Sync`: the lazy data cache is a
 /// `OnceLock`, so `&FitsFile` can be shared across threads.
+///
+/// # Examples
+///
+/// ```
+/// # use fitsy::{FitsWriter, ImageBuilder};
+/// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// #     .primary(true)
+/// #     .build()?;
+/// # let mut buf: Vec<u8> = Vec::new();
+/// # FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+/// use fitsy::{FitsFile, Hdu};
+///
+/// let file = FitsFile::from_bytes(buf)?;
+/// assert_eq!(file.len(), 1);
+///
+/// let Hdu::Image(img) = file.hdu(0)? else {
+///     panic!("HDU 0 is not an image");
+/// };
+/// assert_eq!(img.axes(), &[4, 3]);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug)]
 pub struct FitsFile {
     backing: Backing,
@@ -90,20 +129,42 @@ struct HduSpan {
 }
 
 impl FitsFile {
-    /// Open `path` and parse its HDU headers. Data sections are read
-    /// on first access, not here.
+    /// Open `path` and parse its HDU headers.
     ///
-    /// Headers are parsed **leniently** by default so real-world files
-    /// load; use `FitsFile::open_with(path, false)` to require strict
-    /// conformance.
+    /// This function reads no data section. Each one loads on first
+    /// access. It parses headers leniently, so a real-world file
+    /// loads. Call [`FitsFile::open_with`] with `lenient = false` to
+    /// require strict conformance.
+    ///
+    /// A `path` that names a gzipped file is inflated whole into
+    /// memory, because a compressed stream has no seekable layout.
+    /// This needs the `compression` feature.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Io`] when `path` cannot be opened or read.
+    /// - [`FitsError::Block`], [`FitsError::Card`] or
+    ///   [`FitsError::Value`] when a header violates the block, card
+    ///   or value structure of the format.
+    /// - [`FitsError::MissingMandatory`] when the primary header omits
+    ///   `SIMPLE`, or an extension header omits `XTENSION`.
+    /// - [`FitsError::Header`] when the file holds no HDU.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_open.fits");
+    /// # let (h, d) = ImageBuilder::new(vec![2_u64, 2], vec![0.0_f32; 4])?
+    /// #     .primary(true)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
     /// use fitsy::FitsFile;
     ///
-    /// let f = FitsFile::open("image.fits")?;
-    /// println!("{} HDUs", f.len());
+    /// let f = FitsFile::open(&path)?;
+    /// assert_eq!(f.len(), 1);
+    /// # std::fs::remove_file(&path)?;
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     #[cfg(not(target_arch = "wasm32"))]
@@ -113,16 +174,34 @@ impl FitsFile {
 
     /// Open `path` with explicit control over lenient parsing.
     ///
-    /// When `lenient` is `true` (what [`FitsFile::open`] uses), these
-    /// are tolerated: `SIMPLE = F`, non-ASCII bytes in string values
-    /// (sanitized to spaces), lower-case keywords (folded up), values
-    /// matching no standard type (kept as
-    /// [`crate::header::Value::Unparsed`]), stray bytes after `END`, a
-    /// lower-case `end`, and broken `CONTINUE` chains. A present `END`,
-    /// block alignment and the declared data size are always enforced.
+    /// A `lenient` value of `true` is what [`FitsFile::open`] uses. It
+    /// tolerates each of these:
     ///
-    /// When `false`, any of those is an error. The flag is kept on the
-    /// [`FitsFile`] so per-HDU re-parses stay consistent.
+    /// - `SIMPLE = F` in the primary header.
+    /// - A non-ASCII byte in a string value. The parser replaces it
+    ///   with a space.
+    /// - A lower-case keyword. The parser folds it to upper case.
+    /// - A value that matches no standard type. The parser keeps it as
+    ///   [`crate::header::Value::Unparsed`].
+    /// - A stray byte after the `END` card.
+    /// - A lower-case `end` card.
+    /// - A broken `CONTINUE` chain.
+    ///
+    /// A `lenient` value of `false` rejects each of them. Three rules
+    /// hold under either value:
+    ///
+    /// - The header must contain an `END` card.
+    /// - The file must align to the 2880-byte block.
+    /// - The data section must have the size the header declares.
+    ///
+    /// The flag is stored on the [`FitsFile`], so each per-HDU
+    /// re-parse applies the same rule.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`FitsFile::open`]. A `lenient` value of
+    /// `false` adds [`FitsError::Card`], [`FitsError::Value`] and
+    /// [`FitsError::Header`] for each deviation listed above.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with(path: impl AsRef<Path>, lenient: bool) -> Result<Self> {
         let path = path.as_ref();
@@ -146,19 +225,32 @@ impl FitsFile {
         Self::from_file(file, lenient)
     }
 
-    /// Build a `FitsFile` from an in-memory buffer. The whole buffer
-    /// is retained for the life of the `FitsFile`.
+    /// Build a `FitsFile` from an in-memory buffer.
     ///
-    /// Like [`FitsFile::open`], headers are parsed leniently by default;
-    /// use [`FitsFile::from_bytes_with`] with `lenient = false` for strict
-    /// parsing.
+    /// The `FitsFile` holds the whole buffer for its lifetime. It
+    /// parses headers leniently, as [`FitsFile::open`] does. Call
+    /// [`FitsFile::from_bytes_with`] with `lenient = false` to require
+    /// strict conformance.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`FitsFile::open`], except that no
+    /// [`FitsError::Io`] arises from opening a path. A gzipped `buf`
+    /// still yields [`FitsError::Io`] when it fails to inflate.
     pub fn from_bytes(buf: Vec<u8>) -> Result<Self> {
         Self::from_source(ByteSource::from_vec(buf)?, true)
     }
 
-    /// Build a `FitsFile` from an in-memory buffer with explicit control
-    /// over lenient parsing. See [`FitsFile::open_with`] for what the
+    /// Build a `FitsFile` from an in-memory buffer, with explicit
+    /// control over lenient parsing.
+    ///
+    /// The `buf` argument holds the whole file, and the `FitsFile`
+    /// takes ownership of it. [`FitsFile::open_with`] lists what the
     /// `lenient` flag tolerates.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`FitsFile::from_bytes`].
     pub fn from_bytes_with(buf: Vec<u8>, lenient: bool) -> Result<Self> {
         Self::from_source(ByteSource::from_vec(buf)?, lenient)
     }
@@ -381,11 +473,11 @@ impl FitsFile {
     }
 
     /// Read the unpadded data section for HDU `i` into an owned
-    /// `Vec<u8>`, **bypassing the per-HDU cache** -- for bytes the
-    /// caller consumes once and drops.
+    /// `Vec<u8>`. This bypasses the per-HDU cache. Use it for bytes
+    /// that the caller consumes once and then drops.
     ///
-    /// In-memory backings still copy, to keep the return type
-    /// uniform; use [`FitsFile::hdu`] there to avoid it.
+    /// An in-memory backing still copies, so that the return type
+    /// stays uniform. Call [`FitsFile::hdu`] there to avoid the copy.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_owned(&self, i: usize) -> Result<Vec<u8>> {
         let span = self.hdu_spans.get(i).ok_or_else(|| {
@@ -408,13 +500,15 @@ impl FitsFile {
         }
     }
 
-    /// Read the unpadded data section for HDU `i` into `dst`, which
-    /// must be exactly the logical data length. **Bypasses the cache.**
+    /// Read the unpadded data section for HDU `i` into `dst`. The
+    /// length of `dst` must equal the logical data length. This
+    /// bypasses the cache.
     ///
-    /// Lets a caller that already owns a correctly sized buffer -- the
-    /// Python reader hands us numpy's own allocation -- avoid the
-    /// intermediate `Vec` that [`read_data_owned`](Self::read_data_owned)
-    /// allocates, halving both the copies and the peak footprint.
+    /// A caller that already owns a correctly sized buffer avoids the
+    /// intermediate `Vec` that
+    /// [`read_data_owned`](Self::read_data_owned) allocates. That
+    /// halves both the copy count and the peak memory. The Python
+    /// reader passes the numpy allocation here for that reason.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_into(&self, i: usize, dst: &mut [u8]) -> Result<()> {
         let logical = self
@@ -465,15 +559,16 @@ impl FitsFile {
         }
     }
 
-    /// Read a rectangular sub-region of image HDU `i` straight from
-    /// disk into a big-endian buffer. **Does not touch the cache.**
+    /// Read a rectangular sub-region of image HDU `i` from disk into a
+    /// big-endian buffer. This does not touch the cache.
     ///
-    /// `axes`, `start` and `shape` are in FITS order (NAXIS1 fastest).
-    /// The result is `prod(shape) * bitpix.byte_size()` big-endian
-    /// bytes; the caller byteswaps.
+    /// The `axes`, `start` and `shape` arguments are in FITS order,
+    /// where `NAXIS1` varies fastest. The result holds
+    /// `prod(shape) * bitpix.byte_size()` big-endian bytes. The caller
+    /// performs the byte-order change.
     ///
-    /// Backs the Python `section[a:b]` read, so a small tile out of a
-    /// huge image costs only the tile.
+    /// This backs the Python `section[a:b]` read. A small tile out of
+    /// a large image therefore costs only that tile.
     #[cfg(feature = "python")]
     pub(crate) fn read_image_subarray_be(
         &self,
@@ -565,10 +660,18 @@ impl FitsFile {
         self.hdu_spans.is_empty()
     }
 
-    /// Parse and return the header for HDU `i` **without** reading
-    /// or caching its data section. Cheaper than [`hdu`](Self::hdu)
-    /// when the caller only needs header-level information (axes,
-    /// `BITPIX`, kind detection).
+    /// Parse and return the header for HDU `i`.
+    ///
+    /// This function reads no data section and caches nothing. It
+    /// costs less than [`hdu`](Self::hdu) when the caller needs only
+    /// header-level information, such as the axes, the `BITPIX` value,
+    /// or the kind of the HDU.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Header`] when `i` is not a valid HDU index.
+    /// - [`FitsError::Block`], [`FitsError::Card`] or
+    ///   [`FitsError::Value`] when the header fails to parse.
     pub fn parsed_header(&self, i: usize) -> Result<Header> {
         let _ = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
@@ -623,7 +726,29 @@ impl FitsFile {
         Ok(Some(out))
     }
 
-    /// Borrow the `i`-th HDU (0 = primary).
+    /// Borrow the HDU at index `i`. Index 0 is the primary HDU.
+    ///
+    /// This call reads the data section of HDU `i` if no earlier call
+    /// has read it, and caches those bytes.
+    ///
+    /// The returned variant follows the header. Index 0 gives
+    /// [`Hdu::RandomGroups`] when the header declares `GROUPS = T`
+    /// with `NAXIS1 = 0`, and [`Hdu::Image`] otherwise. A later index
+    /// dispatches on `XTENSION`: `IMAGE` gives [`Hdu::Image`], `TABLE`
+    /// gives [`Hdu::AsciiTable`], and `BINTABLE` gives
+    /// [`Hdu::BinTable`]. A `BINTABLE` that also declares `ZIMAGE = T`
+    /// gives [`Hdu::CompressedImage`] under the `compression` feature.
+    /// Any other `XTENSION` value gives [`Hdu::Conforming`].
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Header`] when `i` is not a valid HDU index.
+    /// - [`FitsError::Io`] when the data section fails to read.
+    /// - [`FitsError::MissingMandatory`] when an extension header
+    ///   omits `XTENSION`.
+    /// - [`FitsError::Data`] or [`FitsError::Header`] when the HDU
+    ///   constructor rejects the header. A `BINTABLE` with a `TFORM`
+    ///   value that does not parse is one such case.
     pub fn hdu(&self, i: usize) -> Result<Hdu<'_>> {
         let _ = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
@@ -671,22 +796,33 @@ impl FitsFile {
         }
     }
 
-    /// Iterator over all HDUs. Parse errors are wrapped in
-    /// [`FitsError::InHdu`] so the caller knows which HDU failed.
+    /// Iterate every HDU in file order.
+    ///
+    /// Each item wraps a failure in [`FitsError::InHdu`], which carries
+    /// the index of the HDU that failed. The inner error is the one
+    /// that [`FitsFile::hdu`] reports.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_iter.fits");
+    /// # let (h, d) = ImageBuilder::new(vec![2_u64, 2], vec![0.0_f32; 4])?
+    /// #     .primary(true)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
     /// use fitsy::{FitsFile, Hdu};
     ///
-    /// let f = FitsFile::open("multi.fits")?;
+    /// let f = FitsFile::open(&path)?;
     /// for (i, hdu) in f.iter().enumerate() {
     ///     match hdu? {
     ///         Hdu::Image(img) => println!("#{i}: image {:?}", img.axes()),
-    ///         Hdu::BinTable(t) => println!("#{i}: bintable {} rows", t.n_rows()),
+    ///         Hdu::BinTable(t) => println!("#{i}: table {}", t.n_rows()),
     ///         _ => println!("#{i}: other"),
     ///     }
     /// }
+    /// # std::fs::remove_file(&path)?;
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn iter(&self) -> impl Iterator<Item = Result<Hdu<'_>>> {
@@ -698,10 +834,19 @@ impl FitsFile {
         })
     }
 
-    /// Borrow the `i`-th HDU's header, with primary-HDU keywords
-    /// merged in when the extension declares `INHERIT = T` (Goddard /
-    /// IRAF convention). Structural keywords are never inherited.
-    /// For the primary HDU, returns its own header verbatim.
+    /// Return the header of HDU `i`, with primary-HDU keywords merged
+    /// in when the extension declares `INHERIT = T`.
+    ///
+    /// The merge adds a value card from the primary header only when
+    /// the extension header does not already contain that keyword. It
+    /// skips every commentary card, and it skips every structural
+    /// keyword, such as `BITPIX`, `NAXIS` and `TFIELDS`. An index of
+    /// 0, or an extension without `INHERIT = T`, returns the header of
+    /// that HDU unchanged.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`FitsFile::parsed_header`].
     pub fn header_inherited(&self, i: usize) -> Result<Header> {
         let _ = self.hdu_spans.get(i).ok_or_else(|| {
             FitsError::Header(format!("HDU index {i} out of range (len = {})", self.len()))
@@ -718,34 +863,71 @@ impl FitsFile {
         Ok(header)
     }
 
-    /// Parse the WCS for HDU `i` and alternate `alt` (`b' '` for the
-    /// primary description), with primary-HDU keywords merged in if
-    /// the extension declares `INHERIT = T`. Returns `Ok(None)` if
-    /// the (possibly inherited) header carries no recognizable WCS.
+    /// Parse the WCS of HDU `i` for alternate descriptor `alt`, after
+    /// merging inherited primary-HDU keywords.
     ///
-    /// This is a convenience shortcut equivalent to
+    /// Pass `' '` for `alt` to select the primary description. The
+    /// result is `Ok(None)` when the merged header carries no WCS for
+    /// that descriptor. The call is equivalent to
     /// `Wcs::from_header(&self.header_inherited(i)?, alt)`.
+    ///
+    /// This function does not resolve a `-TAB` lookup table. Use
+    /// [`FitsFile::wcs`] when the description needs one.
+    ///
+    /// # Errors
+    ///
+    /// - The conditions of [`FitsFile::header_inherited`].
+    /// - [`FitsError::Wcs`] when the header declares a WCS that the
+    ///   parser rejects, such as an unknown projection code.
     pub fn wcs_inherited(&self, i: usize, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         let header = self.header_inherited(i)?;
         crate::wcs::Wcs::from_header(&header, alt)
     }
 
-    /// Look up an extension by `EXTNAME`, optionally restricting to an
-    /// `EXTVER`, and return the first match. Sec.4.4.2.6 makes
-    /// `EXTNAME` case-sensitive after trimming trailing spaces;
-    /// `EXTVER` defaults to 1.
+    /// Look up an extension by `EXTNAME` and return the first match.
+    ///
+    /// Standard Sec.4.4.2.6 makes `EXTNAME` case-sensitive once
+    /// trailing spaces are trimmed, so `name` must match exactly. A
+    /// `ver` of `Some(v)` also requires `EXTVER = v`. An extension
+    /// without an `EXTVER` card counts as version 1. A `ver` of `None`
+    /// accepts any version.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Header`] when no HDU matches `name`, or when no
+    ///   HDU matches both `name` and `ver`.
+    /// - The conditions of [`FitsFile::hdu`] for the matched HDU.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
+    /// # use fitsy::{BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_by_name.fits");
+    /// # let empty: Vec<f32> = Vec::new();
+    /// # let (ph, pd) = ImageBuilder::new(Vec::<u64>::new(), empty)?
+    /// #     .primary(true)
+    /// #     .build()?;
+    /// # let mut b = BinTableBuilder::new();
+    /// # b.add_column("TIME", BinFieldKind::F64, 1, None, None)?;
+    /// # b.extname("EVENTS");
+    /// # let mut rows = Vec::new();
+    /// # for v in [1.0_f64, 2.0, 3.0] {
+    /// #     rows.extend_from_slice(&v.to_be_bytes());
+    /// # }
+    /// # let (th, td) = b.build(3, rows)?;
+    /// # let mut w = FitsWriter::new(std::fs::File::create(&path)?);
+    /// # w.write_hdu(&ph, &pd)?;
+    /// # w.write_hdu(&th, &td)?;
+    /// # w.finish()?;
     /// use fitsy::{FitsFile, Hdu};
     ///
-    /// let f = FitsFile::open("hst.fits")?;
+    /// let f = FitsFile::open(&path)?;
     /// let Hdu::BinTable(events) = f.hdu_by_name("EVENTS", None)? else {
-    ///     panic!("EVENTS extension is not a binary table");
+    ///     panic!("the EVENTS extension is not a binary table");
     /// };
-    /// println!("{} events", events.n_rows());
-    /// # Ok::<(), fitsy::FitsError>(())
+    /// assert_eq!(events.n_rows(), 3);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn hdu_by_name(&self, name: &str, ver: Option<i64>) -> Result<Hdu<'_>> {
         let candidates: &[usize] = self.extname_index.get(name).map_or(&[], Vec::as_slice);
@@ -784,12 +966,18 @@ impl FitsFile {
 
     /// Re-serialize every HDU and write the result to `path`.
     ///
-    /// The output is valid FITS but not byte-identical to the source:
-    /// number formatting, comment padding and `CONTINUE` chunking may
-    /// differ. Use [`std::fs::copy`] for an exact copy.
+    /// The output is valid FITS. It is not byte-identical to the
+    /// source, because number formatting, comment padding and
+    /// `CONTINUE` chunking can differ. Call [`std::fs::copy`] for an
+    /// exact copy.
     ///
-    /// `overwrite = false` returns [`std::io::ErrorKind::AlreadyExists`]
-    /// if the destination already exists.
+    /// # Errors
+    ///
+    /// - [`FitsError::Io`] when `path` cannot be created or written.
+    ///   An `overwrite` value of `false` gives
+    ///   [`std::io::ErrorKind::AlreadyExists`] when `path` exists.
+    /// - The conditions of [`FitsFile::hdu`] for each HDU, because
+    ///   this function re-reads every HDU before it writes.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write(&self, path: impl AsRef<Path>, overwrite: bool) -> Result<()> {
         use crate::io::writer::FitsWriter;
@@ -813,10 +1001,18 @@ impl FitsFile {
         Ok(())
     }
 
-    /// Convenience accessor for an image HDU. Returns the image
-    /// directly (auto-decompressing tile-compressed images when the
-    /// `compression` feature is enabled). Errors if HDU `i` is not an
-    /// image-shaped HDU.
+    /// Return HDU `i` as an image, decompressing it when needed.
+    ///
+    /// An [`Hdu::Image`] comes back as [`ImageOrOwned::Borrowed`]. An
+    /// [`Hdu::CompressedImage`] is decoded first and comes back as
+    /// [`ImageOrOwned::Owned`].
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when HDU `i` is neither an image
+    ///   nor a tile-compressed image.
+    /// - [`FitsError::Data`] when a tile fails to decompress.
+    /// - The conditions of [`FitsFile::hdu`].
     #[cfg(feature = "compression")]
     pub fn image(&self, i: usize) -> Result<ImageOrOwned<'_>> {
         match self.hdu(i)? {
@@ -829,12 +1025,25 @@ impl FitsFile {
         }
     }
 
-    /// Parse the WCS for HDU `i`, alternate `alt` (`' '` for the
-    /// primary), loading any `-TAB` lookup extensions from this file
-    /// so the result works with no further setup.
+    /// Parse the WCS of HDU `i` for alternate descriptor `alt`.
     ///
-    /// `Ok(None)` when the HDU has no WCS for that alternate; an error
-    /// when the HDU is not image-shaped.
+    /// Pass `' '` for `alt` to select the primary description. This
+    /// function loads any `-TAB` lookup extension from the same file,
+    /// so the returned [`Wcs`](crate::wcs::Wcs) needs no further
+    /// setup. The result is `Ok(None)` when the header carries no WCS
+    /// for that descriptor.
+    ///
+    /// This function does not merge inherited primary-HDU keywords.
+    /// Call [`FitsFile::wcs_inherited`] when the extension declares
+    /// `INHERIT = T`.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when HDU `i` is not image-shaped.
+    /// - [`FitsError::Wcs`] when the header declares a WCS that the
+    ///   parser rejects, or when a `-TAB` extension named by the
+    ///   header is absent or has the wrong shape.
+    /// - The conditions of [`FitsFile::parsed_header`].
     pub fn wcs(&self, i: usize, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         // A WCS is entirely in the header, and headers are already
         // loaded; `hdu(i)` would read the data section too. Tile
@@ -866,12 +1075,22 @@ impl FitsFile {
     }
 
     /// Parse the pixel-list WCS of binary-table HDU `i` (Standard
-    /// Sec.8.2, Table 22): the `TCTYPn`/`TCRVLn`/... form that
-    /// georeferences scalar coordinate columns, as every high-energy
-    /// event list does.
+    /// Sec.8.2, Table 22).
     ///
-    /// `Ok(None)` when the table carries no pixel-list keyword for
-    /// `alt`; an error when the HDU is not a binary table.
+    /// A pixel list uses the `TCTYPn` and `TCRVLn` keyword family to
+    /// georeference scalar coordinate columns. An event list from a
+    /// high-energy instrument carries this form.
+    ///
+    /// The result is `Ok(None)` when the table carries no pixel-list
+    /// keyword for `alt`. The `colax` field of the result names the
+    /// column that feeds each axis.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when HDU `i` is not a `BINTABLE`.
+    /// - [`FitsError::Wcs`] when the keywords describe a WCS that the
+    ///   parser rejects, or when a `-TAB` extension is absent.
+    /// - The conditions of [`FitsFile::parsed_header`].
     ///
     /// # Examples
     ///
@@ -880,7 +1099,6 @@ impl FitsFile {
     ///
     /// let f = FitsFile::open("acis_evt2.fits")?;
     /// if let Some(t) = f.pixel_list_wcs(1, ' ')? {
-    ///     // `colax` names the columns that feed each axis.
     ///     println!("sky columns {:?}", t.colax);
     ///     let sky = t.wcs.pixel_to_world(&[4096.0, 4096.0])?;
     ///     println!("{sky:?}");
@@ -898,9 +1116,17 @@ impl FitsFile {
         Ok(Some(t))
     }
 
-    /// Parse the WCS of the image held in vector cells of column
-    /// `column` (1-based) of binary-table HDU `i` (Standard Sec.8.2,
-    /// Table 22, `iCTYPn` form).
+    /// Parse the WCS of the image held in the vector cells of column
+    /// `column` of binary-table HDU `i`.
+    ///
+    /// This is the `iCTYPn` form of Standard Sec.8.2, Table 22. The
+    /// `column` argument is 1-based, as the `TFORMn` numbering is. The
+    /// result is `Ok(None)` when the table carries no such keyword for
+    /// `alt`.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`FitsFile::pixel_list_wcs`].
     pub fn column_wcs(
         &self,
         i: usize,
@@ -931,11 +1157,20 @@ impl FitsFile {
         }
     }
 
-    /// Verify `CHECKSUM` and `DATASUM` for every HDU that has them,
-    /// in HDU order. HDUs with neither are skipped.
+    /// Verify the `CHECKSUM` and `DATASUM` cards of every HDU.
     ///
-    /// On-disk data is streamed in 1-MiB chunks and not cached, so
-    /// verifying a 50-GB file does not pin it in RAM.
+    /// The result holds one [`ChecksumReport`] per HDU, in file order.
+    /// An HDU that declares neither card reports `None` for both
+    /// verdicts, and this function skips its data scan.
+    ///
+    /// An on-disk file streams through a 1 MiB buffer and populates no
+    /// cache, so verifying a large file does not hold it in memory.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Io`] when a data section fails to read.
+    /// - [`FitsError::Block`], [`FitsError::Card`] or
+    ///   [`FitsError::Value`] when a header fails to re-parse.
     pub fn verify_checksums(&self) -> Result<Vec<ChecksumReport>> {
         // Streaming chunk size for the on-disk path. 1 MiB is a
         // good balance between syscall overhead and peak RSS.
@@ -1047,7 +1282,11 @@ pub struct ChecksumReport {
     pub datasum_ok: Option<bool>,
 }
 
-/// Output element of [`FitsFile::iter_decompressed`].
+/// One item from [`FitsFile::iter_decompressed`].
+///
+/// A tile-compressed image arrives as [`Decompressed::Image`], already
+/// decoded into an [`OwnedImage`](crate::OwnedImage). Every other HDU
+/// arrives unchanged as [`Decompressed::Hdu`].
 #[cfg(feature = "compression")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -1196,10 +1435,10 @@ fn block_contains_end(block: &[u8], lenient: bool) -> bool {
         .any(|c| Card::parse_with(c, 0, lenient).is_ok_and(|card| card.is_end()))
 }
 
-/// True if `probe` could be the first card of a conforming extension HDU.
-/// Every conforming extension begins with `XTENSION` in columns 1-8
-/// (Standard Sec.7.1.3); bytes that don't are treated as trailing
-/// non-FITS junk rather than parsed as a header.
+/// True when `probe` could be the first card of a conforming
+/// extension HDU. Standard Sec.7.1.3 requires `XTENSION` in columns 1
+/// to 8. Bytes that do not start that way are trailing junk, so the
+/// scan stops rather than parsing them as a header.
 fn looks_like_extension_start(probe: &[u8]) -> bool {
     use crate::header::card::CARD_SIZE;
     probe.len() >= CARD_SIZE && probe.starts_with(b"XTENSION")

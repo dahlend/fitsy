@@ -1,6 +1,10 @@
-//! WCS pixel-to-sky coordinate transforms using a real FITS image.
+//! Transform pixel coordinates to sky coordinates.
 //!
-//! Run from the repo root with:
+//! This reads the bundled NGC 2403 plate scan, which carries a `TAN`
+//! WCS with SIP distortion. It shows the single-point and batch
+//! transforms, the inverse, and the local pixel scale.
+//!
+//! Run from the repository root:
 //!
 //!     cargo run --example wcs
 
@@ -41,8 +45,8 @@ fn main() -> Result<(), fitsy::FitsError> {
     let world = wcs.pixel_to_world(&[724.0, 1086.0])?;
     println!("world:  {world:?}");
 
-    // Parsing directly from a Header skips -TAB resolution and is
-    // lighter-weight when you know the image has no tabular axes.
+    // Parsing straight from a Header skips -TAB resolution. It costs
+    // less when the image carries no tabular axis.
     if let Hdu::Image(img) = f.hdu(0)? {
         let _wcs2 = Wcs::from_header(img.header(), ' ')?.expect("no WCS");
     }

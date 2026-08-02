@@ -7,11 +7,11 @@
 //! `V2F`, `V2W`, `V2A`) including the air<->vacuum dispersion relation
 //! of Sec.4, and the `-GRI` / `-GRA` grism functions of Sec.5.1.
 //!
-//! Units: all internal computation is performed in **SI**:
-//!   - frequency-class (`FREQ`, `ENER`, `WAVN`) in Hz;
-//!   - wavelength-class (`WAVE`, `AWAV`) in m;
-//!   - velocity-class (`VRAD`, `VOPT`, `VELO`) in m/s;
-//!   - dimensionless (`ZOPT`, `BETA`).
+//! Every internal computation runs in SI units:
+//!   - the frequency class (`FREQ`, `ENER`, `WAVN`) uses Hz;
+//!   - the wavelength class (`WAVE`, `AWAV`) uses m;
+//!   - the velocity class (`VRAD`, `VOPT`, `VELO`) uses m/s;
+//!   - the dimensionless class (`ZOPT`, `BETA`) uses no unit.
 //!
 //! `CUNIT`-to-SI conversion is applied on the boundary by
 //! [`to_si_factor`]. Grism parameters are always SI regardless of
@@ -20,8 +20,8 @@
 //! Two deliberate departures from the letter of Paper III, both
 //! documented where they live:
 //!
-//! * the air refractivity is Cox (2000) at 15 degC rather than the
-//!   paper's ~0 degC IUGG formula, matching `wcslib` -- see
+//! * the air refractivity uses the Cox (2000) form at 15 degC rather
+//!   than the near-0 degC IUGG formula of the paper. See
 //!   [`air_refractive_index`];
 //! * every algorithm is evaluated by pivoting through absolute
 //!   frequency rather than the paper's `S -> P -> X` chain, so a
@@ -42,10 +42,10 @@ pub use crate::units::constants::raw::SPEED_OF_LIGHT;
 /// Planck constant, J*s (CODATA 2018, exact since 2019 SI redef).
 pub use crate::units::constants::raw::PLANCK;
 
-/// Refractive index of dry air, for `lambda_a` in **metres**.
+/// Refractive index of dry air. The `lambda_a` argument is in metres.
 ///
-/// This is the Cox (2000) / *Allen's Astrophysical Quantities* form,
-/// for air at **15 degC and 760 mmHg**:
+/// This is the Cox (2000) form, from Allen's Astrophysical Quantities,
+/// for air at 15 degrees Celsius and 760 mmHg:
 ///
 /// ```text
 /// n = 1 + 1e-6 (64.328 + 29498.1/(146 - s^2) + 255.4/(41 - s^2))
@@ -53,17 +53,18 @@ pub use crate::units::constants::raw::PLANCK;
 ///
 /// with `s = 1/lambda_a` in inverse micrometres.
 ///
-/// Deliberately not Paper III eq. (7), which describes air at ~0 degC
-/// and so gives a refractivity ~5% higher. This matches `wcslib` and
-/// `astropy`, at ~15 ppm of wavelength (0.08 A at 5000 A) on any code
-/// that crosses between air and vacuum.
+/// This is not Paper III eq. (7). That equation describes air near 0
+/// degrees Celsius, and so gives a refractivity about 5 percent
+/// higher. The two forms differ by about 15 parts per million of
+/// wavelength, which is 0.08 A at 5000 A. The difference appears on
+/// any code that crosses between air and vacuum.
 ///
 /// # Domain
 ///
-/// The resonant denominators vanish at 0.0828 um and 0.1562 um, so the
-/// formula is meaningless in the far UV; it is intended for
-/// `lambda_a > 200 nm`. The conversions built on it reject arguments
-/// near the poles rather than returning a diverging value.
+/// The resonant denominators vanish at 0.0828 um and 0.1562 um. The
+/// formula is therefore meaningless in the far UV, and it applies to
+/// `lambda_a > 200 nm`. Each conversion built on it rejects an
+/// argument near a pole rather than returning a diverging value.
 #[must_use]
 pub fn air_refractive_index(lambda_a_m: f64) -> f64 {
     let (_, d1, d2) = air_terms(lambda_a_m);
@@ -473,7 +474,7 @@ pub struct SpectralAxis {
     /// Non-linear regridding algorithm, if any. `None` => linear in
     /// pixel.
     pub algorithm: Option<SpectralAlgorithm>,
-    /// `CRVAL` value of `S` in **SI units**.
+    /// `CRVAL` value of `S`, in SI units.
     pub crval_si: f64,
     /// Rest frequency (Hz), if supplied via `RESTFRQ`.
     pub restfrq: Option<f64>,
@@ -489,9 +490,16 @@ pub struct SpectralAxis {
 impl SpectralAxis {
     /// Build a spectral axis from its parsed pieces.
     ///
-    /// `crval_user` and `cunit` are taken as the user-supplied
-    /// CRVAL/CUNIT for this axis; they are converted to SI via
-    /// [`to_si_factor`].
+    /// The `crval_user` and `cunit` arguments hold the `CRVAL` and
+    /// `CUNIT` values of this axis as the header writes them.
+    /// [`to_si_factor`] converts them to SI.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `cunit` names no unit that matches the
+    /// spectral kind, when the algorithm needs a rest frequency or a
+    /// rest wavelength that the header omits, or when a grism
+    /// algorithm carries incomplete `PVi_m` parameters.
     #[allow(
         clippy::too_many_arguments,
         reason = "one argument per independent FITS keyword; grouping them would only move the same fields behind a builder"
@@ -568,8 +576,14 @@ impl SpectralAxis {
         })
     }
 
-    /// Forward: intermediate world coord (in CUNIT, relative to
-    /// CRVAL) -> user-facing world value `S` (in CUNIT).
+    /// Forward step, from an intermediate world coordinate to the
+    /// world value `S`. Both are in `CUNIT`, and the input is relative
+    /// to `CRVAL`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when a `-LOG` axis has `CRVAL = 0`, or when
+    /// the point lies outside the domain of the algorithm.
     pub fn intermediate_to_world(&self, w_user: f64) -> Result<f64> {
         let w_si = w_user * self.unit_to_si;
         let s_si = match self.algorithm {
@@ -595,8 +609,17 @@ impl SpectralAxis {
         Ok(s_si / self.unit_to_si)
     }
 
-    /// Inverse: user-facing world value `S` (in CUNIT) -> intermediate
-    /// world coord (in CUNIT, relative to CRVAL).
+    /// Inverse step, from the world value `S` to an intermediate
+    /// world coordinate. Both are in `CUNIT`, and the result is
+    /// relative to `CRVAL`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - A `-LOG` axis has `CRVAL = 0`.
+    /// - `S` and `CRVAL` have opposite signs on a `-LOG` axis.
+    /// - The point lies outside the domain of the algorithm.
     pub fn world_to_intermediate(&self, s_user: f64) -> Result<f64> {
         let s_si = s_user * self.unit_to_si;
         let w_si = match self.algorithm {

@@ -1,6 +1,6 @@
 """Read image pixels: NAXIS / numpy axis order, dtype handling.
 
-Run from the repo root:
+Run from the repository root:
 
     python examples/python/reading_images.py
 """

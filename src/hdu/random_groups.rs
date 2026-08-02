@@ -1,15 +1,40 @@
-//! Random Groups primary HDU (Standard Sec.6).
+//! Random-groups primary HDU (Standard Sec.6).
 //!
-//! A Random Groups primary HDU is signalled by `NAXIS1 = 0`,
-//! `NAXIS >= 2`, and `GROUPS = T` in the primary header. The data
-//! section consists of `GCOUNT` repetitions of:
+//! # Purpose
 //!
-//! 1. `PCOUNT` *parameter* values (BITPIX-typed, big-endian);
-//! 2. `NAXIS2 x NAXIS3 x ... x NAXISn` *data array* values.
+//! [`RandomGroupsHdu`] reads one random-groups primary HDU. Three
+//! header cards mark this form: `NAXIS1 = 0`, `NAXIS` of 2 or more,
+//! and `GROUPS = T`.
 //!
-//! Random Groups was devised for radio interferometry visibilities.
-//! Sec.6.4 discourages it for new files, but a lot of legacy data
-//! still uses it.
+//! The data section holds `GCOUNT` groups. Each group holds `PCOUNT`
+//! parameter values, then `NAXIS2 * NAXIS3 * ... * NAXISn` data-array
+//! values. Every value has the type that `BITPIX` names, in big-endian
+//! order.
+//!
+//! This module is read only. The crate writes no random-groups HDU.
+//!
+//! # Layout
+//!
+//! [`GroupParameter`] describes one parameter slot from its `PTYPEn`,
+//! `PSCALn` and `PZEROn` cards. [`RandomGroupsHdu::group_raw`] reads
+//! one group without scaling.
+//! [`RandomGroupsHdu::group_parameters`] applies the scaling and
+//! returns one value per slot.
+//! [`RandomGroupsHdu::group_parameter_by_name`] sums the slots that
+//! share a name.
+//!
+//! # Design constraints
+//!
+//! Sec.6.1.2 allows the same `PTYPEn` name on more than one slot, and
+//! defines the value of that parameter as the sum of those slots. A
+//! writer uses this to split a date across two slots and gain
+//! precision beyond what `BITPIX` holds. Two accessors therefore
+//! differ. [`RandomGroupsHdu::group_parameters`] returns each slot
+//! separately, and
+//! [`RandomGroupsHdu::group_parameter_by_name`] returns the sum.
+//!
+//! Sec.6.4 discourages this HDU type for a new file. Legacy radio
+//! interferometry data still uses it.
 
 use crate::data::encoding::{Bitpix, Pixel};
 use crate::error::{FitsError, Result};
@@ -25,10 +50,10 @@ use crate::header::Header;
 pub struct GroupParameter {
     /// 1-based parameter index, as in `PTYPEn`.
     pub index: usize,
-    /// `PTYPEn`, trimmed; empty when the keyword is absent. Sec.6.1.2
-    /// lets the same name repeat across slots, in which case the
-    /// physical values are summed -- see
-    /// [`RandomGroupsHdu::group_parameter_by_name`].
+    /// `PTYPEn`, trimmed. This is empty when the keyword is absent.
+    /// Sec.6.1.2 lets the same name repeat across slots, and
+    /// [`RandomGroupsHdu::group_parameter_by_name`] then sums their
+    /// physical values.
     pub name: String,
     /// `PSCALn`, default 1.0.
     pub pscal: f64,
@@ -160,11 +185,17 @@ impl<'a> RandomGroupsHdu<'a> {
         self.gcount
     }
 
-    /// Read group `g` as raw native-typed values: returns the
-    /// `(parameters, data_array)` pair, both decoded big-endian
-    /// without `BZERO`/`BSCALE`/`PZERO`/`PSCAL` applied.
+    /// Read group `g` as raw native-typed values.
     ///
-    /// `T` must match `BITPIX`.
+    /// The result is a `(parameters, data_array)` pair. Both parts
+    /// decode from big-endian bytes with no scaling, so neither
+    /// `BZERO`, `BSCALE`, `PZEROn` nor `PSCALn` applies. The type `T`
+    /// must match `BITPIX`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `T` does not match `BITPIX`, or when
+    /// `g` is not less than `GCOUNT`.
     pub fn group_raw<T: Pixel>(&self, g: u64) -> Result<(Vec<T>, Vec<T>)> {
         if T::BITPIX != self.bitpix {
             return Err(FitsError::Data(format!(
@@ -203,10 +234,9 @@ impl<'a> RandomGroupsHdu<'a> {
         &self.parameters
     }
 
-    /// Distinct `PTYPEn` names, in order of first appearance, with
-    /// unnamed slots skipped. A name that occurs more than once is
-    /// listed once: Sec.6.1.2 makes the repeats components of a single
-    /// higher-precision parameter.
+    /// Distinct `PTYPEn` names, in order of first appearance. This
+    /// skips an unnamed slot, and it lists a repeated name once.
+    /// Sec.6.1.2 makes those repeats components of one parameter.
     #[must_use]
     pub fn parameter_names(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
@@ -218,14 +248,19 @@ impl<'a> RandomGroupsHdu<'a> {
         out
     }
 
-    /// Physical value of every parameter slot of group `g`, one entry
-    /// per `PCOUNT` slot, with eq. 6.1 applied
-    /// (`PZEROn + PSCALn x stored`).
+    /// Physical value of every parameter slot of group `g`.
     ///
-    /// Slots are returned individually; the Sec.6.1.2 rule that repeated
-    /// `PTYPEn` names are summed is *not* applied here, since the caller
-    /// may want the components. Use
+    /// The result holds one entry per `PCOUNT` slot, with eq. 6.1
+    /// applied, so each value is `PZEROn + PSCALn * stored`.
+    ///
+    /// This returns each slot separately. It does not apply the
+    /// Sec.6.1.2 rule that sums slots sharing a `PTYPEn` name, because
+    /// a caller may want the components. Call
     /// [`Self::group_parameter_by_name`] for the summed value.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `g` is not less than `GCOUNT`.
     pub fn group_parameters(&self, g: u64) -> Result<Vec<f64>> {
         let raw = self.group_parameters_raw(g)?;
         Ok(raw
@@ -235,16 +270,23 @@ impl<'a> RandomGroupsHdu<'a> {
             .collect())
     }
 
-    /// Physical value of the parameter called `name` in group `g`,
-    /// or `None` if no `PTYPEn` carries that name.
+    /// Physical value of the parameter named `name` in group `g`.
     ///
-    /// Sec.6.1.2: "If the `PTYPEn` keywords for more than one value of
-    /// `n` have the same associated name in the value field, then the
-    /// data value for the parameter of that name is to be obtained by
-    /// adding the derived data values of the corresponding parameters."
-    /// This is how AIPS splits a date across two slots to get more
-    /// precision than `BITPIX` allows, so the sum is the only correct
-    /// reading. Names are compared after trimming, case-sensitively.
+    /// The result is `Ok(None)` when no `PTYPEn` carries that name.
+    /// The comparison trims `name` and is case-sensitive.
+    ///
+    /// When more than one slot carries the name, this returns their
+    /// sum. Sec.6.1.2 defines the value that way:
+    ///
+    /// > If the `PTYPEn` keywords for more than one value of `n` have
+    /// > the same associated name in the value field, then the data
+    /// > value for the parameter of that name is to be obtained by
+    /// > adding the derived data values of the corresponding
+    /// > parameters.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `g` is not less than `GCOUNT`.
     pub fn group_parameter_by_name(&self, g: u64, name: &str) -> Result<Option<f64>> {
         let want = name.trim();
         if !self.parameters.iter().any(|p| p.name == want) {

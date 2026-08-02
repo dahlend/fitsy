@@ -1,6 +1,9 @@
-//! Build and write a 2D image FITS file from scratch.
+//! Build and write a two-dimensional image from scratch.
 //!
-//! Run from the repo root:
+//! This shows `ImageBuilder` composing the mandatory keywords, adding
+//! a card of its own, and handing the result to `FitsWriter`.
+//!
+//! Run from the repository root:
 //!
 //!     cargo run --example write_image
 

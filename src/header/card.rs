@@ -1,4 +1,13 @@
 //! Card scanner (Standard Sec.4.1).
+//!
+//! A FITS header is a sequence of 80-byte cards. This module splits
+//! one card into its keyword, its kind and its raw body bytes, and it
+//! encodes those three parts back into 80 bytes.
+//!
+//! [`Card::parse_with`] does the split. It classifies each card as
+//! [`CardKind::End`], [`CardKind::Commentary`], [`CardKind::Continue`]
+//! or [`CardKind::Value`], and it leaves the body unparsed. The
+//! [`value`](crate::header::value) module parses that body.
 
 use crate::error::{FitsError, Result};
 
@@ -11,7 +20,7 @@ pub const KEYWORD_LEN: usize = 8;
 /// Length of the value indicator (`"= "`, bytes 9-10 of a value card).
 pub const VALUE_INDICATOR_LEN: usize = 2;
 
-/// Categorisation of a card by its keyword field.
+/// The kind of a card, decided from its keyword field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardKind {
     /// `END` card.
@@ -27,30 +36,51 @@ pub enum CardKind {
 /// A single 80-byte card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
-    /// 0..=8 chars, ASCII upper/digit/`-`/`_`, or empty for blank.
+    /// Zero to eight characters of upper-case ASCII, digits, `-` or
+    /// `_`. This is empty for a blank keyword.
     pub keyword: String,
     /// Which of the Sec.4.1.2 card shapes this is.
     pub kind: CardKind,
-    /// Raw bytes of the value-and-comment field (bytes 11..80) for
-    /// value cards, or bytes 9..80 for commentary/`END`. Trailing
-    /// spaces are kept.
+    /// Raw bytes of the value-and-comment field. A value card puts
+    /// this in bytes 11 to 80. A commentary or `END` card puts it in
+    /// bytes 9 to 80. This keeps every trailing space.
     pub body: Vec<u8>,
 }
 
 impl Card {
-    /// Parse a single 80-byte card in strict mode. `offset` is the byte
-    /// offset within the file (used in error messages).
+    /// Parse a single 80-byte card in strict mode.
+    ///
+    /// The `bytes` argument must be exactly 80 bytes long. The
+    /// `offset` argument is the byte offset of the card within the
+    /// file, and it appears in an error message.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Card::parse_with`] with `lenient` set to
+    /// `false`.
     pub fn parse(bytes: &[u8], offset: u64) -> Result<Self> {
         Self::parse_with(bytes, offset, false)
     }
 
-    /// Parse a single 80-byte card. When `lenient`, non-ASCII bytes
-    /// anywhere in the card become spaces and lower-case keyword
-    /// letters are folded up, so a corrupted value still loads;
-    /// otherwise such a byte in the keyword or value field is an error.
+    /// Parse a single 80-byte card.
     ///
-    /// Comments are always lenient -- this scanner never rejects them,
-    /// and they are sanitized downstream.
+    /// The `bytes` argument must be exactly 80 bytes long. The
+    /// `offset` argument is the byte offset of the card within the
+    /// file, and it appears in an error message.
+    ///
+    /// A `lenient` value of `true` turns each non-ASCII byte into a
+    /// space and folds a lower-case keyword letter to upper case, so a
+    /// corrupted card still loads. A value of `false` rejects such a
+    /// byte in the keyword field or the value field.
+    ///
+    /// A comment is lenient under either value. This scanner never
+    /// rejects one, and a later stage sanitizes it.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Card`] when `bytes` is not exactly 80 bytes long,
+    /// or when `lenient` is `false` and the keyword field holds a byte
+    /// outside upper-case ASCII, digits, `-`, `_` and space.
     pub fn parse_with(bytes: &[u8], offset: u64, lenient: bool) -> Result<Self> {
         if bytes.len() != CARD_SIZE {
             return Err(FitsError::Card {
@@ -265,8 +295,17 @@ fn is_hierarch_char(b: u8) -> bool {
     matches!(b, 0x21..=0x7E) && b != b'='
 }
 
-/// Encode a card from its components into 80 bytes, padding with spaces.
-/// `body` must not exceed `CARD_SIZE - body_offset` bytes.
+/// Encode a card from its parts into 80 bytes, padded with spaces.
+///
+/// A [`CardKind::Value`] card places `= ` in columns 9 and 10, so its
+/// body starts at column 11. Every other kind starts its body at
+/// column 9.
+///
+/// # Errors
+///
+/// [`FitsError::Card`] when `keyword` exceeds 8 characters, when it
+/// holds a character outside upper-case ASCII, digits, `-`, `_` and
+/// space, or when `body` does not fit in the columns that remain.
 pub fn encode(keyword: &str, kind: &CardKind, body: &[u8]) -> Result<[u8; CARD_SIZE]> {
     if keyword.len() > KEYWORD_LEN {
         return Err(FitsError::Card {

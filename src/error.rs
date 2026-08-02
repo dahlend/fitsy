@@ -1,14 +1,39 @@
-//! Error type for the crate.
+//! The error type of the crate.
+//!
+//! [`FitsError`] is the single error type that every fallible function
+//! here returns. Its variants group by the level of the format they
+//! belong to: block, card, value, header and data. A caller therefore
+//! tells a structural violation from a semantic one without matching
+//! on message text.
+//!
+//! The enum is `non_exhaustive`. A new variant is not a breaking
+//! change, so a caller matches with a wildcard arm.
 
 use std::fmt;
 use std::io;
 
-/// Every way reading or writing a FITS file can fail.
+/// Every way that reading or writing a FITS file can fail.
 ///
-/// Variants are grouped by the level of the format they belong to --
-/// block, card, value, header, data -- so a caller can tell a
-/// structural violation from a semantic one without matching on the
+/// The variants group by the level of the format they belong to:
+/// block, card, value, header and data. A caller therefore tells a
+/// structural violation from a semantic one without matching on
 /// message text.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::{FitsError, Header};
+///
+/// // A keyword outside the FITS character set is a header-level error.
+/// let mut h = Header::empty();
+/// let err = h.push("bad key!", 1_i64, None).unwrap_err();
+///
+/// match err {
+///     FitsError::Header(msg) => assert!(msg.contains("bad key!")),
+///     other => panic!("expected a header error, got {other:?}"),
+/// }
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FitsError {

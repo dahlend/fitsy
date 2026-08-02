@@ -107,8 +107,13 @@ pub struct Sin {
     pub eta: f64,
 }
 impl Sin {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. This form takes its parameters
+    /// without a validity constraint.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let xi = pv2.get(1).copied().unwrap_or(0.0);
         let eta = pv2.get(2).copied().unwrap_or(0.0);
@@ -196,8 +201,13 @@ pub struct Zpn {
     pub coeffs: Vec<f64>,
 }
 impl Zpn {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when every polynomial coefficient in the
+    /// `PV2_m` table is 0.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let mut coeffs: Vec<f64> = pv2.to_vec();
         while coeffs.len() > 2 && coeffs.last().copied() == Some(0.0) {
@@ -301,8 +311,14 @@ pub struct Azp {
     pub gamma: f64,
 }
 impl Azp {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_1` (`mu`) is -1, which makes the
+    /// projection singular, or when `PV2_2` (`gamma`) reaches 90
+    /// degrees in magnitude.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let mu = pv2.get(1).copied().unwrap_or(0.0);
         let gamma = pv2.get(2).copied().unwrap_or(0.0);
@@ -462,8 +478,13 @@ pub struct Szp {
     zp: f64,
 }
 impl Szp {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_3` (`theta_c`) exceeds 90 degrees
+    /// in magnitude.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let mu = pv2.get(1).copied().unwrap_or(0.0);
         let phi_c = pv2.get(2).copied().unwrap_or(0.0);
@@ -580,8 +601,13 @@ pub struct Air {
     cb: f64,
 }
 impl Air {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_1` (`theta_b`) lies outside the
+    /// range -90 to 90 degrees.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let theta_b = pv2.get(1).copied().unwrap_or(90.0);
         if !(-90.0..=90.0).contains(&theta_b) {
@@ -768,10 +794,10 @@ mod tests {
     /// latitudes share one radius and the inverse resolves to the
     /// branch holding the reference point.
     ///
-    /// Regression: the forward accepted the hidden branch, so the
-    /// antipode of the reference point landed on the *reference pixel
-    /// itself* -- at `mu = 2`, both `theta = 90` and `theta = -90` give
-    /// `R = 0`. `wcslib` reports those points as invalid.
+    /// Regression: the forward step accepted the hidden branch, so
+    /// the antipode of the reference point landed on the reference
+    /// pixel itself. At `mu = 2`, both `theta = 90` and `theta = -90`
+    /// give `R = 0`.
     #[test]
     fn azp_refuses_the_hidden_branch() {
         let azp = Azp::from_pv(&[0.0, 2.0, 0.0]).unwrap();

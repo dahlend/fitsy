@@ -1,9 +1,9 @@
 //! `Header` accessors for keyword units.
 //!
-//! The unit *strings* themselves -- Sec.4.3 syntax, the base tables,
-//! and the `[unit]` comment convention -- live in [`crate::units`].
-//! This module is only the two `Header` methods that apply them, kept
-//! here alongside the other topic-grouped `impl Header` blocks.
+//! [`crate::units`] holds the unit strings themselves: the Sec.4.3
+//! syntax, the base tables, and the `[unit]` comment convention. This
+//! module holds only the `Header` methods that apply them. It sits
+//! here with the other `impl Header` blocks grouped by topic.
 
 use crate::header::Header;
 use crate::units::{Unit, parse_comment_unit, parse_unit_lenient};
@@ -30,9 +30,12 @@ impl Header {
     /// read leniently, so `[degrees]` and `[sec]` resolve alongside the
     /// strict Sec.4.3 spellings.
     ///
-    /// `None` if the keyword is absent or non-numeric, if either unit
-    /// fails to parse, or if the two carry different dimensions -- a
-    /// value annotated `[s]` cannot be reported in metres.
+    /// The result is `None` in three cases:
+    ///
+    /// - The keyword is absent, or its value is not numeric.
+    /// - Either unit string fails to parse.
+    /// - The two units carry different dimensions. A value annotated
+    ///   `[s]` cannot be reported in metres.
     #[must_use]
     pub fn real_in_unit(&self, key: &str, target_unit: &str) -> Option<f64> {
         let v = self.optional_real(key)?;
@@ -48,15 +51,21 @@ impl Header {
     /// Value of `key` converted to the canonical unit for its dimension
     /// (metre, kilogram, second, degree, ...).
     ///
-    /// The source unit comes from the `[unit]` comment annotation, read
-    /// leniently. Unlike [`Self::real_in_unit`], an *unannotated*
-    /// keyword is `None` -- with no unit on record there is nothing to
-    /// convert from, and passing the raw number off as canonical would
-    /// be a guess.
+    /// The source unit comes from the `[unit]` comment annotation,
+    /// read leniently.
     ///
-    /// `None` if the keyword is absent or non-numeric, if it carries no
-    /// annotation, if the annotation fails to parse, or if the unit is
-    /// a bare level (`mag`) with no linear reading.
+    /// An unannotated keyword gives `None` here, unlike in
+    /// [`Self::real_in_unit`]. With no unit on record there is nothing
+    /// to convert from, and reporting the raw number as canonical
+    /// would be a guess.
+    ///
+    /// The result is `None` in four cases:
+    ///
+    /// - The keyword is absent, or its value is not numeric.
+    /// - The keyword carries no `[unit]` annotation.
+    /// - The annotation fails to parse.
+    /// - The unit is a bare level such as `mag`, with no linear
+    ///   reading.
     #[must_use]
     pub fn real_in_canonical(&self, key: &str) -> Option<f64> {
         let v = self.optional_real(key)?;

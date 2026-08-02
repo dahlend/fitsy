@@ -13,7 +13,8 @@
 //! where each `<surface>` body is a whitespace-separated record of
 //!
 //! ```text
-//! function_type ni nj cross_term ximin ximax etamin etamax c00 c10 c01 c20 c11 c02 ...
+//! function_type ni nj cross_term ximin ximax etamin etamax
+//!     c00 c10 c01 c20 c11 c02 ...
 //! ```
 //!
 //! and the corrections add to the (xi, eta) intermediate world
@@ -33,11 +34,12 @@
 //! - <http://iraf.noao.edu/projects/ccdmosaic/tnx.html>
 //!
 //! ## Validation
-//! Implemented from the IRAF specification. No reference
-//! implementation is available in WCSLIB or astropy, so unit tests
-//! cover (a) the polynomial / Chebyshev / Legendre evaluators against
-//! analytic ground truth and (b) end-to-end round-trips
-//! `pix -> world -> pix`.
+//!
+//! This module follows the IRAF specification. No reference
+//! implementation was available to compare against, so the unit tests
+//! cover two things: the polynomial, Chebyshev and Legendre
+//! evaluators against analytic ground truth, and end-to-end round
+//! trips from pixel to world and back.
 
 use crate::error::{FitsError, Result};
 
@@ -90,7 +92,19 @@ pub struct TnxSurface {
 }
 
 impl TnxSurface {
-    /// Parse a `<surface>` body (the part inside the `"..."`).
+    /// Parse a surface body, meaning the text inside the quotes of a
+    /// `lngcor` or `latcor` entry.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in five cases:
+    ///
+    /// - A mandatory token is absent.
+    /// - A token does not parse as a number.
+    /// - The function type or the cross-term code is unknown.
+    /// - An order falls outside the supported range.
+    /// - The coefficient count does not match the orders and the
+    ///   cross-term code.
     pub fn parse(body: &str) -> Result<Self> {
         let mut tokens = body.split_ascii_whitespace();
         let next = |it: &mut std::str::SplitAsciiWhitespace<'_>, name: &str| -> Result<f64> {
@@ -259,10 +273,18 @@ pub struct Tnx {
 }
 
 impl Tnx {
-    /// Parse the `lngcor` / `latcor` surfaces from the reassembled
-    /// `WATi_` strings of the longitude and latitude axes (the caller
-    /// resolves which is which). Each is looked up by its own name, so a
-    /// mislabelled string yields `None` rather than the wrong axis.
+    /// Parse the `lngcor` and `latcor` surfaces from the reassembled
+    /// `WATi_` strings of the longitude axis and the latitude axis.
+    /// The caller decides which string is which.
+    ///
+    /// Each surface is looked up by its own name, so a mislabeled
+    /// string yields `None` rather than the wrong axis. The result is
+    /// `Ok(None)` when neither surface is present.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`TnxSurface::parse`], for whichever surface
+    /// is present.
     pub fn from_wat_strings(wat_lon: Option<&str>, wat_lat: Option<&str>) -> Result<Option<Self>> {
         let lngcor = wat_lon
             .and_then(|w| extract_cor(w, "lngcor"))
@@ -279,8 +301,8 @@ impl Tnx {
         }
     }
 
-    /// Forward distortion `(xi, eta) -> (xi + lngcor, eta + latcor)`.
-    /// Surfaces that are absent contribute zero.
+    /// Forward distortion, `(xi, eta) -> (xi + lngcor, eta + latcor)`.
+    /// A surface that is absent contributes 0.
     #[must_use]
     pub fn forward(&self, xi: f64, eta: f64) -> (f64, f64) {
         let dxi = self.lngcor.as_ref().map_or(0.0, |s| s.eval(xi, eta));
@@ -288,8 +310,12 @@ impl Tnx {
         (xi + dxi, eta + deta)
     }
 
-    /// Inverse via Newton iteration on the forward map.
-    /// Returns `Wcs` error on non-convergence or singular Jacobian.
+    /// Inverse distortion, by Newton iteration on the forward map.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the Jacobian is singular, or when the
+    /// iteration does not converge within its step limit.
     pub fn inverse(&self, xip: f64, etap: f64) -> Result<(f64, f64)> {
         let (mut xi, mut eta) = (xip, etap);
         // Tolerance scales with coordinate magnitude so the residual's

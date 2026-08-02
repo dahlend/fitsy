@@ -1,6 +1,6 @@
-"""Fit a celestial WCS from pixel/sky correspondences.
+"""Fit a celestial WCS from pixel and sky pairs.
 
-Run from the repo root:
+Run from the repository root:
 
     python examples/python/fit_wcs.py
 """

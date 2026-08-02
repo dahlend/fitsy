@@ -1,17 +1,48 @@
-//! ASCII Table extension (`XTENSION = 'TABLE   '`, Standard Sec.7.2).
+//! ASCII table extension (`XTENSION = 'TABLE   '`, Standard Sec.7.2).
 //!
-//! ASCII tables store every cell as a fixed-width text field placed
-//! at byte position `TBCOLn` within each row. Rows are exactly
-//! `NAXIS1` bytes wide; there are `NAXIS2` rows.
+//! # Purpose
 //!
-//! Field formats supported (Standard Table 15):
-//! `Aw` (string), `Iw` (integer), `Fw.d` (fixed-point real),
-//! `Ew.d` (real with E exponent), `Dw.d` (real with D exponent).
+//! [`AsciiTableHdu`] reads one ASCII table. Such a table stores every
+//! cell as a fixed-width text field at byte position `TBCOLn` within
+//! its row. Each row is `NAXIS1` bytes wide, and the table holds
+//! `NAXIS2` rows.
+//!
+//! # Layout
+//!
+//! [`AsciiFormat`] holds one parsed `TFORMn` value. Standard Table 15
+//! defines five forms, and this module reads each one:
+//!
+//! - `Aw` -- a string of width `w`.
+//! - `Iw` -- an integer of width `w`.
+//! - `Fw.d` -- a fixed-point real with `d` decimal places.
+//! - `Ew.d` -- a real with an `E` exponent.
+//! - `Dw.d` -- a real with a `D` exponent.
+//!
+//! [`AsciiTableHdu::cell_value`] decodes one cell into an
+//! [`AsciiCell`], and [`AsciiTableHdu::cell_bytes`] returns its raw
+//! bytes instead.
+//!
+//! # Design constraints
+//!
+//! `TNULLn` is the only way an ASCII table marks a value undefined.
+//! Sec.7.2.5 gives a blank numeric field the value zero, so a blank
+//! field cannot carry that meaning.
+//!
+//! The comparison against `TNULLn` trims surrounding space on both
+//! sides. Sec.7.2.5 does not say how the sentinel is justified in its
+//! field, and writers right-justify a numeric field. A `TNULLn` that
+//! is itself all spaces therefore matches a blank field alone, which
+//! is how a writer opts a column out of the blank-means-zero rule.
 
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 
-/// One ASCII-table column descriptor.
+/// One column of an ASCII table.
+///
+/// This pairs the parsed `TFORMn` of the column with its 1-based start
+/// column from `TBCOLn`, and with the `TSCALn`, `TZEROn` and `TNULLn`
+/// cards that apply to it. [`AsciiTableHdu::columns`] returns one of
+/// these per column.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AsciiColumn {
@@ -41,7 +72,11 @@ impl AsciiColumn {
     }
 }
 
-/// ASCII-table field format codes (Standard Table 15).
+/// One parsed `TFORMn` value of an ASCII table (Standard Table 15).
+///
+/// Each variant carries its field width `w`. The three real forms also
+/// carry the count `d` of decimal places. [`AsciiFormat::parse`]
+/// builds one from the card text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsciiFormat {
     /// `Aw` -- character string of width `w`.
@@ -66,7 +101,16 @@ impl AsciiFormat {
     }
 
     /// Parse a `TFORMn` value such as `"A20"`, `"I10"`, `"F10.4"`,
-    /// `"E15.7"`, `"D25.17"`.
+    /// `"E15.7"` or `"D25.17"`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Value`] with keyword `TFORM`, in four cases:
+    ///
+    /// - `s` is empty.
+    /// - The leading character is not `A`, `I`, `F`, `E` or `D`.
+    /// - The width does not parse as a number.
+    /// - An `F`, `E` or `D` form omits its `.d` part.
     pub fn parse(s: &str) -> Result<Self> {
         let t = s.trim();
         let mut chars = t.chars();
@@ -114,6 +158,52 @@ impl AsciiFormat {
 }
 
 /// One ASCII table HDU.
+///
+/// This borrows the data section of the table from the
+/// [`FitsFile`](crate::FitsFile) that produced it, so it cannot
+/// outlive that file. Every cell is a fixed-width text field, placed
+/// by the `TBCOLn` of its column.
+///
+/// Reach a column through [`columns`](Self::columns) or
+/// [`column_by_name`](Self::column_by_name), then decode with
+/// [`cell_value`](Self::cell_value).
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::hdu::builder::AsciiColumnData;
+/// use fitsy::{AsciiCell, AsciiFormat, AsciiTableBuilder};
+/// use fitsy::{FitsFile, FitsWriter, Hdu, ImageBuilder};
+///
+/// let (ph, pd) = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
+///     .primary(true)
+///     .build()?;
+/// let mut b = AsciiTableBuilder::new();
+/// b.add_column(
+///     "COUNT",
+///     AsciiFormat::I(6),
+///     AsciiColumnData::Int(vec![Some(12), None, Some(37)]),
+/// )?;
+/// // TNULL is the only marker of an undefined ASCII-table value.
+/// b.tnull("---")?;
+/// b.extname("CATALOG");
+/// let (th, td) = b.build()?;
+///
+/// let mut buf: Vec<u8> = Vec::new();
+/// let mut w = FitsWriter::new(&mut buf);
+/// w.write_hdu(&ph, &pd)?;
+/// w.write_hdu(&th, &td)?;
+/// w.finish()?;
+///
+/// let file = FitsFile::from_bytes(buf)?;
+/// let Hdu::AsciiTable(tbl) = file.hdu_by_name("CATALOG", None)? else {
+///     panic!("CATALOG is not an ASCII table");
+/// };
+/// let col = tbl.column_by_name("COUNT").expect("COUNT column");
+/// assert_eq!(tbl.cell_value(0, col)?, Some(AsciiCell::Int(12)));
+/// assert_eq!(tbl.cell_value(1, col)?, None);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct AsciiTableHdu<'a> {
     header: Header,
@@ -124,7 +214,22 @@ pub struct AsciiTableHdu<'a> {
 }
 
 impl<'a> AsciiTableHdu<'a> {
-    /// Build from a parsed header and the raw data slice (no padding).
+    /// Build from a parsed header and the raw data slice.
+    ///
+    /// The `data` slice must hold `NAXIS1 * NAXIS2` bytes, without
+    /// trailing block padding.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when the header omits
+    ///   `BITPIX`, `NAXIS`, `NAXIS1`, `NAXIS2`, `TFIELDS`, or a
+    ///   `TFORMn` or `TBCOLn` card for a declared column.
+    /// - [`FitsError::Value`] when `BITPIX` is not 8, when `NAXIS` is
+    ///   not 2, when a `TBCOLn` is below 1, or when a `TFORMn` string
+    ///   fails to parse.
+    /// - [`FitsError::Data`] when the row size times the row count
+    ///   overflows `usize`, or when `data.len()` does not equal that
+    ///   product.
     pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
         // Validate the mandatory shape: BITPIX=8, NAXIS=2.
         if header.bitpix()? != 8 {
@@ -286,7 +391,10 @@ impl<'a> AsciiTableHdu<'a> {
         &self.columns
     }
 
-    /// Find a column by `TTYPEn`, case-insensitive.
+    /// Find a column whose `TTYPEn` equals `name`.
+    ///
+    /// The comparison ignores ASCII case. The result is `None` when no
+    /// column carries that name.
     #[must_use]
     pub fn column_by_name(&self, name: &str) -> Option<&AsciiColumn> {
         self.columns
@@ -295,6 +403,10 @@ impl<'a> AsciiTableHdu<'a> {
     }
 
     /// Raw bytes of one row.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `row` is not less than the row count.
     pub fn row_bytes(&self, row: usize) -> Result<&[u8]> {
         if row >= self.n_rows {
             return Err(FitsError::Data(format!(
@@ -306,7 +418,14 @@ impl<'a> AsciiTableHdu<'a> {
         Ok(&self.data[start..start + self.row_size])
     }
 
-    /// Raw bytes of one cell (after `TBCOLn` placement).
+    /// Raw bytes of one cell, located by its `TBCOLn` position.
+    ///
+    /// The `row` argument is a 0-based row index. The `col` argument
+    /// describes the column, as [`columns`](Self::columns) returns it.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `row` is not less than the row count.
     pub fn cell_bytes(&self, row: usize, col: &AsciiColumn) -> Result<&[u8]> {
         let row_bytes = self.row_bytes(row)?;
         // TBCOLn is 1-based.
@@ -314,9 +433,22 @@ impl<'a> AsciiTableHdu<'a> {
         Ok(&row_bytes[start..start + col.width()])
     }
 
-    /// Decoded value of one cell. Returns `None` only for a `TNULLn`
-    /// match -- Sec.7.2.5 gives a blank numeric field the value zero, so
-    /// `TNULLn` is the sole way an ASCII table marks a value undefined.
+    /// Decode one cell into an [`AsciiCell`].
+    ///
+    /// The `row` argument is a 0-based row index. The `col` argument
+    /// describes the column, as [`columns`](Self::columns) returns it.
+    ///
+    /// The result is `Ok(None)` only when the field matches `TNULLn`.
+    /// Sec.7.2.5 gives a blank numeric field the value zero, so
+    /// `TNULLn` is the only marker of an undefined value here.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] in three cases:
+    ///
+    /// - `row` is not less than the row count.
+    /// - The field holds bytes that are not valid UTF-8.
+    /// - A numeric field does not parse as its declared format.
     pub fn cell_value(&self, row: usize, col: &AsciiColumn) -> Result<Option<AsciiCell>> {
         let raw = self.cell_bytes(row, col)?;
         let s = std::str::from_utf8(raw).map_err(|_| {
@@ -467,7 +599,13 @@ fn parse_fortran_real(field: &str, d: usize) -> Option<f64> {
         .ok()
 }
 
-/// Decoded value of one ASCII-table cell.
+/// The decoded value of one ASCII-table cell.
+///
+/// The variant follows the [`AsciiFormat`] of the column: `A` gives
+/// [`AsciiCell::Str`], `I` gives [`AsciiCell::Int`], and `F`, `E` or
+/// `D` gives [`AsciiCell::Float`]. A cell that matches `TNULLn` yields
+/// `None` from [`AsciiTableHdu::cell_value`] rather than a variant
+/// here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsciiCell {
     /// An `I`-format field with no scaling applied.

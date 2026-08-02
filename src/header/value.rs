@@ -3,6 +3,26 @@
 use crate::error::{FitsError, Result};
 
 /// Parsed value of a value card.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::{Header, Value};
+///
+/// let mut h = Header::empty();
+/// h.push("NAXIS", 2_i64, None)?;
+/// h.push("OBJECT", "M42", None)?;
+/// h.push("SIMPLE", true, None)?;
+///
+/// assert_eq!(h.first("NAXIS"), Some(&Value::Integer(2)));
+/// assert_eq!(h.first("SIMPLE"), Some(&Value::Logical(true)));
+///
+/// match h.first("OBJECT") {
+///     Some(Value::String(s)) => assert_eq!(s, "M42"),
+///     other => panic!("expected a string value, got {other:?}"),
+/// }
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// `T` or `F` (Sec.4.2.2).
@@ -86,20 +106,32 @@ pub struct ValueAndComment {
     pub comment: Option<String>,
 }
 
-/// Parse the value-and-comment portion of a value card (bytes 11..80).
+/// Parse the value-and-comment part of a value card, bytes 11 to 80.
+///
+/// The `keyword` argument names the card, and appears in an error
+/// message. The `body` argument holds those bytes 11 to 80.
+///
+/// # Errors
+///
+/// [`FitsError::Value`] when the value field cannot be split from its
+/// comment, such as for an unterminated string literal, or when the
+/// field matches no standard value type.
 pub fn parse(keyword: &str, body: &[u8]) -> Result<(Value, Option<String>)> {
     let parts = split_value_and_comment(body, keyword)?;
     let val = parse_value(&parts.value_field, keyword)?;
     Ok((val, parts.comment))
 }
 
-/// Fault-tolerant variant of [`parse`] used by lenient header parsing.
+/// Fault-tolerant form of [`parse`], used by lenient header parsing.
 ///
-/// Never fails: when the value field cannot be split from its comment
-/// (e.g. an unterminated string) or cannot be parsed as any standard
-/// type, the raw field text is preserved as [`Value::Unparsed`] so the
-/// rest of the header still loads. When only the value fails to parse
-/// but the comment split succeeded, the comment is retained.
+/// The `keyword` and `body` arguments carry the same meaning they do
+/// in [`parse`].
+///
+/// This function does not fail. When the value field cannot be split
+/// from its comment, or matches no standard type, the raw field text
+/// survives as [`Value::Unparsed`], and the rest of the header still
+/// loads. When the split succeeds and only the value fails to parse,
+/// this keeps the comment.
 #[must_use]
 pub fn parse_lenient(keyword: &str, body: &[u8]) -> (Value, Option<String>) {
     let Ok(parts) = split_value_and_comment(body, keyword) else {
@@ -117,16 +149,24 @@ pub fn parse_lenient(keyword: &str, body: &[u8]) -> (Value, Option<String>) {
     }
 }
 
-/// Split the body into value field and optional comment, respecting
-/// the rule that a `/` inside a string literal is not a comment marker
-/// (Sec.4.1.2.3).
+/// Split the body into a value field and an optional comment.
 ///
-/// The scan runs over raw bytes, and every character it looks for is
-/// ASCII, so a non-ASCII byte is just content. Comments are free text
-/// and always sanitized, so a stray byte there never fails the parse.
-/// The value field is returned verbatim and must be ASCII: a stray
-/// byte is an error, which [`parse_lenient`] turns into
-/// [`Value::Unparsed`].
+/// The `body` argument holds bytes 11 to 80 of the card, and the
+/// `keyword` argument names the card for an error message.
+///
+/// A `/` inside a string literal does not start a comment
+/// (Sec.4.1.2.3), and this function honors that rule.
+///
+/// The scan runs over raw bytes and looks only for ASCII characters,
+/// so a non-ASCII byte counts as content. A comment is free text, and
+/// a later stage sanitizes it, so a stray byte there never fails the
+/// parse. The value field comes back verbatim and must be ASCII.
+///
+/// # Errors
+///
+/// [`FitsError::Value`] when a string literal has no closing quote, or
+/// when the value field holds a byte that is not ASCII.
+/// [`parse_lenient`] turns either case into [`Value::Unparsed`].
 pub fn split_value_and_comment(body: &[u8], keyword: &str) -> Result<ValueAndComment> {
     // Skip leading spaces; the first non-space byte tells us whether the
     // value is a string literal (which may contain a `/`).

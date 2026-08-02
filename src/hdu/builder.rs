@@ -1,10 +1,31 @@
 //! Typed HDU builders.
 //!
-//! These builders compose the mandatory keywords for the supported
-//! HDU kinds so callers don't have to remember the exact spellings
-//! of `BITPIX`/`NAXIS`/`PCOUNT`/`GCOUNT`/`TFORMn`/etc. They emit
-//! `(Header, Vec<u8>)` pairs that can be fed directly to
-//! [`FitsWriter::write_hdu`](crate::FitsWriter::write_hdu).
+//! # Purpose
+//!
+//! Each builder here composes the mandatory keywords of one HDU kind,
+//! so a caller does not spell out `BITPIX`, `NAXIS`, `PCOUNT`,
+//! `GCOUNT` or `TFORMn`. Every builder returns a `(Header, Vec<u8>)`
+//! pair, which
+//! [`FitsWriter::write_hdu`](crate::FitsWriter::write_hdu) accepts
+//! without further work.
+//!
+//! # Layout
+//!
+//! - [`ImageBuilder`] builds an `IMAGE` HDU, primary or extension.
+//! - [`BinTableBuilder`] builds a `BINTABLE` extension, with or
+//!   without a heap.
+//! - [`AsciiTableBuilder`] builds a `TABLE` extension.
+//!
+//! # Design constraints
+//!
+//! A builder validates when it renders, not when it collects. A call
+//! to `card` records a keyword and returns immediately, and `build`
+//! reports the failure. This lets a caller chain calls without a
+//! `Result` at each step.
+//!
+//! A builder owns its data. It serializes the pixels or the rows into
+//! big-endian bytes during `build`, so the returned `Vec<u8>` needs no
+//! further byte-order change.
 
 use crate::data::encoding::Pixel;
 use crate::data::unsigned::{BZERO_U16, BZERO_U32, BZERO_U64_F64};
@@ -12,18 +33,19 @@ use crate::error::{FitsError, Result};
 use crate::hdu::bintable::BinFieldKind;
 use crate::header::{CommentaryKind, Header, Value};
 
-/// Builder for an `IMAGE` HDU (primary or extension).
+/// Builder for an `IMAGE` HDU, primary or extension.
 ///
-/// Pixel data is supplied as a typed slice; the builder serializes it
-/// big-endian, sets `BITPIX`/`NAXIS`/`NAXISn` consistently, and
-/// optionally adds `BSCALE`/`BZERO`/`BUNIT`/`BLANK` cards.
+/// The caller supplies pixel data as a typed slice. The builder
+/// serializes it big-endian, and it sets `BITPIX`, `NAXIS` and each
+/// `NAXISn` to match. Add a `BSCALE`, `BZERO`, `BUNIT` or `BLANK` card
+/// through [`card`](Self::card).
 ///
 /// # Unsigned-integer images
 ///
-/// `BITPIX` is always signed, so Sec.4.4.2.5 stores unsigned data as
-/// an offset signed value plus a `BZERO` card. [`from_u16`](Self::from_u16),
-/// [`from_u32`](Self::from_u32) and [`from_u64`](Self::from_u64) apply
-/// the offset and emit the cards for you.
+/// `BITPIX` names a signed type, so Standard Sec.4.4.2.5 stores
+/// unsigned data as an offset signed value plus a `BZERO` card.
+/// [`from_u16`](Self::from_u16), [`from_u32`](Self::from_u32) and
+/// [`from_u64`](Self::from_u64) apply that offset and emit both cards.
 #[derive(Debug, Clone)]
 pub struct ImageBuilder<T: Pixel> {
     axes: Vec<u64>,
@@ -38,9 +60,17 @@ pub struct ImageBuilder<T: Pixel> {
 }
 
 impl<T: Pixel> ImageBuilder<T> {
-    /// Construct a new IMAGE-shaped HDU. `axes` lists axis lengths in
-    /// FITS order -- `axes[0]` is `NAXIS1`, the fastest-varying axis.
-    /// `pixels.len()` must equal the product of `axes`.
+    /// Construct a new image-shaped HDU.
+    ///
+    /// The `axes` argument lists axis lengths in FITS order, so
+    /// `axes[0]` is `NAXIS1`, the fastest-varying axis. The length of
+    /// `pixels` must equal the product of `axes`. An empty `axes`
+    /// means `NAXIS = 0` and skips that check.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `pixels.len()` does not equal the
+    /// product of `axes`.
     ///
     /// # Examples
     ///
@@ -83,8 +113,14 @@ impl<T: Pixel> ImageBuilder<T> {
         self
     }
 
-    /// Append an arbitrary value card (e.g. `BUNIT`, `OBJECT`).
-    /// Validated on [`build`](Self::build).
+    /// Append an arbitrary value card, such as `BUNIT` or `OBJECT`.
+    ///
+    /// The `keyword` argument is the FITS keyword. The `value`
+    /// argument is its value. The `comment` argument is the inline
+    /// comment after the `/`, or `None` for no comment.
+    ///
+    /// [`build`](Self::build) validates the keyword. This call always
+    /// succeeds.
     #[must_use]
     pub fn card(
         mut self,
@@ -100,16 +136,27 @@ impl<T: Pixel> ImageBuilder<T> {
         self
     }
 
-    /// Append a `HISTORY` card.
+    /// Append a `HISTORY` card holding `text`.
+    ///
+    /// [`build`](Self::build) splits text longer than one card across
+    /// several cards.
     #[must_use]
     pub fn history(mut self, text: impl Into<String>) -> Self {
         self.history.push(text.into());
         self
     }
 
-    /// Render this builder to a `(Header, data)` pair ready for
-    /// [`FitsWriter::write_hdu`](crate::FitsWriter::write_hdu). The
-    /// returned data is big-endian raw bytes.
+    /// Render this builder to a `(Header, data)` pair, ready for
+    /// [`FitsWriter::write_hdu`](crate::FitsWriter::write_hdu).
+    ///
+    /// The returned data holds big-endian raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Header`] when a keyword passed to
+    ///   [`card`](Self::card) is not a legal FITS keyword, or when a
+    ///   `from_u16`, `from_u32` or `from_u64` builder also received a
+    ///   `BSCALE` or `BZERO` card. Those two cards are managed here.
     pub fn build(self) -> Result<(Header, Vec<u8>)> {
         let bitpix = T::BITPIX.as_i64();
         let mut h = Header::empty();
@@ -168,9 +215,17 @@ impl<T: Pixel> ImageBuilder<T> {
 }
 
 impl ImageBuilder<i16> {
-    /// Build a `u16` image (`BITPIX = 16`, `BZERO = 32768`,
-    /// `BSCALE = 1`). Pixels are offset-encoded into `i16` and the
-    /// matching `BSCALE`/`BZERO` cards are emitted automatically.
+    /// Build a `u16` image, with `BITPIX = 16`, `BZERO = 32768` and
+    /// `BSCALE = 1`.
+    ///
+    /// This offset-encodes each pixel into `i16` and emits the two
+    /// scaling cards. Do not add `BSCALE` or `BZERO` through
+    /// [`card`](Self::card); [`build`](Self::build) rejects that.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `pixels.len()` does not equal the
+    /// product of `axes`.
     pub fn from_u16(axes: impl Into<Vec<u64>>, pixels: &[u16]) -> Result<Self> {
         let signed: Vec<i16> = pixels
             .iter()
@@ -183,8 +238,15 @@ impl ImageBuilder<i16> {
 }
 
 impl ImageBuilder<i32> {
-    /// Build a `u32` image (`BITPIX = 32`, `BZERO = 2147483648`,
-    /// `BSCALE = 1`).
+    /// Build a `u32` image, with `BITPIX = 32`, `BZERO = 2147483648`
+    /// and `BSCALE = 1`.
+    ///
+    /// This behaves as [`ImageBuilder::from_u16`] does, at 32 bits.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `pixels.len()` does not equal the
+    /// product of `axes`.
     pub fn from_u32(axes: impl Into<Vec<u64>>, pixels: &[u32]) -> Result<Self> {
         let signed: Vec<i32> = pixels
             .iter()
@@ -197,9 +259,16 @@ impl ImageBuilder<i32> {
 }
 
 impl ImageBuilder<i64> {
-    /// Build a `u64` image (`BITPIX = 64`, `BZERO = 9.22e18` real-valued
-    /// because the magnitude `2^63` does not fit in `i64`,
-    /// `BSCALE = 1`).
+    /// Build a `u64` image, with `BITPIX = 64`, `BZERO = 9.22e18` and
+    /// `BSCALE = 1`.
+    ///
+    /// The `BZERO` card holds a real value here, not an integer,
+    /// because the magnitude `2^63` does not fit in `i64`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `pixels.len()` does not equal the
+    /// product of `axes`.
     pub fn from_u64(axes: impl Into<Vec<u64>>, pixels: &[u64]) -> Result<Self> {
         let signed: Vec<i64> = pixels
             .iter()
@@ -279,11 +348,23 @@ impl BinTableBuilder {
         Self::default()
     }
 
-    /// Append a fixed-shape column. `repeat` is the `r` in `rT` (1 for
-    /// scalars, `n` for fixed `n`-character strings of kind
-    /// [`BinFieldKind::Char`], or whatever array length applies). For
-    /// variable-length (`P`/`Q`) columns use
-    /// [`add_vla_column`](Self::add_vla_column).
+    /// Append a fixed-shape column.
+    ///
+    /// The `repeat` argument is the `r` of the `rT` form in `TFORMn`.
+    /// Pass 1 for a scalar column, `n` for a fixed `n`-character
+    /// string of kind [`BinFieldKind::Char`], or the array length that
+    /// applies. Call [`add_vla_column`](Self::add_vla_column) for a
+    /// variable-length column instead.
+    ///
+    /// The `name` argument becomes `TTYPEn`. The `kind` argument is
+    /// the element type, which becomes the `T` of `TFORMn`. The `unit`
+    /// argument becomes `TUNITn`, and the `tdim` argument becomes
+    /// `TDIMn`. Pass `None` for either to omit that card.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `kind` is [`BinFieldKind::P`] or
+    /// [`BinFieldKind::Q`], or when `repeat` is 0.
     pub fn add_column(
         &mut self,
         name: impl Into<String>,
@@ -323,8 +404,17 @@ impl BinTableBuilder {
     ///   non-`P`/`Q` kind).
     /// * `max` is the optional `rmax` advertised in `TFORMn`.
     ///
-    /// The row area always carries one descriptor per row; the heap
-    /// itself is supplied to [`build_with_heap`](Self::build_with_heap).
+    /// The `name` argument becomes `TTYPEn`, and the `unit` argument
+    /// becomes `TUNITn`. Pass `None` for `unit` to omit that card.
+    ///
+    /// The row area carries one descriptor per row. Pass the heap
+    /// itself to [`build_with_heap`](Self::build_with_heap).
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `descriptor` is neither
+    /// [`BinFieldKind::P`] nor [`BinFieldKind::Q`], or when `element`
+    /// is one of those two.
     pub fn add_vla_column(
         &mut self,
         name: impl Into<String>,
@@ -373,7 +463,14 @@ impl BinTableBuilder {
         out
     }
 
-    /// Append an arbitrary value card (e.g. `OBJECT`).
+    /// Append an arbitrary value card, such as `BUNIT` or `OBJECT`.
+    ///
+    /// The `keyword` argument is the FITS keyword. The `value`
+    /// argument is its value. The `comment` argument is the inline
+    /// comment after the `/`, or `None` for no comment.
+    ///
+    /// [`build`](Self::build) validates the keyword. This call always
+    /// succeeds.
     pub fn card(
         &mut self,
         keyword: impl Into<String>,
@@ -388,24 +485,31 @@ impl BinTableBuilder {
         self
     }
 
-    /// Append a `HISTORY` card.
+    /// Append a `HISTORY` card holding `text`.
+    ///
+    /// [`build`](Self::build) splits text longer than one card across
+    /// several cards.
     pub fn history(&mut self, text: impl Into<String>) -> &mut Self {
         self.history.push(text.into());
         self
     }
 
-    /// Set `EXTNAME`.
+    /// Set the `EXTNAME` card of this table to `name`.
     pub fn extname(&mut self, name: impl Into<String>) -> &mut Self {
         self.extname = Some(name.into());
         self
     }
 
-    /// Set (or replace) the `TUNITn` of the most recently added column.
-    /// Errors if no column has been added yet.
+    /// Set the `TUNITn` of the most recently added column, replacing
+    /// any earlier value.
     ///
-    /// This is sugar so callers can chain
-    /// `.add_column(name, kind, repeat, None, None)?.unit("m")?` instead of
-    /// repeating the column name in `extras`.
+    /// This lets a caller chain
+    /// `.add_column(name, kind, repeat, None, None)?.unit("m")?`
+    /// rather than name the column again.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when no column has been added yet.
     pub fn unit(&mut self, unit: impl Into<String>) -> Result<&mut Self> {
         let last = self
             .columns
@@ -415,8 +519,15 @@ impl BinTableBuilder {
         Ok(self)
     }
 
-    /// Set (or replace) the `TDIMn` of the most recently added column.
-    /// Errors if no column has been added yet.
+    /// Set the `TDIMn` of the most recently added column, replacing
+    /// any earlier value.
+    ///
+    /// The `tdim` argument holds the `TDIMn` value, such as
+    /// `"(4,3)"`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when no column has been added yet.
     pub fn tdim(&mut self, tdim: impl Into<String>) -> Result<&mut Self> {
         let last = self
             .columns
@@ -432,13 +543,18 @@ impl BinTableBuilder {
         self.columns.iter().map(ColSpec::row_bytes).sum()
     }
 
-    /// Render to `(Header, data)`. `data` must be exactly
-    /// `n_rows * row_bytes()` long; rows are packed column-by-column
-    /// in the order declared.
+    /// Render to `(Header, data)`.
     ///
-    /// For tables containing variable-length columns use
-    /// [`build_with_heap`](Self::build_with_heap) instead -- this
-    /// method emits `PCOUNT = 0`.
+    /// The `data` argument must hold exactly
+    /// `n_rows * self.row_bytes()` bytes. Each row packs its fields in
+    /// the order the columns were declared. This emits `PCOUNT = 0`,
+    /// so call [`build_with_heap`](Self::build_with_heap) for a table
+    /// that holds a variable-length column.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as
+    /// [`build_with_heap`](Self::build_with_heap).
     pub fn build(self, n_rows: usize, data: Vec<u8>) -> Result<(Header, Vec<u8>)> {
         self.build_with_heap(n_rows, data, &[])
     }
@@ -450,9 +566,17 @@ impl BinTableBuilder {
     /// * `heap_bytes` is appended verbatim after the row area; the
     ///   builder sets `PCOUNT = heap_bytes.len()` and `THEAP =
     ///   row_area_size`.
-    /// * Per-row `P`/`Q` descriptor cells must already encode their
-    ///   `(count, offset)` pairs (use [`Self::p_descriptor`] /
-    ///   [`Self::q_descriptor`] to build them).
+    /// * Each per-row `P` or `Q` descriptor cell must already hold its
+    ///   `(count, offset)` pair. Build one with
+    ///   [`Self::p_descriptor`] or [`Self::q_descriptor`].
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Data`] when `n_rows * self.row_bytes()`
+    ///   overflows `usize`, or when `row_bytes.len()` does not equal
+    ///   that product.
+    /// - [`FitsError::Header`] when a keyword passed to
+    ///   [`card`](Self::card) is not a legal FITS keyword.
     pub fn build_with_heap(
         self,
         n_rows: usize,
@@ -514,10 +638,12 @@ impl BinTableBuilder {
 // AsciiTableBuilder
 // ---------------------------------------------------------------------
 
-/// Per-column data for an [`AsciiTableBuilder`]. Variants must match
-/// the column's [`crate::AsciiFormat`] kind: `Int` <-> `I`, `Float` <-> `F`/`E`/`D`,
-/// `Str` <-> `A`. All columns in a builder must carry the same number
-/// of rows.
+/// Per-column data for an [`AsciiTableBuilder`].
+///
+/// The variant must match the [`crate::AsciiFormat`] kind of the
+/// column. `Int` pairs with `I`, `Float` pairs with `F`, `E` or `D`,
+/// and `Str` pairs with `A`. Every column in one builder must carry
+/// the same number of rows.
 #[derive(Debug, Clone)]
 pub enum AsciiColumnData {
     /// Integer column (`I` format). `None` cells render as `TNULLn`.
@@ -560,6 +686,33 @@ struct AsciiColSpec {
 /// Every column must report the same row count. Pick the
 /// [`AsciiFormat`](crate::AsciiFormat) matching the data: `I` for
 /// integers, `F`/`E`/`D` for floats, `A` for strings.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::hdu::builder::AsciiColumnData;
+/// use fitsy::{AsciiFormat, AsciiTableBuilder};
+///
+/// let mut b = AsciiTableBuilder::new();
+/// b.add_column(
+///     "NAME",
+///     AsciiFormat::A(8),
+///     AsciiColumnData::Str(vec!["alpha".into(), "beta".into()]),
+/// )?;
+/// b.add_column(
+///     "FLUX",
+///     AsciiFormat::F(9, 3),
+///     AsciiColumnData::Float(vec![1.5, 2.25]),
+/// )?;
+/// b.unit("Jy")?;
+/// let (header, data) = b.build()?;
+///
+/// // Fields pack with no padding: 8 + 9 = 17 bytes per row, 2 rows.
+/// assert_eq!(header.naxisn(1)?, 17);
+/// assert_eq!(header.naxisn(2)?, 2);
+/// assert_eq!(data.len(), 34);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct AsciiTableBuilder {
     columns: Vec<AsciiColSpec>,
@@ -575,8 +728,22 @@ impl AsciiTableBuilder {
         Self::default()
     }
 
-    /// Append an `A`/`I`/`F`/`E`/`D` column. The variant of `data`
-    /// must match the kind of `format`.
+    /// Append an `A`, `I`, `F`, `E` or `D` column.
+    ///
+    /// The variant of `data` must match the kind of `format`:
+    /// `AsciiFormat::A` takes [`AsciiColumnData::Str`],
+    /// `AsciiFormat::I` takes [`AsciiColumnData::Int`], and
+    /// `AsciiFormat::F`, `AsciiFormat::E` or `AsciiFormat::D` takes
+    /// [`AsciiColumnData::Float`].
+    ///
+    /// The `name` argument becomes `TTYPEn`. The `format` argument
+    /// becomes `TFORMn` and fixes the field width. The `data` argument
+    /// holds one entry per row.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the variant of `data` does not match
+    /// the kind of `format`.
     pub fn add_column(
         &mut self,
         name: impl Into<String>,
@@ -611,6 +778,10 @@ impl AsciiTableBuilder {
     }
 
     /// Set `TUNITn` on the most recently added column.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when no column has been added yet.
     pub fn unit(&mut self, unit: impl Into<String>) -> Result<&mut Self> {
         self.last_mut("unit")?.unit = Some(unit.into());
         Ok(self)
@@ -620,11 +791,16 @@ impl AsciiTableBuilder {
     /// string that marks an undefined value. The sentinel is
     /// padded/truncated to the field width when written.
     ///
-    /// Legal on any numeric column. Sec.7.2.5 puts no type restriction
-    /// on the ASCII-table `TNULLn` -- only the *binary* table form of
-    /// the keyword (Sec.7.3.4) is integer-only. It is the only way an
-    /// ASCII table marks a value undefined, because a blank numeric
-    /// field is defined to be zero, not null.
+    /// Any numeric column accepts this keyword. Sec.7.2.5 puts no type
+    /// restriction on the ASCII-table `TNULLn`. The binary-table form
+    /// of the keyword, in Sec.7.3.4, is the integer-only one. An ASCII
+    /// table has no other way to mark a value undefined, because the
+    /// standard defines a blank numeric field as zero.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when no column has been added yet, or when
+    /// the most recent column has an `A` format.
     pub fn tnull(&mut self, tnull: impl Into<String>) -> Result<&mut Self> {
         let last = self.last_mut("tnull")?;
         if matches!(last.format, crate::hdu::ascii_table::AsciiFormat::A(_)) {
@@ -642,7 +818,14 @@ impl AsciiTableBuilder {
             .ok_or_else(|| FitsError::Data(format!("{what}: no column added yet")))
     }
 
-    /// Append an arbitrary value card (e.g. `OBJECT`).
+    /// Append an arbitrary value card, such as `OBJECT`.
+    ///
+    /// The `keyword` argument is the FITS keyword. The `value`
+    /// argument is its value. The `comment` argument is the inline
+    /// comment after the `/`, or `None` for no comment.
+    ///
+    /// [`build`](Self::build) validates the keyword. This call always
+    /// succeeds.
     pub fn card(
         &mut self,
         keyword: impl Into<String>,
@@ -669,10 +852,21 @@ impl AsciiTableBuilder {
         self
     }
 
-    /// Render to `(Header, data)`. Returns an error if the columns
-    /// disagree on row count, if any cell does not fit its field
-    /// width, or if an `I` column contains `None` cells without
-    /// [`tnull`](Self::tnull) set.
+    /// Render to `(Header, data)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] in five cases:
+    ///
+    /// - The builder holds no column.
+    /// - Two columns report different row counts.
+    /// - The row size times the row count overflows `usize`.
+    /// - A cell does not fit its field width.
+    /// - An `I` column holds a `None` cell without
+    ///   [`tnull`](Self::tnull) set.
+    ///
+    /// [`FitsError::Header`] when a keyword passed to
+    /// [`card`](Self::card) is not a legal FITS keyword.
     pub fn build(self) -> Result<(Header, Vec<u8>)> {
         if self.columns.is_empty() {
             return Err(FitsError::Data(

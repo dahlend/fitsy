@@ -1,14 +1,15 @@
-//! Concrete projections (Paper II Sec.8.3), organized by family.
+//! Concrete projections (Paper II Sec.8.3), grouped by family.
 //!
-//! | Module       | Projections                                          | Paper II Sec. |
-//! |--------------|------------------------------------------------------|---------------|
-//! | `zenithal`   | TAN, STG, SIN, ZPN, AZP, ARC, ZEA, SZP, AIR         | Sec.5.1       |
-//! | `cylindrical`| CAR, CEA, MER, CYP                                   | Sec.5.2       |
-//! | `pseudocyl`  | SFL, PAR, MOL, AIT                                   | Sec.5.3       |
-//! | `conic`      | COP, COE, COD, COO                                   | Sec.5.4       |
-//! | `polyconic`  | BON, PCO                                             | Sec.5.5       |
-//! | `quadcube`   | TSC, CSC, QSC                                        | Sec.5.6       |
-//! | `healpix`    | HPX, XPH                                             | CR 2007       |
+//! Each submodule holds one family:
+//!
+//! - `zenithal` -- TAN, STG, SIN, ZPN, AZP, ARC, ZEA, SZP and AIR
+//!   (Paper II Sec.5.1).
+//! - `cylindrical` -- CAR, CEA, MER and CYP (Sec.5.2).
+//! - `pseudocyl` -- SFL, PAR, MOL and AIT (Sec.5.3).
+//! - `conic` -- COP, COE, COD and COO (Sec.5.4).
+//! - `polyconic` -- BON and PCO (Sec.5.5).
+//! - `quadcube` -- TSC, CSC and QSC (Sec.5.6).
+//! - `healpix` -- HPX and XPH (Calabretta & Roukema 2007).
 
 mod conic;
 mod cylindrical;

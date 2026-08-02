@@ -1,31 +1,35 @@
-//! FITS diff utilities (parity with `astropy.io.fits.FITSDiff`).
+//! FITS file comparison.
 //!
-//! Compares two FITS files and reports structural, header and data
-//! differences, in a text format close enough to astropy's
-//! `FITSDiff.report()` that tooling can consume either.
+//! # Purpose
 //!
-//! Comparison policy (matching astropy's defaults):
+//! [`FitsDiff`] compares two FITS files and reports their structural,
+//! header and data differences. Call [`FitsDiff::open`] to compare two
+//! paths, or [`FitsDiff::compare`] to compare two loaded files.
 //!
-//! * HDU count must match.
-//! * Keyword sets are compared by presence, not order.
-//! * Shared value cards compare exactly, except floats, which use
-//!   `relative_tolerance` / `absolute_tolerance` (both default `0.0`).
-//! * Image pixels compare **numerically, in physical units** --
-//!   `BZERO`/`BSCALE` applied, `BLANK` as NaN -- under the same
-//!   tolerances, reporting pixel numbers and decoded values.
-//!   Tile-compressed images are decompressed first, so tiles that
-//!   differ byte-wise but decode alike compare equal.
-//! * Table data compares cell by cell in decoded values.
-//! * Random groups, and extensions this crate does not recognize,
-//!   have no decoded form and get one byte-level verdict.
+//! # Comparison policy
 //!
-//! Byte-identical data with matching decoding cards short-circuits,
-//! which is the common case. Otherwise both sides are decoded to
-//! `f64`, so comparing two `BITPIX = 16` images holds four times the
-//! on-disk size per side.
+//! * The HDU counts must match.
+//! * Keyword sets compare by presence, not by order.
+//! * A shared value card compares exactly, except for a float, which
+//!   uses `relative_tolerance` and `absolute_tolerance`. Both default
+//!   to `0.0`.
+//! * Image pixels compare numerically, in physical units, under the
+//!   same tolerances. That means `BZERO` and `BSCALE` applied, and
+//!   `BLANK` mapped to `NaN`. The report names the pixel number and
+//!   the decoded values. A tile-compressed image decompresses first,
+//!   so two tiles that differ byte-wise but decode alike compare
+//!   equal.
+//! * Table data compares cell by cell, in decoded values.
+//! * A random-groups HDU, and an extension that this crate does not
+//!   recognize, have no decoded form. Each gets one byte-level
+//!   verdict.
 //!
-//! Use [`FitsDiff::open`] to compare two paths or
-//! [`FitsDiff::compare`] to compare two already-loaded files.
+//! # Design constraints
+//!
+//! Byte-identical data with matching decoding cards short-circuits.
+//! That is the common case. Otherwise both sides decode to `f64`, so
+//! comparing two `BITPIX = 16` images holds four times the on-disk
+//! size per side.
 
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,7 +41,11 @@ use crate::hdu::file::FitsFile;
 use crate::header::Header;
 use crate::header::value::Value;
 
-/// Comparison options.
+/// The options that control a comparison.
+///
+/// The two tolerance fields set how closely two floats must agree. The
+/// ignore lists exclude a keyword or an HDU from the comparison. The
+/// default compares every float exactly and ignores nothing.
 #[derive(Debug, Clone)]
 pub struct DiffOptions {
     /// Maximum relative difference between two float values -- header
@@ -49,7 +57,7 @@ pub struct DiffOptions {
     ///
     /// Combined with [`Self::relative_tolerance`] as
     /// `|a - b| <= absolute_tolerance + relative_tolerance * |b|`
-    /// (the `numpy.isclose` / `astropy` form). A relative tolerance
+    /// A relative tolerance
     /// alone can never reconcile values straddling zero, which is
     /// what this exists for.
     pub absolute_tolerance: f64,
@@ -72,7 +80,10 @@ impl Default for DiffOptions {
     }
 }
 
-/// One header-keyword difference.
+/// One difference between two headers.
+///
+/// The variant records why the two disagree: a keyword present on one
+/// side alone, or a keyword present on both with different values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HeaderDiff {
@@ -91,7 +102,11 @@ pub enum HeaderDiff {
     },
 }
 
-/// One data-element difference.
+/// One difference between two data sections.
+///
+/// This records the position of the element that differs and the value
+/// each side holds there. An image reports a pixel number, and a table
+/// reports a row and a column.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DataDiff {
@@ -106,7 +121,11 @@ pub struct DataDiff {
     pub b_value: String,
 }
 
-/// Per-HDU diff report.
+/// The comparison result for one pair of HDUs.
+///
+/// This holds the header differences and the data differences of that
+/// pair. Call [`HduDiff::is_empty`] to test whether the two matched in
+/// every respect compared.
 #[derive(Debug, Clone, Default)]
 pub struct HduDiff {
     /// Differences in the header card sets/values.
@@ -131,7 +150,38 @@ impl HduDiff {
     }
 }
 
-/// Top-level diff between two FITS files.
+/// The comparison result for two whole files.
+///
+/// This holds the HDU count of each side, one [`HduDiff`] per compared
+/// pair, and the [`DiffOptions`] that produced the result. Build one
+/// with [`FitsDiff::open`] or [`FitsDiff::compare`].
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::diff::{DiffOptions, FitsDiff};
+/// use fitsy::{FitsFile, FitsWriter, ImageBuilder};
+///
+/// // Two files that differ in one pixel.
+/// let mut bytes = Vec::new();
+/// for last in [4.0_f32, 9.0] {
+///     let px = vec![1.0, 2.0, 3.0, last];
+///     let (h, d) = ImageBuilder::new(vec![2_u64, 2], px)?
+///         .primary(true)
+///         .build()?;
+///     let mut buf: Vec<u8> = Vec::new();
+///     FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+///     bytes.push(buf);
+/// }
+///
+/// let a = FitsFile::from_bytes(bytes.remove(0))?;
+/// let b = FitsFile::from_bytes(bytes.remove(0))?;
+/// let report = FitsDiff::compare(&a, &b, DiffOptions::default())?;
+///
+/// assert_eq!(report.hdus.len(), 1);
+/// assert!(!report.hdus[0].is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct FitsDiff {
     /// Number of HDUs in `a` and `b`. When unequal, only the
@@ -145,6 +195,15 @@ pub struct FitsDiff {
 
 impl FitsDiff {
     /// Open both files and compare them.
+    ///
+    /// The `a` and `b` arguments name the two paths to compare. The
+    /// `options` argument sets the float tolerances and the ignore
+    /// lists. Pass `DiffOptions::default()` for an exact comparison.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`FitsFile::open`](crate::FitsFile::open) for
+    /// either path, and the conditions of [`FitsDiff::compare`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(a: impl AsRef<Path>, b: impl AsRef<Path>, options: DiffOptions) -> Result<Self> {
         let fa = FitsFile::open(a)?;
@@ -152,7 +211,18 @@ impl FitsDiff {
         Self::compare(&fa, &fb, options)
     }
 
-    /// Compare two already-loaded files.
+    /// Compare two loaded files.
+    ///
+    /// The `a` and `b` arguments are the two files to compare. The
+    /// `options` argument sets the float tolerances and the ignore
+    /// lists, as it does for [`FitsDiff::open`].
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`FitsFile::hdu`](crate::FitsFile::hdu) for
+    /// either file, because this reads every HDU. A tile-compressed
+    /// HDU adds [`crate::FitsError::Data`] when a tile fails to
+    /// decompress.
     pub fn compare(a: &FitsFile, b: &FitsFile, options: DiffOptions) -> Result<Self> {
         let hdu_counts = (a.len(), b.len());
         let n = hdu_counts.0.min(hdu_counts.1);
@@ -299,7 +369,7 @@ impl<'a> DiffSink<'a> {
     }
 }
 
-/// Compare image pixels in **physical units** (`BZERO`/`BSCALE`
+/// Compare image pixels in physical units (`BZERO` and `BSCALE`
 /// applied, `BLANK` mapped to NaN), honouring the float tolerances.
 ///
 /// Byte-wise comparison was the previous behaviour and is wrong twice

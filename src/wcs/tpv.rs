@@ -39,8 +39,13 @@ pub struct TpvAxis {
 }
 
 impl TpvAxis {
-    /// Construct from a slice of `(m, value)` pairs (e.g. as parsed
-    /// from `PVi_m` cards). Validates `m` is in `0..40`.
+    /// Construct from a slice of `(m, value)` pairs, such as the
+    /// values parsed from the `PVi_m` cards.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `axis` is neither 1 nor 2, or when an
+    /// `m` index falls outside the range 0 to 39.
     pub fn from_pv_pairs(axis: u8, pairs: &[(u32, f64)]) -> Result<Self> {
         if axis != 1 && axis != 2 {
             return Err(FitsError::Wcs(format!(
@@ -138,9 +143,16 @@ impl Tpv {
         (self.pv1.eval(xi, eta), self.pv2.eval(xi, eta))
     }
 
-    /// Apply the inverse distortion `(xi', eta') -> (xi, eta)` by Newton
-    /// iteration. Converges quickly for the small-distortion regime
-    /// typical of real instruments (<~ 1 pixel).
+    /// Apply the inverse distortion, `(xi', eta') -> (xi, eta)`, by
+    /// Newton iteration.
+    ///
+    /// The iteration converges quickly for the small distortions that
+    /// real instruments carry, which stay near one pixel.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the Jacobian is singular, or when the
+    /// iteration does not converge within its step limit.
     pub fn inverse(&self, xi_p: f64, eta_p: f64) -> Result<(f64, f64)> {
         // Initial guess: undistorted = distorted (good when the
         // polynomial is close to identity).

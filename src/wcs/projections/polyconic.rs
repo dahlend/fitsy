@@ -16,8 +16,14 @@ pub struct Bon {
     pub theta_1: f64,
 }
 impl Bon {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_1` (`theta_1`) is 0, where the
+    /// `SFL` projection applies instead, or when it exceeds 90
+    /// degrees in magnitude.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let theta_1 = pv2
             .get(1)

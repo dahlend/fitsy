@@ -25,9 +25,11 @@ pub struct Unit {
 
 /// The affine map between two units: `y = scale * x + offset`.
 ///
-/// Linear units always give `offset == 0`. Levels are what the offset is
-/// for, and the family is deliberately closed at affine -- anything
-/// needing more than a scale and a shift is physics, and belongs in an
+/// A linear unit always gives `offset == 0`. The offset exists for
+/// levels.
+///
+/// This family stops at affine. A conversion that needs more than a
+/// scale and a shift is physics, and belongs in an
 /// [`super::Equivalence`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Converter {
@@ -97,8 +99,8 @@ impl Unit {
     /// value: `10**-3 mag` (like `mmag`) is a thousandth of a magnitude,
     /// not the magnitude of a thousandth of the flux. The number folds
     /// into [`Level::factor`] -- a value `v` in `k mag` stands for
-    /// `10^(v k / -2.5)`, a level with factor `-2.5 / k` -- so 5 of them
-    /// convert to 0.005 `mag`, as `astropy` and `wcslib` read it. A
+    /// `10^(v k / -2.5)`, a level with factor `-2.5 / k`, so 5 of them
+    /// convert to 0.005 `mag`. A
     /// *dimensioned* linear part multiplies `scale` instead, staying
     /// underneath the logarithm as the reference: that is what keeps
     /// `mag/arcsec2` to `mag/deg2` an additive -17.78.
@@ -195,17 +197,22 @@ impl Unit {
 
     /// The map taking a value in `self` to a value in `target`.
     ///
-    /// For two logarithmic levels the derivation is: a value `v` stands
-    /// for `a.base^(v/a.factor) * self.scale`, and equating that with the
-    /// target's reading gives an affine map whose offset carries the
-    /// linear rescale through the logarithm. `mag/arcsec2` to `mag/deg2`
-    /// comes out as `x - 17.78`, and `log(kHz)` to `log(Hz)` as `x + 3`.
+    /// For two logarithmic levels, a value `v` stands for
+    /// `a.base^(v/a.factor) * self.scale`. Equating that with the
+    /// reading of the target gives an affine map. The offset of that
+    /// map carries the linear rescale through the logarithm.
+    ///
+    /// `mag/arcsec2` to `mag/deg2` therefore comes out as `x - 17.78`,
+    /// and `log(kHz)` to `log(Hz)` as `x + 3`.
     ///
     /// # Errors
     ///
-    /// [`FitsError::Header`] if the two are not the same quantity: a
-    /// different dimension, a level against a linear unit, or two levels
-    /// against different references.
+    /// [`FitsError::Header`] when the two are not the same quantity,
+    /// in three cases:
+    ///
+    /// - They carry different dimensions.
+    /// - One is a level and the other is linear.
+    /// - Both are levels, against different references.
     pub fn converter_to(self, target: Self) -> Result<Converter> {
         if !self.dimension.matches(target.dimension) {
             return Err(FitsError::Header(format!(
@@ -347,10 +354,10 @@ fn prefix_token(k: f64) -> Option<&'static str> {
 /// guarantees instead is that the output re-parses through
 /// [`super::parse_unit`] to an equal value, so it is safe to write into a card.
 ///
-/// Level units render in this module's own spelling -- `deg^-2 mag(AB)`.
-/// `astropy` writes the same quantity `mag(AB / deg2)` and refuses to
-/// divide a function unit at all, so no spelling round-trips through both.
-/// The linear part comes *before* the symbol so its numeric factor stays
+/// A level unit renders in the spelling of this module, such as
+/// `deg^-2 mag(AB)`. Other spellings of the same quantity exist, and
+/// no single spelling round-trips through every reader.
+/// The linear part comes before the symbol, so its numeric factor stays
 /// glued to the dimension it scales; an outer multiplier trails, where a
 /// re-parse folds it back into the level's value -- except `k mag`, which
 /// fuses into the prefixed symbol (`mmag`) whenever `k` is a Table 7

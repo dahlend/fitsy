@@ -1,6 +1,6 @@
-"""Quickstart: open a FITS file, read pixels, headers, and WCS.
+"""Quickstart: open a FITS file, read its pixels, and use its WCS.
 
-Run from the repo root:
+Run from the repository root:
 
     python examples/python/quickstart.py
 """

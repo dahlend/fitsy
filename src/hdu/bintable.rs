@@ -1,26 +1,43 @@
-//! Binary Table extension (`XTENSION = 'BINTABLE'`, Standard Sec.7.3).
+//! Binary table extension (`XTENSION = 'BINTABLE'`, Standard Sec.7.3).
 //!
-//! A binary table stores `NAXIS2` rows of `NAXIS1` bytes each. Each
-//! row is a packed sequence of `TFIELDS` columns; column `n` is
-//! described by `TFORMn` = `rT[a]` where `r` is the repeat count,
-//! `T in {L,X,B,I,J,K,A,E,D,C,M,P,Q}` is the type code, and the
-//! optional `a` is informational.
+//! # Purpose
 //!
-//! Variable-length array columns (`Pt(maxlen)` / `Qt(maxlen)`) carry
-//! a 2- or 4-element descriptor in the row data; the actual array
-//! lives in the heap that immediately follows the main table data,
-//! starting at byte offset `THEAP` (default = `NAXIS1*NAXIS2`).
+//! [`BinTableHdu`] reads one binary table. A binary table stores
+//! `NAXIS2` rows of `NAXIS1` bytes. Each row packs `TFIELDS` columns
+//! with no padding between them.
 //!
-//! # Variable-length-array (VLA) columns
+//! `TFORMn` describes column `n` in the form `rT[a]`. Here `r` is the
+//! repeat count, `T` is one of the type codes `L`, `X`, `B`, `I`, `J`,
+//! `K`, `A`, `E`, `D`, `C`, `M`, `P` and `Q`, and the optional `a` is
+//! informational.
 //!
-//! VLA columns are parsed -- `BinFormat::vla_kind` and
-//! `BinFormat::vla_max` are surfaced -- but there is no typed
-//! per-row accessor yet, and the builder cannot write them.
+//! # Layout
 //!
-//! To read one, slice [`BinTableHdu::heap_bytes`] using the cell
-//! descriptor: a `P` cell is two big-endian `i32`s
-//! `(n_elements, heap_offset)`, a `Q` cell the same in `i64`
-//! (Sec.7.3.5). The element size comes from `vla_kind`.
+//! [`BinFormat::parse`] turns a `TFORMn` string into a [`BinFormat`].
+//! [`BinTableHdu::new`] builds the column table from the header.
+//! [`BinTableHdu::cell_value`] decodes one cell into a [`BinValue`],
+//! and [`BinTableHdu::cell_bytes`] returns its raw bytes instead.
+//! [`BinTableHdu::row_range`] walks a contiguous slab of rows.
+//!
+//! # Design constraints
+//!
+//! A variable-length array column stores a descriptor in the row, not
+//! the data. A `P` descriptor is two big-endian `i32` values, and a
+//! `Q` descriptor is the same pair in `i64`. Each pair holds an
+//! element count and a heap offset (Sec.7.3.5). The array itself lives
+//! in the heap that follows the row area, starting at byte offset
+//! `THEAP`, which defaults to `NAXIS1 * NAXIS2`.
+//!
+//! Two accessors therefore differ for such a column.
+//! [`BinTableHdu::cell_value`] follows the descriptor into the heap
+//! and returns [`BinValue::Vla`]. [`BinTableHdu::cell_bytes`] returns
+//! the descriptor itself and does not follow it.
+//!
+//! An integer column reads as one of three [`BinValue`] variants. The
+//! `TSCALn` and `TZEROn` cards select which. A `TZEROn` that matches
+//! the unsigned offset of the type gives [`BinValue::Uint`]. A `B`
+//! column with `TZEROn = -128` gives [`BinValue::Int`]. Any other
+//! non-default scaling gives [`BinValue::Float`].
 
 use crate::error::{FitsError, Result};
 use crate::header::Header;
@@ -61,8 +78,8 @@ pub enum BinFieldKind {
 }
 
 impl BinFieldKind {
-    /// Bytes consumed by **one** repeat of this kind in the main row
-    /// (does not account for the bit-packing of `X`).
+    /// Bytes that one repeat of this kind consumes in the row area.
+    /// This does not account for the bit packing of `X`.
     #[must_use]
     pub fn element_bytes(self) -> usize {
         match self {
@@ -120,7 +137,13 @@ impl BinFieldKind {
     }
 }
 
-/// `TFORMn` parsed: `r T (a)`.
+/// One parsed `TFORMn` value, in the form `r T (a)`.
+///
+/// The `repeat` field is the count `r`, and the `kind` field is the
+/// type code `T`. The two `vla_` fields carry the extra parts that a
+/// `P` or `Q` descriptor spells.
+///
+/// [`BinFormat::parse`] builds one from the card text.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BinFormat {
@@ -135,8 +158,8 @@ pub struct BinFormat {
 }
 
 impl BinFormat {
-    /// Width in bytes occupied by this column **inside one row**
-    /// (i.e. not counting heap data).
+    /// Width in bytes that this column occupies inside one row. This
+    /// excludes any heap data.
     #[must_use]
     pub fn row_bytes(&self) -> usize {
         match self.kind {
@@ -147,8 +170,20 @@ impl BinFormat {
         }
     }
 
-    /// Parse a `TFORMn` string per Standard Sec.7.3.3.1, e.g. `"1J"`,
-    /// `"4E"`, `"16A"`, `"PE(99)"`, `"1QD(0)"`.
+    /// Parse a `TFORMn` string per Standard Sec.7.3.3.1.
+    ///
+    /// Accepted forms include `"1J"`, `"4E"`, `"16A"`, `"PE(99)"` and
+    /// `"1QD(0)"`. An absent repeat count means 1.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Value`] with keyword `TFORM`, in four cases:
+    ///
+    /// - `s` is empty.
+    /// - The repeat count does not parse as a number.
+    /// - The type code is absent or unknown.
+    /// - A `P` or `Q` descriptor carries a malformed element type or
+    ///   `rmax` field.
     pub fn parse(s: &str) -> Result<Self> {
         let t = s.trim();
         if t.is_empty() {
@@ -233,7 +268,13 @@ impl BinFormat {
     }
 }
 
-/// One column of a BINTABLE.
+/// One column of a binary table.
+///
+/// This pairs the parsed `TFORMn` of the column with its byte offset
+/// inside a row and with the scaling cards that apply to it: `TSCALn`,
+/// `TZEROn` and `TNULLn`. [`BinTableHdu::columns`] returns one of
+/// these per column, and [`BinTableHdu::cell_value`] takes one to
+/// decode a cell.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BinColumn {
@@ -310,7 +351,52 @@ impl IntStorage {
     }
 }
 
-/// One BINTABLE HDU.
+/// One binary table HDU.
+///
+/// This borrows the data section of the table from the
+/// [`FitsFile`](crate::FitsFile) that produced it, so it cannot
+/// outlive that file. It parses the column table from the header at
+/// construction, and decodes a cell only when asked.
+///
+/// Reach a column through [`columns`](Self::columns) or
+/// [`column_by_name`](Self::column_by_name), then decode with
+/// [`cell_value`](Self::cell_value).
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::{BinFieldKind, BinTableBuilder, BinValue};
+/// use fitsy::{FitsFile, FitsWriter, Hdu, ImageBuilder};
+///
+/// // Build a one-column table and write it in memory.
+/// let (ph, pd) = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
+///     .primary(true)
+///     .build()?;
+/// let mut b = BinTableBuilder::new();
+/// b.add_column("FLUX", BinFieldKind::F64, 1, Some("Jy"), None)?;
+/// b.extname("CATALOG");
+/// let mut rows = Vec::new();
+/// for v in [1.5_f64, 2.5, 3.5] {
+///     rows.extend_from_slice(&v.to_be_bytes());
+/// }
+/// let (th, td) = b.build(3, rows)?;
+///
+/// let mut buf: Vec<u8> = Vec::new();
+/// let mut w = FitsWriter::new(&mut buf);
+/// w.write_hdu(&ph, &pd)?;
+/// w.write_hdu(&th, &td)?;
+/// w.finish()?;
+///
+/// // Read one cell back.
+/// let file = FitsFile::from_bytes(buf)?;
+/// let Hdu::BinTable(tbl) = file.hdu_by_name("CATALOG", None)? else {
+///     panic!("CATALOG is not a binary table");
+/// };
+/// let col = tbl.column_by_name("FLUX").expect("FLUX column");
+/// assert_eq!(tbl.n_rows(), 3);
+/// assert!(matches!(tbl.cell_value(0, col)?, BinValue::F64(v) if v == [1.5]));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct BinTableHdu<'a> {
     header: Header,
@@ -324,8 +410,21 @@ pub struct BinTableHdu<'a> {
 }
 
 impl<'a> BinTableHdu<'a> {
-    /// Build from a parsed header and the raw data slice (length
-    /// `NAXIS1*NAXIS2 + PCOUNT`, no padding).
+    /// Build from a parsed header and the raw data slice.
+    ///
+    /// The `data` slice must hold `NAXIS1 * NAXIS2 + PCOUNT` bytes,
+    /// without trailing block padding.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when the header omits
+    ///   `BITPIX`, `NAXIS`, `NAXIS1`, `NAXIS2` or `TFIELDS`.
+    /// - [`FitsError::Value`] when `BITPIX` is not 8, when `NAXIS` is
+    ///   not 2, when `PCOUNT` is negative, when `TFIELDS` is negative,
+    ///   or when a `TFORMn` string fails to parse.
+    /// - [`FitsError::Data`] when the row size times the row count
+    ///   overflows, when `data.len()` is smaller than the header
+    ///   declares, or when the columns do not fit inside `NAXIS1`.
     pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
         if header.bitpix()? != 8 {
             return Err(FitsError::Value {
@@ -476,7 +575,10 @@ impl<'a> BinTableHdu<'a> {
         self.heap_size
     }
 
-    /// Find a column by `TTYPEn`, case-insensitive.
+    /// Find a column whose `TTYPEn` equals `name`.
+    ///
+    /// The comparison ignores ASCII case. The result is `None` when no
+    /// column carries that name.
     ///
     /// # Examples
     ///
@@ -499,6 +601,10 @@ impl<'a> BinTableHdu<'a> {
     }
 
     /// Raw bytes of one row.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `row` is not less than the row count.
     pub fn row_bytes(&self, row: usize) -> Result<&[u8]> {
         if row >= self.n_rows {
             return Err(FitsError::Data(format!(
@@ -510,15 +616,43 @@ impl<'a> BinTableHdu<'a> {
         Ok(&self.data[s..s + self.row_size])
     }
 
-    /// Raw bytes of one cell inside the row table (does **not**
-    /// follow `P`/`Q` descriptors into the heap).
+    /// Raw bytes of one cell inside the row area.
+    ///
+    /// The `row` argument is a 0-based row index. The `col` argument
+    /// describes the column, as [`columns`](Self::columns) returns it.
+    ///
+    /// For a `P` or `Q` column this returns the descriptor. It does
+    /// not follow that descriptor into the heap. Call
+    /// [`cell_value`](Self::cell_value) for the array itself.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `row` is not less than the row count.
     pub fn cell_bytes(&self, row: usize, col: &BinColumn) -> Result<&[u8]> {
         let row_bytes = self.row_bytes(row)?;
         let s = col.offset;
         Ok(&row_bytes[s..s + col.format.row_bytes()])
     }
 
-    /// Read a fixed-shape column cell as a typed `BinValue`.
+    /// Decode one cell into a typed [`BinValue`].
+    ///
+    /// The `row` argument is a 0-based row index. The `col` argument
+    /// describes the column, as [`columns`](Self::columns) returns it.
+    ///
+    /// A `P` or `Q` column resolves its descriptor against the heap
+    /// and returns [`BinValue::Vla`].
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] in four cases:
+    ///
+    /// - `row` is not less than the row count.
+    /// - An `L` byte is neither `T`, `F` nor 0.
+    /// - An `A` field is not valid UTF-8.
+    /// - A `P` or `Q` descriptor points outside the heap.
+    ///
+    /// [`FitsError::Value`] when a `P` or `Q` column carries no inner
+    /// element type in its `TFORMn`.
     pub fn cell_value(&self, row: usize, col: &BinColumn) -> Result<BinValue> {
         let raw = self.cell_bytes(row, col)?;
         decode_cell(col, raw, self.heap_bytes())
@@ -541,13 +675,16 @@ impl<'a> BinTableHdu<'a> {
         self.data
     }
 
-    /// Iterate over `count` consecutive rows starting at `start`,
-    /// yielding the raw byte slice of each row. Returns an error if
-    /// the requested range is out of bounds.
+    /// Iterate `count` consecutive rows from `start`, yielding the raw
+    /// bytes of each row.
     ///
-    /// This is the moral equivalent of a sub-row read: callers can
-    /// process a contiguous slab of rows without paging through the
-    /// rest of the table or copying the heap.
+    /// This lets a caller process a contiguous slab of rows without
+    /// walking the rest of the table and without copying the heap.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when `start + count` overflows `usize`, or
+    /// when that sum exceeds the row count.
     pub fn row_range(
         &self,
         start: usize,
@@ -576,8 +713,8 @@ impl<'a> BinTableHdu<'a> {
 pub enum BinValue {
     /// Fixed-length array of logicals (`L`).
     Logical(Vec<Option<bool>>),
-    /// Packed-bit field (`X`); MSB-first within each byte. Second
-    /// element is the **bit count** (`r` from `rX`).
+    /// Packed-bit field (`X`), most significant bit first within each
+    /// byte. The second element is the bit count, the `r` of `rX`.
     Bits(Vec<u8>, usize),
     /// Signed integer column (`B/I/J/K`) with no scaling, or with
     /// `IntStorage::SignedFromByte` (`B + TZERO=-128`).
@@ -850,12 +987,20 @@ fn decode_int(
     }
 }
 
-/// Parse a `P`/`Q` variable-length array descriptor cell.
-/// Standard Sec.7.3.5: a `P` cell is two big-endian `i32`s
-/// `(n_elements, heap_offset)`; a `Q` cell is the same with `i64`s.
-/// Both fields must be non-negative. The element count is **not**
-/// converted to bytes here -- callers multiply by the inner element
-/// size (see `BinFormat::vla_kind`).
+/// Parse a `P` or `Q` variable-length array descriptor cell.
+///
+/// Standard Sec.7.3.5 defines a `P` cell as two big-endian `i32`
+/// values, `(n_elements, heap_offset)`. A `Q` cell holds the same pair
+/// in `i64`. Both fields must be non-negative.
+///
+/// This returns the element count, not a byte count. The caller
+/// multiplies by the inner element size from `BinFormat::vla_kind`.
+///
+/// # Errors
+///
+/// [`FitsError::Data`] when the cell is too short for the descriptor,
+/// or when either field is negative. [`FitsError::Header`] when the
+/// count or the offset exceeds `usize` on this target.
 pub(crate) fn parse_vla_descriptor(kind: BinFieldKind, raw: &[u8]) -> Result<(usize, usize)> {
     let (n, off) = match kind {
         BinFieldKind::P => {

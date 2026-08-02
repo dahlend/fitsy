@@ -180,27 +180,47 @@ pub trait Projection: std::fmt::Debug + Send + Sync {
     /// Reference native latitude `theta_0` in degrees (Paper II Sec.2.4).
     fn theta0(&self) -> f64;
 
-    /// Forward: native (phi, theta) -> plane (x, y) in degrees.
+    /// Forward step, from native `(phi, theta)` to plane `(x, y)`.
+    /// Both pairs are in degrees.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::FitsError::Wcs`] when the point lies outside the
+    /// domain that this projection covers.
     fn s2x(&self, phi_deg: f64, theta_deg: f64) -> Result<(f64, f64)>;
 
-    /// Inverse: plane (x, y) -> native (phi, theta) in degrees.
+    /// Inverse step, from plane `(x, y)` to native `(phi, theta)`.
+    /// Both pairs are in degrees.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::FitsError::Wcs`] when the point lies outside the
+    /// region of the plane that this projection fills.
     fn x2s(&self, x_deg: f64, y_deg: f64) -> Result<(f64, f64)>;
 
-    /// The `(m, value)` pairs that [`build`] would need to reconstruct
-    /// this projection, i.e. the `PV2_m` cards it was parsed from.
-    /// Parameterless projections return an empty vector.
+    /// The `(m, value)` pairs that [`build`] needs to reconstruct this
+    /// projection, which are the `PV2_m` cards it was parsed from. A
+    /// projection without parameters returns an empty vector.
     ///
-    /// Deliberately a required method rather than one defaulting to
-    /// `Vec::new()`: a new parameterised projection that forgot to
-    /// implement it would otherwise serialize to a header that
-    /// silently re-parses with different parameters. Making the
-    /// compiler ask the question is the same reasoning as the
-    /// exhaustive matches on [`ProjectionKind`].
+    /// This is a required method, not one that defaults to
+    /// `Vec::new()`. A new parameterized projection that omitted it
+    /// would serialize to a header that re-parses with different
+    /// parameters, and nothing would report that. The exhaustive
+    /// matches on [`ProjectionKind`] exist for the same reason.
     fn pv2(&self) -> Vec<(u32, f64)>;
 }
 
-/// Construct a projection. `pv2` is the table of `PV2_m` keyword
-/// values (`m = 0..`) for the latitude axis. Missing entries are 0.
+/// Construct the projection that `kind` names.
+///
+/// The `pv2` argument is the table of `PV2_m` keyword values for the
+/// latitude axis, indexed by `m` from 0. An entry that no card
+/// supplies holds 0.
+///
+/// # Errors
+///
+/// [`FitsError::Wcs`] when the parameters in `pv2` are invalid for
+/// that projection. The `from_pv` constructor of each projection
+/// states its own conditions.
 pub fn build(kind: ProjectionKind, pv2: &[f64]) -> Result<Arc<dyn Projection>> {
     use ProjectionKind as K;
     Ok(match kind {

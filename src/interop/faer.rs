@@ -32,9 +32,13 @@ impl LinearTransform {
 }
 
 impl<T: Clone> ImageData<T> {
-    /// Re-shape a 2-D image into a [`Mat`] of size `NAXIS2 x NAXIS1`
-    /// (rows = slow axis, columns = fast axis). Errors if the image
-    /// is not 2-D.
+    /// Re-shape a two-dimensional image into a [`Mat`] of size
+    /// `NAXIS2` by `NAXIS1`. Rows follow the slow axis, and columns
+    /// follow the fast axis.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the image is not two-dimensional.
     pub fn to_faer(&self) -> Result<Mat<T>> {
         if self.axes().len() != 2 {
             return Err(FitsError::Data(format!(
@@ -50,10 +54,15 @@ impl<T: Clone> ImageData<T> {
         Ok(Mat::from_fn(ny, nx, |r, c| s[r * nx + c].clone()))
     }
 
-    /// Build a 2-D image from a [`Mat`]. The matrix is interpreted as
-    /// `nrows = NAXIS2` (slow axis), `ncols = NAXIS1` (fast axis) --
-    /// the inverse of [`to_faer`](Self::to_faer), so the round-trip
-    /// is the identity.
+    /// Build a two-dimensional image from a [`Mat`].
+    ///
+    /// The matrix rows are `NAXIS2`, the slow axis, and its columns
+    /// are `NAXIS1`, the fast axis. This inverts
+    /// [`to_faer`](Self::to_faer), so the round trip is the identity.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the element count overflows `u64`.
     pub fn from_faer(mat: &Mat<T>) -> Result<Self> {
         let ny = mat.nrows();
         let nx = mat.ncols();
@@ -68,9 +77,15 @@ impl<T: Clone> ImageData<T> {
 }
 
 impl<T: Pixel> ImageBuilder<T> {
-    /// Build an [`ImageBuilder`] from a 2-D [`Mat`]. Same layout
-    /// convention as [`ImageData::from_faer`]: `nrows = NAXIS2`,
-    /// `ncols = NAXIS1`.
+    /// Build an [`ImageBuilder`] from a two-dimensional [`Mat`].
+    ///
+    /// This uses the layout convention of [`ImageData::from_faer`]:
+    /// matrix rows are `NAXIS2`, and matrix columns are `NAXIS1`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when the element count does not match the
+    /// axis product.
     pub fn from_faer(mat: &Mat<T>) -> Result<Self> {
         let ny = mat.nrows();
         let nx = mat.ncols();
@@ -85,8 +100,16 @@ impl<T: Pixel> ImageBuilder<T> {
 }
 
 impl Wcs {
-    /// Batched [`pixel_to_world`](Self::pixel_to_world). `pix` has shape
-    /// `(naxis, n)` -- one point per column. Output has the same shape.
+    /// Batched form of [`pixel_to_world`](Self::pixel_to_world).
+    ///
+    /// The `pix` argument has shape `(naxis, n)`, holding one point
+    /// per column. The result has the same shape.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `pix` does not have `naxis` rows, and
+    /// the conditions of [`pixel_to_world`](Self::pixel_to_world) for
+    /// any point.
     pub fn pixel_to_world_faer(&self, pix: &Mat<f64>) -> Result<Mat<f64>> {
         let n = self.naxis();
         if pix.nrows() != n {
@@ -111,8 +134,16 @@ impl Wcs {
         Ok(Mat::from_fn(n, m, |i, j| flat[j * n + i]))
     }
 
-    /// Batched [`world_to_pixel`](Self::world_to_pixel). Same shape
-    /// convention as [`pixel_to_world_faer`](Self::pixel_to_world_faer).
+    /// Batched form of [`world_to_pixel`](Self::world_to_pixel).
+    ///
+    /// This uses the shape convention of
+    /// [`pixel_to_world_faer`](Self::pixel_to_world_faer).
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `world` does not have `naxis` rows, and
+    /// the conditions of [`world_to_pixel`](Self::world_to_pixel) for
+    /// any point.
     pub fn world_to_pixel_faer(&self, world: &Mat<f64>) -> Result<Mat<f64>> {
         let n = self.naxis();
         if world.nrows() != n {

@@ -1,13 +1,12 @@
 //! [`Quantity`]: a number with a unit attached.
 //!
-//! [`Unit`] answers *what kind of thing is this and how big is one of
-//! them*; `Quantity` is a value measured in one. The split is astropy's,
-//! and so is the naming: its `Unit` and `Quantity` mean exactly these.
+//! [`Unit`] answers what kind of thing this is, and how big one of
+//! them is. [`Quantity`] is a value measured in one.
 //!
-//! Arithmetic is fallible rather than operator-overloaded. Multiplying
-//! two levels is not a quantity, and adding a length to a time is not
-//! either, so the honest signature returns a [`Result`] -- an operator
-//! could only panic there.
+//! Arithmetic here is fallible rather than operator-overloaded.
+//! Multiplying two levels yields no quantity, and neither does adding
+//! a length to a time. A method returning [`Result`] reports those
+//! cases. An operator could only panic on them.
 
 use super::dimension::Dimension;
 use super::unit::Unit;

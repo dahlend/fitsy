@@ -9,13 +9,23 @@ FITS lists axes fastest-first).
 .. literalinclude:: ../../examples/python/reading_images.py
    :language: python
 
-``data`` is always returned in physical units with the same numpy
-dtype ``astropy.io.fits`` would choose, except that fitsy always
-hands back native byte order (see below). For scaled integer data
-that means ``BITPIX`` 8 and 16 decode to ``float32`` and 32 and 64 to
-``float64``; unscaled data keeps its own type, and the
-``BZERO``-offset unsigned conventions decode to ``uint16`` /
-``uint32`` / ``uint64`` rather than promoting to float.
+``data`` comes back in physical units, in native byte order. The
+dtype follows ``BZERO``, ``BSCALE`` and ``BLANK``. ``BITPIX`` then
+selects the width. fitsy tries three paths, in this order:
+
+- Identity scaling (``BZERO`` 0, ``BSCALE`` 1, no ``BLANK``) returns
+  the raw pixels. The dtype follows ``BITPIX``.
+- The ``BZERO``-offset integer conventions (``BSCALE`` 1, no
+  ``BLANK``) return the matching unsigned dtype: ``uint16``,
+  ``uint32`` or ``uint64``. ``BITPIX`` 8 with ``BZERO`` -128 is the
+  signed-byte form of the same convention. It returns ``int8``.
+- All other scaling applies ``BSCALE``, ``BZERO`` and ``BLANK``, and
+  returns float. ``BITPIX`` 8, 16 and -32 give ``float32``. All
+  other values give ``float64``.
+
+A ``BLANK`` card therefore takes an image off the second path. A
+``BITPIX`` 16 image with ``BZERO`` 32768 reads back as ``uint16``
+without a ``BLANK`` card, and as ``float32`` with one.
 
 .. _reading-large-images:
 
@@ -34,9 +44,9 @@ The numpy array returned by ``hdu.data`` is always a freshly
 allocated, native-byte-order array. FITS stores numeric data
 big-endian, so on every modern little-endian host the read path
 must byteswap to deliver a native dtype -- and byteswapping
-inherently allocates a fresh buffer. fitsy embraces this:
-one explicit copy on read, then every downstream operation runs
-at full native speed.
+inherently allocates a fresh buffer. The read path therefore
+makes one explicit copy, after which each downstream operation runs
+at native speed.
 
 For images that do not fit in RAM, or when only a small region is
 needed, use :attr:`~fitsy.ImageHdu.section`:
@@ -45,13 +55,14 @@ needed, use :attr:`~fitsy.ImageHdu.section`:
 
    with fitsy.open("big.fits") as f:
        hdu = f[0]
-       tile = hdu.section[100:200, 100:200]   # reads and decodes only this slice
+       # reads and decodes only this slice
+       tile = hdu.section[100:200, 100:200]
 
 The section reader uses positional ``pread`` to fetch only the
-requested rows -- the full image is never materialised. (One
+requested rows -- the full image is never materialized. (One
 exception: when the header carries non-trivial ``BSCALE`` /
 ``BZERO`` / ``BLANK`` scaling, the partial-region read falls back
-to materialising the full array so the scaling pass can run.
+to materializing the full array so the scaling pass can run.
 Touching ``hdu.data`` first will preload the array, after which
 section reads slice the in-memory copy for free.)
 
@@ -64,11 +75,10 @@ positional ``pwrite`` -- no full-image rewrite is performed:
    with fitsy.open("big.fits", mode="update") as f:
        f[0].section[100:200, 100:200] = patch
 
-In-place writes are not crash-safe: a process death mid-patch can
-leave the file with some rows updated and others not. This matches
-astropy's mmap-backed update path. Callers that need atomicity
-should snapshot the file before patching (or use a temp-file +
-rename rewrite via ``writeto``).
+An in-place write is not crash-safe. A process death mid-patch can
+leave the file with some rows updated and others not. A caller that
+needs atomicity snapshots the file before patching, or rewrites
+through ``writeto``, which uses a temp file and a rename.
 
 In-place writes require contiguous slicing (``start:stop`` with
 step 1, plus non-negative integer indices) on an HDU with
@@ -87,29 +97,29 @@ ask for.
 Limitations of lazy reads
 -------------------------
 
-The lazy-read and in-place-write paths above apply to **plain image
-HDUs** (BITPIX-encoded pixel arrays). Other HDU kinds currently
-materialise their data section in full on first access:
+The lazy-read and in-place-write paths above apply to a plain image
+HDU, which holds a BITPIX-encoded pixel array. Every other HDU kind
+materializes its data section in full on first access:
 
-* **Tile-compressed images** (BINTABLE with ``ZIMAGE = T``,
+* Tile-compressed images (BINTABLE with ``ZIMAGE = T``,
   unwrapped via the Rust ``FitsFile::image`` accessor) are decompressed
   tile-by-tile into one contiguous numpy array on the first
   ``.data`` access. ``section`` still works on them, but it buys you
-  nothing: reads slice the fully materialised array, and
+  nothing: reads slice the fully materialized array, and
   ``hdu.section[...] = patch`` mutates that array and falls through
   to a full-image rewrite on the next ``flush()`` -- the underlying
   tiles have to be re-encoded as a unit. There is no ``O(patch)``
   path for compressed HDUs.
-* **Random-groups HDUs** hold the entire data section in a single
+* Random-groups HDUs hold the entire data section in a single
   numpy structured array; there is no streaming accessor.
-* **ASCII tables** and **BINTABLE** HDUs read all rows eagerly
+* ASCII tables and BINTABLE HDUs read all rows eagerly
   into the per-HDU data cache. Per-row or per-column streaming
   is not yet implemented; for very wide or very long tables
   consider opening the file, processing one HDU at a time, and
   dropping references to release memory.
 
 If you need partial reads from these formats today, the workaround
-is to open the file, materialise the HDU you need, immediately
+is to open the file, materialize the HDU you need, immediately
 extract the subset you care about, and let the rest go out of
 scope. The Rust ``FitsFile::verify_checksums`` helper streams
 each HDU's data section in 1-MiB chunks without populating the

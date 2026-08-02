@@ -1,6 +1,6 @@
 """Compare two FITS files with `fitsy.diff`.
 
-Run from the repo root::
+Run from the repository root:
 
     python examples/python/diff.py
 """

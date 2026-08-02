@@ -1,4 +1,25 @@
-//! `PyImageHdu` -- image HDU with lazy numpy data.
+//! `PyImageHdu`, `PyImageSection` and `PyRandomGroups` -- image HDU
+//! bindings with lazy numpy data.
+//!
+//! [`PyImageHdu`] is the main wrapper: `data` decodes pixels on the
+//! first access and caches the result. [`PyImageSection`] (Python
+//! `_ImageSection`) is the slicing proxy behind `ImageHdu.section`;
+//! it reads or patches a sub-region without materializing the whole
+//! array. [`PyRandomGroups`] wraps the legacy Random Groups primary
+//! HDU (Standard Sec.6) and is read-only.
+//!
+//! [`ReadBinding`] and [`UpdateBinding`] are the two lazy-I/O handles
+//! an image HDU or section carries. A `ReadBinding` lets `data` or
+//! `section` pull fresh bytes from the source file. An
+//! `UpdateBinding` lets `section[a:b] = arr` patch bytes back into a
+//! file opened with `mode='update'`. Both are `None` for an HDU
+//! built in memory, and for a tile-compressed image: that case is
+//! decoded to a plain array eagerly, when the HDU is materialized,
+//! rather than through this lazy path.
+//!
+//! The dtype dispatch for a pixel read -- which keywords choose the
+//! returned array's dtype -- is documented on `PyImageHdu::data`,
+//! and must agree with the "Image data" section of [`crate::python`].
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -33,14 +54,14 @@ pub(crate) struct UpdateBinding {
 
 /// Per-HDU read-from-disk binding: lets [`PyImageHdu`] and
 /// [`PyImageSection`] pull pixel bytes from the parent
-/// [`crate::FitsFile`] on demand without ever materialising the
+/// [`crate::FitsFile`] on demand without ever materializing the
 /// whole data section. Cheap to clone (just an `Arc` bump).
 #[derive(Debug, Clone)]
 pub(crate) struct ReadBinding {
     /// Backing FITS file. Shared with the parent
-    /// :class:`PyFitsFile`'s `state.file`. Holding a clone here
-    /// keeps the source bytes reachable for as long as any
-    /// materialised image HDU might want to lazy-load its data.
+    /// [`super::file::PyFitsFile`]'s `state.file`. Holding a clone
+    /// here keeps the source bytes reachable for as long as any
+    /// materialized image HDU might want to lazy-load its data.
     pub(crate) file: Arc<crate::FitsFile>,
     /// Index of this HDU in `file`.
     pub(crate) hdu_idx: usize,
@@ -52,15 +73,18 @@ pub(crate) struct ReadBinding {
 /// Image HDU with lazy numpy data.
 ///
 /// Returned by :meth:`FitsFile.hdu` (or ``file[i]``) for an image HDU.
-/// Pixels are read on the first access to ``hdu.data``, not before.
-/// Later accesses return the same array, and in-place edits like
-/// ``hdu.data[0, 0] = 42`` are kept on the next
-/// :meth:`FitsFile.writeto`.
+/// Pixels are read on the first access to ``hdu.data``, not before,
+/// except for a tile-compressed image, which is decoded in full as
+/// soon as the HDU is materialized. Later accesses return the same
+/// array, and in-place edits like ``hdu.data[0, 0] = 42`` are kept on
+/// the next :meth:`FitsFile.writeto`.
 ///
 /// For images larger than RAM, use :attr:`section`:
 /// ``hdu.section[a:b]`` reads only those bytes and
-/// ``hdu.section[a:b] = arr`` writes only those, never materialising
-/// the whole array.
+/// ``hdu.section[a:b] = arr`` writes only those, never materializing
+/// the whole array. A tile-compressed image gains nothing from
+/// :attr:`section`, since its array is already resident by the time
+/// ``hdu.section`` can be used.
 ///
 /// Examples
 /// --------
@@ -74,7 +98,7 @@ pub struct PyImageHdu {
     pub(crate) bitpix: Bitpix,
     /// Image axes in **FITS order** (NAXIS1 fastest). Empty when
     /// ``NAXIS == 0``. Used to decide between "data not yet
-    /// materialised" and "no data section to materialise".
+    /// materialized" and "no data section to materialize".
     pub(crate) axes: Vec<u64>,
     /// Whether this HDU was opened in read-only mode. Materialised
     /// numpy arrays are frozen (``WRITEABLE`` flag cleared) when set.
@@ -86,15 +110,19 @@ pub struct PyImageHdu {
     ///   - the data has not yet been read from disk (then `axes` is
     ///   non-empty and `read_binding` is `Some`).
     pub(crate) data: Arc<Mutex<Option<Py<PyAny>>>>,
-    /// Lazy-read source. `Some` whenever the HDU was materialised
-    /// from a `FitsFile` (i.e. read from disk or from a byte buffer);
-    /// `None` only for HDUs constructed in memory by the user
-    /// (e.g. via :func:`fitsy.image`).
+    /// Lazy-read source. `Some` when the HDU was materialized from a
+    /// plain (non-compressed) image HDU in a `FitsFile` -- read from
+    /// disk or from a byte buffer -- enabling a later `data` or
+    /// `section` access to pull pixel bytes on demand. `None` for an
+    /// HDU built in memory by the user (e.g. via the `ImageHdu`
+    /// constructor), and also for a tile-compressed image, whose
+    /// pixels are decoded once, eagerly, in `from_built_bytes`.
     pub(crate) read_binding: Option<ReadBinding>,
     /// In-place patch-write binding. Set only when the parent
-    /// :class:`FitsFile` was opened with `mode='update'` AND the
-    /// HDU is an uncompressed image. When present, `section[a:b] =
-    /// arr` writes through the file via positional ``pwrite``.
+    /// [`super::file::PyFitsFile`] was opened with `mode='update'`
+    /// AND the HDU is an uncompressed image. When present,
+    /// `section[a:b] = arr` writes through the file via positional
+    /// ``pwrite``.
     pub(crate) update_binding: Option<UpdateBinding>,
     /// Optional back-pointer to the parent `FitsFile`'s dirty
     /// flag. `Some` when the HDU was materialized from a file
@@ -133,7 +161,7 @@ impl PyImageHdu {
     }
 
     /// Lock and inspect the cached `data` slot. Returns a clone of
-    /// the materialised array if any. Does **not** trigger a
+    /// the materialized array if any. Does **not** trigger a
     /// lazy load.
     fn data_if_loaded(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         let g = self.data.lock().unwrap_or_else(PoisonError::into_inner);
@@ -147,11 +175,18 @@ impl PyImageHdu {
     }
 
     /// Lazy data accessor. If the array has already been
-    /// materialised, return a clone. Otherwise read it from the
+    /// materialized, return a clone. Otherwise read it from the
     /// `read_binding`, decode into a numpy array (applying
     /// BSCALE/BZERO/BLANK and byteswapping to native order),
-    /// cache it, and return a clone. Returns `None` when
-    /// ``NAXIS == 0`` or any axis is zero (no data section).
+    /// cache it, and return a clone. Returns `None` when `NAXIS`
+    /// is 0 or any axis is zero (no data section).
+    ///
+    /// # Errors
+    ///
+    /// Returns the Python exception mapped from `fitsy.FitsError` if
+    /// the pixel bytes cannot be read from the source file, or if the
+    /// data section no longer matches the header's `BITPIX`/`NAXISn`
+    /// layout.
     fn ensure_data(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         if let Some(arr) = self.data_if_loaded(py) {
             return Ok(Some(arr));
@@ -189,7 +224,14 @@ impl PyImageHdu {
 
     /// Reconstruct from a builder snapshot (header + raw bytes).
     /// Decodes the bytes back into a numpy array using the header's
-    /// `BITPIX`/`NAXIS*` so the appended HDU is fully editable.
+    /// `BITPIX`/`NAXIS*` so the appended HDU is fully editable. The
+    /// array is decoded eagerly, unlike `from_image`; there is no
+    /// byte buffer left to lazy-read from afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns the Python exception mapped from `fitsy.FitsError` if
+    /// `header`'s `BITPIX` is not a valid FITS pixel encoding.
     pub(crate) fn from_built_bytes(
         py: Python<'_>,
         header: crate::Header,
@@ -249,8 +291,15 @@ impl PyImageHdu {
 
     /// Encode this HDU's current state into header + data bytes
     /// for writing. Re-stamps BITPIX/NAXIS from the live array.
-    /// Lazy: triggers a `data` materialisation if the user never
+    /// Lazy: triggers a `data` materialization if the user never
     /// touched it, so the encoded bytes reflect on-disk reality.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`Self::ensure_data`]. Also returns
+    /// the Python exception mapped from `fitsy.FitsError` if the
+    /// pixel array cannot be re-encoded, for example because its
+    /// axis count overflows the FITS `NAXIS` limit.
     pub(crate) fn encode(
         &self,
         py: Python<'_>,
@@ -318,6 +367,10 @@ fn header_with_layout(header: &crate::Header, axes: &[u64], bitpix: Bitpix) -> c
 }
 
 /// Mark a numpy array as read-only by clearing its `WRITEABLE` flag.
+///
+/// # Errors
+///
+/// Returns the Python exception if `arr`'s `setflags` call fails.
 fn freeze_array(py: Python<'_>, arr: &Py<PyAny>) -> PyResult<()> {
     arr.bind(py).call_method1("setflags", ((), false))?;
     Ok(())
@@ -386,6 +439,33 @@ fn empty_image_header(is_primary: bool, user: crate::Header) -> crate::Header {
     h
 }
 
+/// Decode `img`'s pixels into a numpy array, choosing the dtype from
+/// `BZERO`, `BSCALE` and `BLANK` -- not from `BITPIX` alone.
+///
+/// Three cases, tried in order:
+///
+/// 1. Identity scaling (`BZERO` 0, `BSCALE` 1, no `BLANK`): the raw
+///    bytes are byte-swapped and returned as-is. The dtype follows
+///    `BITPIX` directly.
+/// 2. The standard unsigned-integer (or signed-byte) convention
+///    (`BSCALE` 1, `BZERO` exactly `2^(N-1)` or, for `BITPIX = 8`,
+///    `-128`, no `BLANK`): the stored ints are reinterpreted in the
+///    matching unsigned (or `int8`) type of the same width, with no
+///    promotion to float.
+/// 3. Anything else: `BSCALE`, `BZERO` and `BLANK` are applied via
+///    [`ImageHdu::read_physical`] / [`ImageHdu::read_physical_f32`],
+///    and the result is floats. An undefined pixel -- one whose
+///    stored integer value equals `BLANK`, or a float pixel that was
+///    already `NaN` -- becomes `NaN`. `BITPIX` 8, 16 and -32 scale to
+///    `f32`; `BITPIX` 32, 64 and -64 scale to `f64`.
+///
+/// This must agree with the "Image data" section of [`crate::python`].
+///
+/// # Errors
+///
+/// Returns the Python exception mapped from `fitsy.FitsError` if the
+/// underlying [`ImageHdu`] read fails, for example because `T` from a
+/// generic read does not match `bitpix`.
 fn read_pixels(
     py: Python<'_>,
     img: &ImageHdu<'_>,
@@ -404,8 +484,9 @@ fn read_pixels(
         return read_raw_to_array(py, img, bitpix, &shape);
     }
     // Special unsigned/signed integer reinterpretations (BSCALE=1,
-    // BZERO=2^(N-1) or -2^(N-1)). astropy returns the corresponding
-    // unsigned (or int8) dtype rather than promoting to float.
+    // BZERO=2^(N-1) or -2^(N-1)). fitsy returns the corresponding
+    // unsigned (or int8) dtype in this case, instead of the general
+    // float path below.
     if bscale == 1.0 && blank.is_none() {
         match bitpix {
             Bitpix::I16 if (bzero - 32_768.0).abs() < f64::EPSILON => {
@@ -445,12 +526,11 @@ fn read_pixels(
     }
     // General case: apply BSCALE/BZERO/BLANK and return floats.
     //
-    // Width follows astropy's `_dtype_for_bitpix`: BITPIX above 16
-    // scales to float64, 8 and 16 scale to float32, and data that is
-    // already floating point keeps its own width. float32 represents
-    // every u8/i16 exactly, so the narrow path costs no fidelity on
-    // the raw values while halving the array -- and scaled int16 is
-    // one of the most common layouts in instrument data.
+    // Width choice: BITPIX 8, 16 and -32 scale to float32; BITPIX 32,
+    // 64 and -64 scale to float64. float32 represents every u8/i16
+    // value exactly, so the narrow path costs no fidelity on the raw
+    // values while halving the array -- and scaled int16 is one of
+    // the most common layouts in instrument data.
     if matches!(bitpix, Bitpix::F32 | Bitpix::U8 | Bitpix::I16) {
         let arr = img.read_physical_f32().into_py_result()?.into_vec();
         Ok(to_array(py, arr, &shape))
@@ -460,6 +540,14 @@ fn read_pixels(
     }
 }
 
+/// Identity-scaling decode of `img`'s already-loaded bytes: no
+/// `BZERO`/`BSCALE`/`BLANK` applied, dtype follows `bitpix` directly.
+///
+/// # Errors
+///
+/// Returns a Python `ValueError` if `img`'s raw byte length does not
+/// match `bitpix` and `shape` -- an internal consistency check that
+/// should not fail given a correctly constructed [`ImageHdu`].
 fn read_raw_to_array(
     py: Python<'_>,
     img: &ImageHdu<'_>,
@@ -488,9 +576,22 @@ impl PyImageHdu {
     ///   to the original are not seen.
     /// header : Header or Mapping[str, Any], optional
     ///   Initial header. Layout cards (``BITPIX``, ``NAXIS*``)
-    ///   are recomputed from the array on write.
+    ///   are recomputed from the array on write. Default ``None``,
+    ///   which starts from an empty header.
     /// name : str, optional
-    ///   Convenience: sets the ``EXTNAME`` card.
+    ///   Convenience: sets the ``EXTNAME`` card. Default ``None``,
+    ///   which sets no ``EXTNAME``.
+    ///
+    /// Raises
+    /// ------
+    /// TypeError
+    ///   If `data` is neither an array of one of the dtypes above nor
+    ///   something :func:`numpy.asarray` accepts, or if `header` is
+    ///   neither a :class:`Header` nor an object with an ``.items()``
+    ///   method.
+    /// FitsError
+    ///   If `header` carries a keyword that exceeds 8 characters or
+    ///   contains an invalid character.
     #[new]
     #[pyo3(signature = (data, header=None, name=None))]
     fn py_new(
@@ -523,7 +624,7 @@ impl PyImageHdu {
 
     /// Image axes in **NAXIS order**: ``[NAXIS1, NAXIS2, ...]``.
     ///
-    /// When the pixel data has been materialised, the axes are
+    /// When the pixel data has been materialized, the axes are
     /// reported from the live numpy array shape (reversed, since
     /// numpy is row-major while FITS lists fastest-varying first).
     /// Otherwise the axes recorded at HDU-open time are returned --
@@ -550,17 +651,52 @@ impl PyImageHdu {
     /// applying ``BSCALE``/``BZERO``/``BLANK`` scaling. Subsequent
     /// accesses return the same array, and in-place mutation
     /// (``hdu.data[...] = x``) is preserved by the next
-    /// :meth:`FitsFile.writeto`.
+    /// :meth:`FitsFile.writeto`, and, in ``mode='update'``, by
+    /// :meth:`FitsFile.flush`.
     ///
     /// For images that do not fit in RAM, prefer :attr:`section`
     /// -- ``hdu.section[a:b]`` reads only the requested bytes
-    /// without materialising the full array.
+    /// without materializing the full array.
     ///
     /// Returns
     /// -------
     /// numpy.ndarray or None
-    ///   ``None`` when the HDU has no data section
-    ///   (``NAXIS == 0``).
+    ///   ``None`` when the HDU has no data section (``NAXIS == 0``).
+    ///   Otherwise, the dtype depends on ``BZERO``, ``BSCALE`` and
+    ///   ``BLANK``, not on ``BITPIX`` alone:
+    ///
+    ///   - If ``BZERO`` is 0, ``BSCALE`` is 1 and ``BLANK`` is
+    ///     absent, the raw pixels are returned. The dtype follows
+    ///     ``BITPIX``.
+    ///   - If ``BSCALE`` is 1 and ``BZERO`` is the standard integer
+    ///     offset, the matching unsigned dtype is returned.
+    ///     ``BITPIX`` 8 with ``BZERO`` -128 returns ``int8``.
+    ///   - For all other scaling, ``BSCALE``, ``BZERO`` and
+    ///     ``BLANK`` are applied, and the result is floats. A pixel
+    ///     whose stored value matches ``BLANK`` -- or that was
+    ///     already ``nan`` in a floating-point image -- becomes
+    ///     ``nan``. ``BITPIX`` 8, 16 and -32 give ``float32``. All
+    ///     other values give ``float64``.
+    ///
+    ///   An array obtained from a read-only :class:`FitsFile` has its
+    ///   ``WRITEABLE`` flag cleared; assigning into it raises
+    ///   :class:`ValueError`.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If the pixel bytes cannot be read from the source file.
+    ///
+    /// Notes
+    /// -----
+    /// A tile-compressed image is decoded in full when the HDU is
+    /// materialized, not on this first ``.data`` access; by the time
+    /// Python code can reach ``hdu.data``, the array already exists.
+    ///
+    /// Reading ``.data`` in ``mode='update'`` does not, by itself,
+    /// force the file to be rewritten. The next
+    /// :meth:`FitsFile.flush` compares this array's bytes against the
+    /// file and rewrites only if they differ.
     #[getter]
     fn data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some(arr) = self.ensure_data(py)? else {
@@ -570,7 +706,7 @@ impl PyImageHdu {
         // (`hdu.data[i] = v`) are invisible from here, so the cache has
         // to be written back on flush. This lives in the getter rather
         // than in `ensure_data` so it also covers HDUs whose pixels were
-        // materialised eagerly (tile-compressed images), and so the
+        // materialized eagerly (tile-compressed images), and so the
         // internal `encode` read does not mark the file dirty.
         // Read-only handles get a frozen array and never need it.
         //
@@ -592,7 +728,7 @@ impl PyImageHdu {
     /// section), so the caller falls back to rewriting.
     pub(crate) fn data_matches_source(&self, py: Python<'_>) -> bool {
         let Some(arr) = self.data_if_loaded(py) else {
-            return true; // never materialised, so nothing to write back
+            return true; // never materialized, so nothing to write back
         };
         let Some(binding) = self.read_binding.as_ref() else {
             return false;
@@ -615,11 +751,11 @@ impl PyImageHdu {
 
     /// Slicing accessor that mirrors :class:`numpy.ndarray`
     /// indexing. ``hdu.section[a:b, c:d]`` reads only the
-    /// requested region from disk -- no full-image materialisation.
+    /// requested region from disk -- no full-image materialization.
     ///
     /// In ``mode='update'``, ``hdu.section[a:b] = arr`` writes only
     /// the touched bytes back via positional ``pwrite``, again
-    /// without materialising the full image. This is the supported
+    /// without materializing the full image. This is the supported
     /// way to read or patch sub-regions of an image bigger than
     /// available RAM.
     ///
@@ -654,10 +790,30 @@ impl PyImageHdu {
         }
     }
 
-    /// Replace the pixel array. Accepts any array-like; dtype must
-    /// resolve to a supported FITS type. The header's ``BITPIX``
-    /// and ``NAXIS*`` cards are updated immediately to match the
-    /// new array.
+    /// Replace the pixel array.
+    ///
+    /// Accepts any array-like value; its dtype must resolve to a
+    /// supported FITS type. The header's ``BITPIX`` and ``NAXIS*``
+    /// cards are updated immediately to match the new array. Passing
+    /// ``None`` clears the data section instead (``NAXIS`` becomes 0).
+    ///
+    /// Setting this attribute drops any lazy-read or in-place-write
+    /// binding this HDU held: a later ``hdu.section[a:b] = arr``
+    /// patch re-encodes the whole file rather than writing in place,
+    /// and a later ``hdu.data`` read never falls back to on-disk
+    /// bytes from before the assignment.
+    ///
+    /// Parameters
+    /// ----------
+    /// value : array-like or None
+    ///   New pixel data, of one of the dtypes :class:`ImageHdu`
+    ///   accepts, or ``None`` to remove the data section.
+    ///
+    /// Raises
+    /// ------
+    /// TypeError
+    ///   If `value` is neither an array of a supported dtype nor
+    ///   something :func:`numpy.asarray` accepts.
     #[setter]
     fn set_data(&mut self, value: Bound<'_, PyAny>) -> PyResult<()> {
         if let Some(flag) = &self.dirty {
@@ -703,6 +859,11 @@ impl PyImageHdu {
     /// -------
     /// Wcs or None
     ///   ``None`` if the header carries no WCS for ``alt``.
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If `alt` is not ``' '`` or one of ``'A'``-``'Z'``.
     ///
     /// Notes
     /// -----
@@ -754,6 +915,12 @@ impl PyImageHdu {
 /// Infer `BITPIX` from an array's dtype. `kind`/`itemsize` come
 /// straight off the descriptor struct, so no Python attribute
 /// lookups are involved.
+///
+/// # Errors
+///
+/// Returns a Python `TypeError` if `arr`'s dtype is not `bool`,
+/// `int8`, `uint8`, `int16`, `uint16`, `int32`, `uint32`, `int64`,
+/// `uint64`, `float32` or `float64`.
 fn bitpix_from_array(arr: &Bound<'_, PyUntypedArray>) -> PyResult<Bitpix> {
     let dtype = arr.dtype();
     let kind = dtype.kind();
@@ -780,6 +947,14 @@ fn bitpix_from_array(arr: &Bound<'_, PyUntypedArray>) -> PyResult<Bitpix> {
 
 /// Build a `PyHeader` from an optional Python header (Header or
 /// Mapping) plus an optional EXTNAME shortcut.
+///
+/// # Errors
+///
+/// Returns a Python `TypeError` if `src` is neither a [`PyHeader`]
+/// nor an object with an `.items()` method, or if one of its values
+/// does not convert to a FITS value. Returns the Python exception
+/// mapped from `fitsy.FitsError` if a keyword in `src` fails
+/// validation.
 fn build_header(
     py: Python<'_>,
     src: Option<Py<PyAny>>,
@@ -847,6 +1022,10 @@ swap_be!(i16 => u16, i32 => u32, i64 => u64, f32 => u32, f64 => u64);
 /// `Vec<T>`, hand that to `into_pyarray` -- allocates the image three
 /// times and fills it twice. Going through numpy's own buffer does one
 /// allocation and one pass, which also halves the peak footprint.
+///
+/// # Errors
+///
+/// Returns whatever `fill` returns.
 fn alloc_swapped<T: SwapBe>(
     py: Python<'_>,
     shape: &[usize],
@@ -886,6 +1065,11 @@ macro_rules! by_bitpix {
 
 /// Identity-scaling decode straight from the file: no intermediate
 /// buffer, so the image is allocated once and touched once.
+///
+/// # Errors
+///
+/// Returns the Python exception mapped from `fitsy.FitsError` if the
+/// pixel bytes cannot be read from `file`.
 fn file_to_array(
     py: Python<'_>,
     file: &crate::FitsFile,
@@ -947,6 +1131,11 @@ fn cache_matches<T: SwapBe>(
 }
 
 /// Identity-scaling decode from bytes already in memory.
+///
+/// # Errors
+///
+/// Returns a Python `ValueError` if `raw`'s length does not match
+/// `bitpix` and `shape`.
 fn raw_bytes_to_array(
     py: Python<'_>,
     raw: &[u8],
@@ -989,9 +1178,13 @@ use crate::hdu::random_groups::RandomGroupsHdu;
 /// Random-groups primary HDU (legacy format; see Standard Sec.6).
 ///
 /// Read-only Python view: groups are decoded on demand through
-/// :meth:`group`. The HDU does **not** participate in
-/// :meth:`FitsFile.writeto`; round-tripping random-groups files
-/// through Python is intentionally not supported (use the Rust API).
+/// :meth:`group`. Indexing the file to reach this HDU (for example,
+/// ``file[0]``) materializes it in memory.
+///
+/// This class exposes no way to edit the header or the groups.
+/// :meth:`FitsFile.writeto` and :meth:`FitsFile.flush` write back
+/// the header and the data section the HDU was read with, so the
+/// written HDU matches the source byte for byte.
 #[pyclass(name = "RandomGroups", module = "fitsy")]
 #[derive(Debug)]
 pub struct PyRandomGroups {
@@ -1005,6 +1198,20 @@ pub struct PyRandomGroups {
 }
 
 impl PyRandomGroups {
+    /// Clone the underlying `Header`, for serialization.
+    pub(crate) fn header_clone(&self) -> crate::Header {
+        self.header.lock().clone()
+    }
+
+    /// Clone the data section, for serialization.
+    ///
+    /// The bytes stay in the big-endian FITS order they were read
+    /// in. The bindings expose no way to edit them, so writing them
+    /// back reproduces the source HDU.
+    pub(crate) fn data_clone(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+
     pub(crate) fn from_hdu(rg: &RandomGroupsHdu<'_>, header: PyHeader) -> Self {
         Self {
             header,
@@ -1049,9 +1256,29 @@ impl PyRandomGroups {
         self.data_per_group
     }
 
-    /// Decode group `i` (0-based) as `(parameters, data)` numpy
-    /// arrays. Both arrays use the HDU's BITPIX dtype; `BSCALE`,
-    /// `BZERO`, `PSCALn`, `PZEROn` are **not** applied.
+    /// Decode one group as ``(parameters, data)`` numpy arrays.
+    ///
+    /// Parameters
+    /// ----------
+    /// i : int
+    ///   Group index, 0-based. Does not accept a negative index.
+    ///
+    /// Returns
+    /// -------
+    /// tuple of numpy.ndarray
+    ///   ``(parameters, data)``. Both arrays share the HDU's
+    ///   ``BITPIX`` dtype and are read-only. ``parameters`` has
+    ///   length :attr:`n_params`; ``data`` has length
+    ///   :attr:`data_per_group`. Neither ``BSCALE``/``BZERO`` nor
+    ///   ``PSCALn``/``PZEROn`` is applied -- both arrays hold the
+    ///   stored, unscaled values.
+    ///
+    /// Raises
+    /// ------
+    /// IndexError
+    ///   If `i` is not less than :attr:`n_groups`.
+    /// OverflowError
+    ///   If `i` is negative.
     fn group(&self, py: Python<'_>, i: u64) -> PyResult<Py<pyo3::types::PyTuple>> {
         if i >= self.n_groups {
             return Err(pyo3::exceptions::PyIndexError::new_err(format!(
@@ -1103,7 +1330,7 @@ impl PyRandomGroups {
 /// Routes ``__getitem__`` and ``__setitem__`` through the parent
 /// HDU's lazy state:
 ///
-/// * If ``hdu.data`` has already been materialised, slicing and
+/// * If ``hdu.data`` has already been materialized, slicing and
 ///   patching go through the in-memory numpy array (with patches
 ///   *also* mirrored to disk via ``pwrite`` in update mode).
 /// * Otherwise, ``section[a:b]`` reads only the requested bytes
@@ -1120,19 +1347,22 @@ pub struct PyImageSection {
     /// Image axes in **FITS order** (NAXIS1 fastest). Empty when
     /// ``NAXIS == 0``.
     pub(crate) axes: Vec<u64>,
-    /// Whether to freeze freshly materialised arrays.
+    /// Whether to freeze freshly materialized arrays.
     pub(crate) read_only: bool,
     /// Snapshot of the parent HDU's header (cheap clone of the
     /// shared `Arc<Mutex<Header>>`). Needed for lazy reads so we
     /// can apply BSCALE/BZERO/BLANK scaling without holding a
     /// back-pointer to the parent HDU.
     pub(crate) header: PyHeader,
-    /// Shared cache of the materialised pixel array (same `Arc` as
-    /// the parent :class:`PyImageHdu`'s `data`). Lets section
+    /// Shared cache of the materialized pixel array (same `Arc` as
+    /// the parent [`PyImageHdu`]'s `data`). Lets section
     /// reads/writes observe and update the parent's view.
     pub(crate) data: Arc<Mutex<Option<Py<PyAny>>>>,
-    /// Lazy-read source. `Some` when the parent HDU was opened
-    /// from disk (or a byte buffer), enabling region-only reads.
+    /// Lazy-read source. `Some` when the parent HDU was opened from
+    /// disk (or a byte buffer) as a plain image, enabling
+    /// region-only reads. `None` for an HDU built in memory and for
+    /// a tile-compressed image, matching the parent [`PyImageHdu`]'s
+    /// `read_binding` field.
     pub(crate) read_binding: Option<ReadBinding>,
     /// `Some` only when the parent file was opened with
     /// `mode='update'`. When present, `section[a:b] = arr` performs
@@ -1160,6 +1390,13 @@ impl PyImageSection {
 
     /// Materialise the full pixel array (same as `PyImageHdu::ensure_data`)
     /// and cache it in the shared `data` slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the Python exception mapped from `fitsy.FitsError` if
+    /// the pixel bytes cannot be read from the source file, or if the
+    /// data section no longer matches the header's `BITPIX`/`NAXISn`
+    /// layout.
     fn ensure_data(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         if let Some(arr) = self.data_if_loaded(py) {
             return Ok(Some(arr));
@@ -1193,6 +1430,31 @@ impl PyImageSection {
 
 #[pymethods]
 impl PyImageSection {
+    /// Read a region: ``section[key]``.
+    ///
+    /// Parameters
+    /// ----------
+    /// key : int, slice, or tuple of int/slice
+    ///   Indexed like ``hdu.data[key]``. When the pixel array has not
+    ///   yet been loaded into memory, a `key` built only from a
+    ///   contiguous ``slice(start, stop)`` (step 1, or omitted) and
+    ///   non-negative integers reads only the requested region from
+    ///   disk. Any other form -- a negative step, ``Ellipsis``, fancy
+    ///   indexing, a boolean mask -- loads the full array into memory
+    ///   first, then slices it.
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray
+    ///   The selected region. Its dtype is the one :attr:`ImageHdu.data`
+    ///   would have for this HDU.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the HDU has no data section (``NAXIS == 0``).
+    /// IndexError
+    ///   If an integer entry in `key` is out of bounds for its axis.
     fn __getitem__(&self, py: Python<'_>, key: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if !self.has_data() {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1208,7 +1470,7 @@ impl PyImageSection {
             // Region read returns raw big-endian bytes; we only
             // know how to decode them in the identity-scaling case
             // (BSCALE=1, BZERO=0, BLANK absent). For non-identity
-            // scaling, fall through to the materialise-then-slice
+            // scaling, fall through to the materialize-then-slice
             // path so `read_pixels` applies the conversion.
             let scaling_identity = {
                 let h = self.header.lock();
@@ -1248,7 +1510,7 @@ impl PyImageSection {
                 }
             }
         }
-        // Fallback: materialise the whole array, then slice. Used
+        // Fallback: materialize the whole array, then slice. Used
         // when the key is something `parse_region_key` doesn't
         // understand (fancy indexing, negative steps, ...).
         let Some(arr) = self.ensure_data(py)? else {
@@ -1259,15 +1521,14 @@ impl PyImageSection {
         Ok(arr.bind(py).get_item(&key)?.unbind())
     }
 
-    /// Assign a patch into the image.
+    /// Assign a patch into the image: ``section[key] = value``.
     ///
-    /// Mirrors astropy's ``hdu.section[...] = value``. The fast
-    /// path -- triggered when the file was opened with
+    /// The fast path -- triggered when the file was opened with
     /// ``mode='update'`` and the key is a tuple of
     /// ``slice(start, stop)`` (step 1) and non-negative integers --
     /// writes only the affected pixel bytes through the file via
     /// positional ``pwrite`` (O(patch), no full-image rewrite). If
-    /// the data array has already been materialised in memory the
+    /// the data array has already been materialized in memory the
     /// patch is also mirrored into it for consistency.
     ///
     /// All other writes (compressed images, fancy indexing,
@@ -1276,6 +1537,29 @@ impl PyImageSection {
     /// array and flag the file as dirty; the next
     /// :meth:`FitsFile.flush` (or clean ``__exit__``) rewrites the
     /// file via a sibling temp file + atomic rename.
+    ///
+    /// Parameters
+    /// ----------
+    /// key : int, slice, or tuple of int/slice
+    ///   Region to patch, indexed like ``hdu.data[key] = value``.
+    /// value : array-like
+    ///   Replacement pixels. Must broadcast to the shape `key`
+    ///   selects.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the HDU has no data section (``NAXIS == 0``); if the
+    ///   file is open with ``mode='update'`` and this HDU has
+    ///   non-identity scaling (``BSCALE != 1``, ``BZERO != 0``, or
+    ///   ``BLANK`` is set); if the file is open with
+    ///   ``mode='update'`` and `key` is not built only from
+    ///   contiguous ``slice(start, stop)`` (step 1) and non-negative
+    ///   integers; if `value` does not broadcast to the region `key`
+    ///   selects; or if the parent :class:`FitsFile` is read-only, in
+    ///   which case the cached array is frozen.
+    /// IndexError
+    ///   If an integer entry in `key` is out of bounds for its axis.
     fn __setitem__(
         &mut self,
         py: Python<'_>,
@@ -1350,7 +1634,7 @@ impl PyImageSection {
             }
             // Mirror into the cached array (if any) so subsequent
             // in-memory reads see the patch. If the array hasn't
-            // been materialised yet we simply skip the mirror --
+            // been materialized yet we simply skip the mirror --
             // the next lazy load will read fresh bytes (with this
             // patch) from disk.
             if let Some(arr) = self.data_if_loaded(py) {
@@ -1400,10 +1684,10 @@ impl PyImageSection {
                     // was structurally mutated since this HDU
                     // wrapper was issued). If the array is loaded
                     // it was already mutated above; if not,
-                    // materialise + apply patch so subsequent
+                    // materialize + apply patch so subsequent
                     // encodes see it. This keeps already-issued
                     // wrappers usable across structural mutations
-                    // at the cost of a one-time materialisation.
+                    // at the cost of a one-time materialization.
                     let Some(arr) = self.ensure_data(py)? else {
                         return Err(pyo3::exceptions::PyValueError::new_err(
                             "section: HDU has no data section (NAXIS == 0)",
@@ -1422,7 +1706,7 @@ impl PyImageSection {
         // parent file dirty (so `flush()` rewrites it). Used for
         // readonly files (where it's an in-memory edit), compressed
         // images, fancy indexing, and dtype mismatches. Forces a
-        // materialisation if the array hasn't been loaded yet.
+        // materialization if the array hasn't been loaded yet.
         let Some(arr) = self.ensure_data(py)? else {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "section: HDU has no data section (NAXIS == 0)",
@@ -1458,6 +1742,11 @@ impl PyImageSection {
 /// Returns `Ok(None)` for keys that contain anything other than
 /// `slice(start, stop)` (with step 1 or absent) or non-negative
 /// integers -- those force the slow fallback path.
+///
+/// # Errors
+///
+/// Returns a Python `IndexError` if an integer entry in `key` is out
+/// of bounds for its axis in `np_shape`.
 fn parse_region_key(
     key: &Bound<'_, PyAny>,
     np_shape: &[usize],
@@ -1526,6 +1815,11 @@ fn parse_region_key(
 /// Decode `raw` (native-endian numpy bytes for `bitpix`) into the
 /// matching primitive slice and call
 /// [`crate::FitsUpdater::write_image_subarray`].
+///
+/// # Errors
+///
+/// Returns a [`crate::FitsError`] if the underlying patch write
+/// fails, for example an I/O error writing to the file.
 fn write_patch_be(
     updater: &mut crate::FitsUpdater,
     hdu_idx: usize,

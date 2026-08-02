@@ -34,7 +34,7 @@ successful or failed check.
 
 From Python the same check is exposed as
 :py:meth:`fitsy.FitsFile.verify_checksums`, which streams the data
-section of each HDU from disk (no full materialisation) and
+section of each HDU from disk (no full materialization) and
 returns a list of ``dict``\ s, one per HDU:
 
 .. code-block:: python

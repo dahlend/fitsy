@@ -5,7 +5,27 @@
 use crate::data::ieee;
 use crate::error::{FitsError, Result};
 
-/// `BITPIX` value (Standard Sec.4.4.1.1).
+/// The pixel encoding of an image, from its `BITPIX` card (Standard
+/// Sec.4.4.1.1).
+///
+/// The standard defines six values. Three name a signed integer width,
+/// one names an unsigned byte, and two name an IEEE float width. An
+/// unsigned integer image uses a signed variant plus a `BZERO` card,
+/// per Sec.4.4.2.5.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::Bitpix;
+///
+/// assert_eq!(Bitpix::from_i64(16)?, Bitpix::I16);
+/// assert_eq!(Bitpix::I16.byte_size(), 2);
+/// assert_eq!(Bitpix::F64.as_i64(), -64);
+///
+/// // Half precision is not a FITS type.
+/// assert!(Bitpix::from_i64(-16).is_err());
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bitpix {
     /// `BITPIX = 8`: unsigned 8-bit integer.
@@ -158,9 +178,26 @@ impl Pixel for f64 {
     }
 }
 
-/// An image array decoded into memory: a flat element vector plus
-/// axis lengths in FITS order (`NAXIS1` is the *fastest-varying*
-/// axis, i.e. `axes[0]`).
+/// An image array decoded into memory.
+///
+/// This pairs a flat element vector with the axis lengths, in FITS
+/// order. `axes[0]` is `NAXIS1`, the fastest-varying axis, so the
+/// element at `(x, y)` sits at index `y * axes[0] + x`.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::ImageData;
+///
+/// let img = ImageData::new(vec![1_i16, 2, 3, 4, 5, 6], vec![3, 2])?;
+///
+/// assert_eq!(img.axes(), &[3, 2]);
+/// assert_eq!(img.as_slice().len(), 6);
+///
+/// // Row 1, column 2 is index 1 * 3 + 2.
+/// assert_eq!(img.as_slice()[1 * 3 + 2], 6);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct ImageData<T> {
     data: Vec<T>,

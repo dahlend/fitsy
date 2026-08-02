@@ -1,6 +1,10 @@
-//! Read an image FITS file: header, dtype, pixel data.
+//! Open an image, inspect its header, and decode its pixels.
 //!
-//! Run from the repo root:
+//! This reads the bundled NGC 2403 plate scan. It shows the `Hdu`
+//! match, the header accessors, and `read_physical`, which applies
+//! `BZERO` and `BSCALE` and returns `f64` pixels.
+//!
+//! Run from the repository root:
 //!
 //!     cargo run --example read_image
 

@@ -11,9 +11,13 @@ use std::f64::consts::FRAC_PI_2;
 /// standard parallels `theta_1` = `theta_a` - eta, `theta_2` = `theta_a` + eta.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ConicBase {
+    /// `PV2_1`, the mid-latitude between the two standard parallels.
     pub theta_a: f64,
+    /// `PV2_2`, the half-separation of the two standard parallels.
     pub eta: f64,
+    /// The first standard parallel, `theta_a - eta`.
     pub theta_1: f64,
+    /// The second standard parallel, `theta_a + eta`.
     pub theta_2: f64,
 }
 impl ConicBase {
@@ -62,8 +66,17 @@ fn conic_inverse_xy(x: f64, y: f64, y0: f64, c: f64, theta_a: f64) -> (f64, f64)
 #[derive(Debug, Clone, Copy)]
 pub struct Cop(ConicBase);
 impl Cop {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - `PV2_1` (`theta_a`) exceeds 90 degrees in magnitude.
+    /// - `theta_a` plus or minus `PV2_2` (`eta`) leaves the range -90
+    ///   to 90 degrees.
+    /// - `theta_a` is 0, which makes the projection singular.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() < 1e-12 {
@@ -120,8 +133,17 @@ impl Projection for Cop {
 #[derive(Debug, Clone, Copy)]
 pub struct Coe(ConicBase);
 impl Coe {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - `PV2_1` (`theta_a`) exceeds 90 degrees in magnitude.
+    /// - `theta_a` plus or minus `PV2_2` (`eta`) leaves the range -90
+    ///   to 90 degrees.
+    /// - `theta_a` is 0, which makes the projection singular.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() < 1e-12 {
@@ -182,8 +204,17 @@ impl Projection for Coe {
 #[derive(Debug, Clone, Copy)]
 pub struct Cod(ConicBase);
 impl Cod {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - `PV2_1` (`theta_a`) exceeds 90 degrees in magnitude.
+    /// - `theta_a` plus or minus `PV2_2` (`eta`) leaves the range -90
+    ///   to 90 degrees.
+    /// - `theta_a` is 0, which makes the projection singular.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() < 1e-12 {
@@ -236,8 +267,18 @@ impl Projection for Cod {
 #[derive(Debug, Clone, Copy)]
 pub struct Coo(ConicBase);
 impl Coo {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - `PV2_1` (`theta_a`) exceeds 90 degrees in magnitude.
+    /// - `theta_a` plus or minus `PV2_2` (`eta`) leaves the range -90
+    ///   to 90 degrees.
+    /// - `|theta_a|` is exactly 90 degrees, where the cone becomes a
+    ///   plane.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let base = ConicBase::from_pv(pv2)?;
         if base.theta_a.abs() >= 90.0 - 1e-12 {
@@ -305,10 +346,10 @@ mod tests {
     /// carries a `tan(theta - theta_a)` that diverges at 90 deg from
     /// the standard parallel and folds back beyond it.
     ///
-    /// Regression: the forward evaluated the tangent regardless, so a
-    /// latitude past the divergence produced a plane coordinate whose
-    /// inverse named a different latitude -- a wrong answer with no
-    /// error. `wcslib` reports those points as invalid.
+    /// Regression: the forward step evaluated the tangent regardless,
+    /// so a latitude past the divergence produced a plane coordinate
+    /// whose inverse named a different latitude. That is a wrong
+    /// answer reported as a right one.
     #[test]
     fn cop_refuses_beyond_the_divergence() {
         let cop = Cop::from_pv(&[0.0, 45.0, 25.0]).unwrap();

@@ -1,11 +1,49 @@
 //! FITS header parsing and construction (Standard Sec.4).
 //!
-//! The main types are:
-//! - [`Header`]: a parsed header, accessed via [`Header::first`],
-//!   [`Header::entries`], and [`Header::contains`].
-//! - [`Value`]: the parsed value of a header card.
-//! - [`Card`]: a single 80-byte card (keyword + value + comment).
-//! - [`Header::push`] / [`Header::to_bytes`]: the write path.
+//! # Purpose
+//!
+//! A FITS header is a sequence of 80-byte cards. This module parses
+//! that sequence into a [`Header`], reads values out of it, and
+//! renders it back to bytes.
+//!
+//! [`Header`] is the preservation layer of the crate. It holds every
+//! card as written, in file order, including a card that contradicts
+//! another card. Interpretation happens elsewhere, in
+//! [`Wcs`](crate::Wcs) for a coordinate description and in the
+//! [`reserved`] accessors for a single typed keyword.
+//!
+//! # Layout
+//!
+//! Three types carry the data:
+//!
+//! - [`Header`] -- one parsed header. Read it with [`Header::first`],
+//!   [`Header::entries`] and [`Header::contains`].
+//! - [`Card`] -- one 80-byte card, split into keyword, kind and body.
+//! - [`Value`] -- the parsed value of one card.
+//!
+//! Each submodule owns one part of the work:
+//!
+//! - [`card`] -- the 80-byte card scanner.
+//! - [`value`] -- the value and comment parser.
+//! - [`builder`] -- the write path, including [`Header::to_bytes`].
+//! - [`reserved`] -- typed accessors such as [`Header::bitpix`].
+//! - [`validation`] -- structural checks that report a [`Diagnostic`].
+//! - [`time`] -- the time keywords of Standard Sec.9.
+//! - [`observatory`] -- the `OBSGEO` location keywords.
+//! - [`units`] -- the `BUNIT` accessor built on [`crate::units`].
+//!
+//! # Design constraints
+//!
+//! A keyword can repeat. `COMMENT` and `HISTORY` do so by design, and
+//! a malformed file repeats a value keyword. [`Header`] keeps every
+//! occurrence and indexes the first one, so [`Header::first`] is a
+//! constant-time lookup while [`Header::entries`] still reaches the
+//! rest.
+//!
+//! Lookup falls back from `-` to `_`. Sec.4.1.2.1 makes the two
+//! distinct, but real files write `MJD_OBS` for `MJD-OBS`. The
+//! fallback runs in one direction only, so `CD1_1` never matches a
+//! `CD1-1` card.
 
 pub mod builder;
 pub mod card;
@@ -28,7 +66,27 @@ use std::collections::BTreeMap;
 use crate::error::{FitsError, Result};
 use crate::io::block::{BLOCK_SIZE, CARDS_PER_BLOCK};
 
-/// A parsed FITS header (a sequence of value cards plus commentary).
+/// A parsed FITS header: a sequence of value cards plus commentary.
+///
+/// [`Header::parse`] reads one from bytes, and the builder methods in
+/// [`builder`] construct one. [`Header::to_bytes`] renders it back.
+///
+/// # Examples
+///
+/// ```
+/// use fitsy::{Header, Value};
+///
+/// let mut h = Header::empty();
+/// h.push("SIMPLE", true, Some("conforming FITS file"))?;
+/// h.push("OBJECT", "M42", None)?;
+///
+/// assert!(h.contains("OBJECT"));
+/// assert_eq!(h.first("OBJECT"), Some(&Value::String("M42".into())));
+///
+/// // Rendering pads to the 2880-byte block and appends END.
+/// assert_eq!(h.to_bytes()?.len() % 2880, 0);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct Header {
     cards: Vec<HeaderEntry>,
@@ -58,9 +116,16 @@ pub struct HeaderEntry {
 }
 
 impl Header {
-    /// Parse a header starting at the given byte offset within `bytes`
-    /// in strict mode. Returns the header and the number of bytes
-    /// consumed (a multiple of 2880).
+    /// Parse a header from byte offset `start` within `bytes`, in
+    /// strict mode.
+    ///
+    /// The result pairs the header with the number of bytes consumed,
+    /// which is a multiple of 2880.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Header::parse_with`] with `lenient` set to
+    /// `false`.
     pub fn parse(bytes: &[u8], start: u64) -> Result<(Self, u64)> {
         Self::parse_with(bytes, start, false)
     }
@@ -76,9 +141,24 @@ impl Header {
     /// stray bytes after `END`, broken `CONTINUE` chains, and an `END`
     /// written in any case.
     ///
-    /// An `END` card is required in **both** modes -- it is the only
-    /// marker of the header/data boundary. The buffer may run past the
-    /// header and end mid-block; only whole blocks are scanned.
+    /// An `END` card is required under either value of `lenient`. It
+    /// is the only marker of the boundary between header and data.
+    ///
+    /// The buffer may run past the header and may end mid-block. The
+    /// scan reads whole blocks alone.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Block`] when `start` lies past the end of
+    ///   `bytes`, or when no `END` card appears in the whole blocks
+    ///   available.
+    /// - [`FitsError::Card`] or [`FitsError::Value`] when a card fails
+    ///   to parse. A `lenient` value of `true` recovers most of these
+    ///   as [`Value::Unparsed`].
+    /// - [`FitsError::EndCardMisplaced`] when `lenient` is `false` and
+    ///   a non-space byte follows the `END` card.
+    /// - [`FitsError::Header`] when `lenient` is `false` and a
+    ///   `CONTINUE` card has no string card to continue.
     pub fn parse_with(bytes: &[u8], start: u64, lenient: bool) -> Result<(Self, u64)> {
         let start_usize = start as usize;
         if start_usize > bytes.len() {

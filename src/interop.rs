@@ -1,17 +1,21 @@
-//! Optional conversions between `fitsy` types and external linear-
-//! algebra crates. Each integration lives behind its own feature
-//! flag so non-users pay nothing.
+//! Conversions between `fitsy` types and external linear-algebra
+//! crates.
 //!
-//! - `nalgebra` (feature `nalgebra`): re-shapes [`ImageData`] into a
-//!   `nalgebra::DMatrix`, exposes the WCS pipeline matrices, and
-//!   adds a batched [`Wcs::pixel_to_world_na`] / [`Wcs::world_to_pixel_na`].
-//! - `faer` (feature `faer`): the same surface, mirrored onto
-//!   `faer::Mat`.
+//! # Purpose
 //!
-//! The convention for batched coordinate transforms is **column-major
-//! per point**: a matrix of shape `(naxis, n)` represents `n` points,
-//! one per column. This matches the native column-major layout of
-//! both nalgebra and faer.
+//! Each integration sits behind its own cargo feature, so a build that
+//! does not enable one compiles none of its code.
+//!
+//! - `nalgebra` -- re-shapes [`ImageData`] into a `nalgebra::DMatrix`,
+//!   exposes the WCS pipeline matrices, and adds the batched
+//!   [`Wcs::pixel_to_world_na`] and [`Wcs::world_to_pixel_na`].
+//! - `faer` -- the same surface over `faer::Mat`.
+//!
+//! # Design constraints
+//!
+//! A batched coordinate transform is column-major per point. A matrix
+//! of shape `(naxis, n)` holds `n` points, one per column. This
+//! matches the native column-major layout of both matrix types.
 //!
 //! [`ImageData`]: crate::data::ImageData
 //! [`Wcs::pixel_to_world_na`]: crate::Wcs::pixel_to_world_na

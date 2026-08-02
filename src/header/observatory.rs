@@ -1,4 +1,14 @@
 //! Observatory location keywords (WCS Paper IV Sec.3.1.4).
+//!
+//! [`ObsGeo`] holds the ITRS Cartesian form, `OBSGEO-X`, `OBSGEO-Y`
+//! and `OBSGEO-Z`. [`ObsGeodetic`] holds the geodetic form,
+//! `OBSGEO-B`, `OBSGEO-L` and `OBSGEO-H`. This module converts
+//! between the two.
+//!
+//! The conversion uses the WGS84 reference ellipsoid. Paper IV
+//! Sec.3.1.4 cites the IAU 1976 ellipsoid, and also states that
+//! nanosecond precision needs a post-1984 geodetic frame. GPS
+//! receivers and current FITS writers use WGS84.
 
 use crate::header::Header;
 

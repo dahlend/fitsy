@@ -1,5 +1,8 @@
-//! Top-level `Hdu` enum: the dispatch type for any parsed HDU. Each
-//! variant owns a borrowed view (lifetime `'a`) over the file bytes.
+//! The [`Hdu`] enum, which dispatches on the type of a parsed HDU.
+//!
+//! Each variant holds a borrowed view over the file bytes. The
+//! lifetime `'a` is the lifetime of the [`FitsFile`](crate::FitsFile)
+//! that produced the HDU.
 
 use crate::header::Header;
 
@@ -8,11 +11,33 @@ use super::bintable::BinTableHdu;
 use super::image::ImageHdu;
 use super::random_groups::RandomGroupsHdu;
 
-/// All HDU kinds this crate currently understands.
+/// The HDU kinds that this crate recognizes.
 ///
-/// Unknown / future `XTENSION` types are not silent errors: they are
-/// surfaced as [`Hdu::Conforming`] so that callers can still inspect
-/// the header and the raw data bytes.
+/// An `XTENSION` value outside this set is not an error. It arrives as
+/// [`Hdu::Conforming`], so a caller still reads its header and its raw
+/// data bytes.
+///
+/// # Examples
+///
+/// ```
+/// # use fitsy::{FitsWriter, ImageBuilder};
+/// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// #     .primary(true)
+/// #     .build()?;
+/// # let mut buf: Vec<u8> = Vec::new();
+/// # FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+/// use fitsy::{FitsFile, Hdu};
+///
+/// let file = FitsFile::from_bytes(buf)?;
+/// for hdu in file.iter() {
+///     match hdu? {
+///         Hdu::Image(img) => assert_eq!(img.axes(), &[4, 3]),
+///         Hdu::BinTable(t) => println!("{} rows", t.n_rows()),
+///         other => println!("other kind: {other:?}"),
+///     }
+/// }
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Hdu<'a> {
@@ -29,9 +54,8 @@ pub enum Hdu<'a> {
     /// Only available when the `compression` feature is enabled.
     #[cfg(feature = "compression")]
     CompressedImage(crate::compression::CompressedImageHdu<'a>),
-    /// An `XTENSION` whose type is not (yet) recognized by this
-    /// crate. Callers can still inspect the header and the raw
-    /// data bytes.
+    /// An `XTENSION` whose type this crate does not recognize. A
+    /// caller still reads its header and its raw data bytes.
     Conforming(ConformingHdu<'a>),
 }
 
@@ -50,8 +74,11 @@ pub struct ConformingHdu<'a> {
 }
 
 impl<'a> ConformingHdu<'a> {
-    /// Construct from a parsed header, the raw data slice, and the
-    /// `XTENSION` value (already trimmed).
+    /// Construct from a parsed header and the raw data section.
+    ///
+    /// The `data` argument covers the data section without its
+    /// trailing block padding. The `xtension` argument holds the
+    /// `XTENSION` value, already trimmed of its padding spaces.
     #[must_use]
     pub fn new(header: Header, data: &'a [u8], xtension: String) -> Self {
         Self {

@@ -37,8 +37,13 @@ pub struct Cea {
     pub lambda: f64,
 }
 impl Cea {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_1` (`lambda`) lies outside the
+    /// half-open range 0 to 1.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let lambda = pv2.get(1).copied().unwrap_or(1.0);
         if lambda <= 0.0 || lambda > 1.0 {
@@ -106,8 +111,13 @@ pub struct Cyp {
     pub lambda: f64,
 }
 impl Cyp {
-    /// Build from the latitude axis's `PV2_m` table, indexed by `m` and
-    /// zero-filled where a card is absent.
+    /// Build from the `PV2_m` table of the latitude axis. The
+    /// table is indexed by `m` and holds 0 where a card is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `PV2_1` (`mu`) plus `PV2_2`
+    /// (`lambda`) is 0, which makes the projection singular.
     pub fn from_pv(pv2: &[f64]) -> Result<Self> {
         let mu = pv2.get(1).copied().unwrap_or(1.0);
         let lambda = pv2

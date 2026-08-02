@@ -44,20 +44,23 @@ fn header_has_wcs(h: &PyHeader) -> bool {
 
 /// Parse a FITS file open mode into the read-only flag.
 ///
-/// Named after astropy's `fits.open` modes:
+/// Recognizes four mode strings:
 ///
 /// * `"readonly"` (default) -- header mutation and `writeto` raise.
+/// * `"denywrite"` -- a stricter readonly mode. No other process may
+///   open the file for writing under its intended semantics; fitsy
+///   does not enforce that OS-level lock, and treats it exactly like
+///   `"readonly"`.
 /// * `"update"` -- read/write; edits are kept on `writeto`.
+/// * `"append"` and `"ostream"` -- not implemented; use `fitsy.write`
+///   for output-only work.
 ///
-/// `"denywrite"` is a synonym for `"readonly"`, without the OS-level
-/// lock. `"append"` and `"ostream"` are not implemented; use
-/// `fitsy.write` for output-only work.
+/// # Errors
+///
+/// Returns [`PyValueError`] if `mode` is none of the four strings
+/// above.
 fn parse_mode(mode: &str) -> PyResult<bool> {
     match mode {
-        // 'denywrite' is astropy's stricter readonly (no other
-        // process may open the file for writing). We don't enforce
-        // the OS-level lock today, but we honour the read-only
-        // intent so existing astropy code keeps working.
         "readonly" | "denywrite" => Ok(true),
         "update" => Ok(false),
         "append" | "ostream" => Err(PyValueError::new_err(format!(
@@ -66,8 +69,7 @@ fn parse_mode(mode: &str) -> PyResult<bool> {
              save a modified copy"
         ))),
         other => Err(PyValueError::new_err(format!(
-            "fitsy.open: mode must be 'readonly', 'denywrite', or 'update' (astropy convention); \
-             got {other:?}"
+            "fitsy.open: mode must be 'readonly', 'denywrite', or 'update'; got {other:?}"
         ))),
     }
 }
@@ -78,16 +80,25 @@ fn parse_mode(mode: &str) -> PyResult<bool> {
 /// ----------
 /// path : str or os.PathLike
 ///   Filesystem path to the FITS file.
-/// mode : {'readonly', 'update'}, optional
-///   ``'readonly'`` (default) opens read-only; header mutations and
-///   :meth:`FitsFile.writeto` raise :class:`ValueError`. Matches
-///   astropy's ``fits.open`` mode of the same name.
+/// mode : {'readonly', 'denywrite', 'update'}, optional
+///   ``'readonly'`` (default) opens read-only. Every mutation --
+///   a header edit, a pixel edit, :meth:`FitsFile.append`,
+///   ``del file[i]``, and :meth:`FitsFile.writeto` back onto the
+///   same path -- raises :class:`ValueError`. :meth:`FitsFile.writeto`
+///   to a different path still works, and copies the file unchanged.
+///
+///   ``'denywrite'`` behaves exactly like ``'readonly'``. fitsy does
+///   not take an OS-level write lock for this mode.
 ///
 ///   ``'update'`` opens read/write. Header edits and image-pixel
-///   in-place edits (``hdu.data[...] = x``) are preserved on
-///   :meth:`FitsFile.writeto`. Table column data is read-only
-///   in this release; reconstruct the table with
-///   :func:`fitsy.bintable` to change column values.
+///   in-place edits (``hdu.data[...] = x``) are preserved on the next
+///   :meth:`FitsFile.flush`, :meth:`FitsFile.close`, or a clean
+///   ``__exit__``. Table column data is read-only in this release;
+///   reconstruct the table with :func:`fitsy.bintable` to change
+///   column values.
+///
+///   ``'append'`` and ``'ostream'`` are recognized but not
+///   implemented; use :func:`fitsy.write` for output-only work.
 /// lenient : bool, optional
 ///   Tolerate common non-conforming headers so real-world files load.
 ///   **Default True.** Pass ``lenient=False`` to require strict FITS
@@ -200,22 +211,34 @@ struct FileState {
 
 /// Owning, ordered, mutable list of HDUs.
 ///
-/// Behaves like astropy's ``astropy.io.fits.HDUList``. Each slot is a
-/// typed object (:class:`ImageHdu` / :class:`BinTable` /
-/// :class:`AsciiTable`) owning its own header and data, and outlives
-/// the file handle.
+/// Each slot is a typed object -- :class:`ImageHdu`, :class:`BinTable`,
+/// :class:`AsciiTable`, or :class:`RandomGroups` -- owning its own
+/// header and data, and it outlives the file handle.
 ///
-/// In ``mode='readonly'`` (the default), edits such as
-/// ``f[0].data[...] = x``, ``f[0].header["K"] = v``, ``f.append(hdu)``
-/// and ``del f[i]`` stay in memory until the next :meth:`writeto`; the
-/// source file is never modified.
+/// In ``mode='readonly'`` (the default), every mutation raises
+/// :class:`ValueError`: a header edit, ``hdu.data[...] = x``,
+/// ``f.append(hdu)``, ``del f[i]``, and :meth:`writeto` back onto the
+/// source path. :meth:`writeto` to a different path still works and
+/// copies the file unchanged.
 ///
-/// In ``mode='update'`` the same edits go back to the source file on
-/// :meth:`flush`, :meth:`close` or a clean ``__exit__``. Pixel patches
-/// via ``f[i].section[...] = arr`` are written immediately.
+/// In ``mode='update'``, the same edits are held in memory and reach
+/// the source file on the next :meth:`flush`, :meth:`close`, or a
+/// clean ``__exit__``. A pixel patch through
+/// ``f[i].section[a:b] = arr`` is written immediately instead, and
+/// does not wait for :meth:`flush`.
 ///
-/// Use the :func:`open` factory rather than constructing this
-/// directly.
+/// Build a new, in-memory file with the ``FitsFile()`` constructor
+/// (no path), then :meth:`append` each HDU and call :meth:`writeto`
+/// to create a file from nothing.
+///
+/// Use the :func:`open` factory to load an existing file rather than
+/// constructing this class directly.
+///
+/// Notes
+/// -----
+/// A :class:`RandomGroups` HDU writes back the header and the data
+/// section it was read with. The bindings expose no way to edit
+/// either, so a write reproduces the source HDU byte for byte.
 ///
 /// Examples
 /// --------
@@ -223,8 +246,7 @@ struct FileState {
 /// ...     f[0].data[0, 0] = 42.0
 /// ...     # changes flushed automatically on __exit__
 /// >>> with fitsy.open("image.fits") as f:    # readonly
-/// ...     f[0].header["OBSERVER"] = "you"
-/// ...     f.writeto("edited.fits")           # original untouched
+/// ...     f.writeto("copy.fits")             # unmodified copy
 #[pyclass(name = "FitsFile", module = "fitsy")]
 #[derive(Debug)]
 pub struct PyFitsFile {
@@ -278,6 +300,15 @@ impl PyFitsFile {
     /// Materialize the slot at `slot_idx` into a live Python HDU
     /// wrapper, replacing the `Pending` placeholder. Returns a new
     /// owned reference (clone of the cached one).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PyIndexError`] if `slot_idx` is out of range.
+    /// Returns [`PyValueError`] if the backing file was already
+    /// dropped (by [`Self::close`] or a prior rewrite) while this
+    /// slot was still `Pending`. Returns the Python exception mapped
+    /// from `fitsy.FitsError` if the HDU fails to parse, and
+    /// [`PyTypeError`] if it is a kind the bindings do not wrap.
     fn materialize_at(&self, py: Python<'_>, slot_idx: usize) -> PyResult<Py<PyAny>> {
         let mut st = self.lock_state();
         let n = st.slots.len();
@@ -339,6 +370,12 @@ impl PyFitsFile {
     /// This path skips the per-HDU data cache, reading pixels only on
     /// demand, so opening a file and reading header properties keeps
     /// no pixel bytes resident.
+    ///
+    /// # Errors
+    ///
+    /// Returns the Python exception mapped from `fitsy.FitsError` if
+    /// the header cannot be parsed, or if `NAXIS`/`NAXISn`/`BITPIX`
+    /// is missing or invalid.
     fn try_image_fast_path(
         &self,
         py: Python<'_>,
@@ -416,15 +453,6 @@ impl PyFitsFile {
         Ok(out)
     }
 
-    /// Rewrite the backing file to absorb the in-memory edits that
-    /// could not be satisfied by an in-place pixel-patch (header
-    /// edits, structural mutations, `set_data`, fancy slice writes).
-    ///
-    /// Streams raw bytes for slots the user never touched
-    /// (`HduSlot::Pending`); only re-encodes materialised slots.
-    /// On success, drops the original `FitsFile` and `FitsUpdater`
-    /// and re-opens them against the freshly written file so that
-    /// further mutations and pixel-patches keep working.
     /// Did any HDU that handed a writeable array to Python actually
     /// come out different from the file?
     ///
@@ -456,6 +484,25 @@ impl PyFitsFile {
         false
     }
 
+    /// Rewrite the backing file to absorb the in-memory edits that
+    /// could not be satisfied by an in-place pixel-patch (header
+    /// edits, structural mutations, `set_data`, fancy slice writes).
+    ///
+    /// Streams raw bytes for slots the user never touched
+    /// (`HduSlot::Pending`); only re-encodes materialized slots.
+    /// On success, drops the original `FitsFile` and `FitsUpdater`
+    /// and re-opens them against the freshly written file so that
+    /// further mutations and pixel-patches keep working.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PyValueError`] if `self.original_path` is `None`
+    /// (an in-memory file has nothing to rewrite), if the resulting
+    /// HDU list would be empty, or if a mutex was poisoned by an
+    /// earlier panic. Returns [`PyTypeError`] if a materialized HDU
+    /// slot cannot be encoded (see [`encode_hdu`]). Returns the
+    /// Python exception mapped from `fitsy.FitsError` on an I/O
+    /// failure or an encoding error from the core crate.
     fn persist_full_rewrite(&self, py: Python<'_>) -> PyResult<()> {
         use std::fs::OpenOptions;
         use std::io::{BufWriter, Write};
@@ -699,14 +746,35 @@ impl PyFitsFile {
         self.read_only
     }
 
-    /// Return the ``i``-th HDU (``file[i]``) or the first HDU named
-    /// ``EXTNAME`` (``file["NAME"]``).
+    /// Return the ``i``-th HDU (``file[i]``), the first HDU named
+    /// ``EXTNAME`` (``file["NAME"]``), or the HDU matching both
+    /// ``EXTNAME`` and ``EXTVER`` (``file["NAME", ver]``).
     ///
-    /// Negative integer indices count from the end (Python convention).
-    /// Tuple keys ``file["NAME", ver]`` select by ``EXTNAME`` and
-    /// ``EXTVER`` (astropy parity).
+    /// Parameters
+    /// ----------
+    /// key : int or str or tuple[str, int]
+    ///   An HDU index, an ``EXTNAME`` string, or an
+    ///   ``(EXTNAME, EXTVER)`` tuple. A negative integer index counts
+    ///   from the end.
+    ///
+    /// Returns
+    /// -------
+    /// ImageHdu or BinTable or AsciiTable or RandomGroups
+    ///   The matching HDU.
+    ///
+    /// Raises
+    /// ------
+    /// IndexError
+    ///   If `key` is an ``int`` outside the valid range.
+    /// KeyError
+    ///   If `key` is a ``str`` or an ``(EXTNAME, EXTVER)`` tuple and
+    ///   no HDU matches.
+    /// TypeError
+    ///   If `key` is a tuple whose length is not 2 or whose elements
+    ///   do not convert to ``(str, int)``, or if `key` is none of
+    ///   ``int``, ``str``, or a 2-element tuple.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        // astropy-style ("EXTNAME", EXTVER) tuple lookup.
+        // (EXTNAME, EXTVER) tuple lookup.
         if let Ok(tup) = key.cast::<pyo3::types::PyTuple>()
             && tup.len() == 2
         {
@@ -734,7 +802,36 @@ impl PyFitsFile {
         self.materialize_at(py, idx as usize)
     }
 
-    /// Replace ``file[i]``. Accepts an HDU instance or a builder.
+    /// Replace ``file[i]`` (``file[i] = value``).
+    ///
+    /// Parameters
+    /// ----------
+    /// i : int
+    ///   HDU index to replace. Accepts a negative index, counting
+    ///   from the end.
+    /// value : ImageHdu or BinTable or AsciiTable
+    ///   The new HDU. This also accepts a builder, meaning an
+    ///   :class:`fitsy.ImageBuilder`, a :class:`fitsy.BinTableBuilder`
+    ///   or an :class:`fitsy.AsciiTableBuilder`, as returned by
+    ///   :func:`fitsy.image`, :func:`fitsy.bintable` or
+    ///   :func:`fitsy.ascii_table`. A builder is promoted to a live,
+    ///   independently editable HDU instance.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the file was opened read-only.
+    /// TypeError
+    ///   If `value` is not an HDU instance or a builder.
+    /// IndexError
+    ///   If `i` is outside the valid range.
+    ///
+    /// Notes
+    /// -----
+    /// Marks the file dirty, and invalidates every cached in-place
+    /// pixel-patch binding, before `value` or `i` is checked. Even a
+    /// call that raises still forces the next write to be a full
+    /// rewrite.
     fn __setitem__(&self, py: Python<'_>, i: isize, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         self.dirty.definite.store(true, Ordering::Release);
@@ -750,7 +847,27 @@ impl PyFitsFile {
         Ok(())
     }
 
-    /// Remove ``file[i]``.
+    /// Remove ``file[i]`` (``del file[i]``).
+    ///
+    /// Parameters
+    /// ----------
+    /// i : int
+    ///   HDU index to remove. Accepts a negative index, counting
+    ///   from the end.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the file was opened read-only.
+    /// IndexError
+    ///   If `i` is outside the valid range.
+    ///
+    /// Notes
+    /// -----
+    /// Marks the file dirty, and invalidates every cached in-place
+    /// pixel-patch binding, before `i` is checked. A call that
+    /// raises `IndexError` still forces the next write to be a full
+    /// rewrite.
     fn __delitem__(&self, i: isize) -> PyResult<()> {
         self.ensure_writable()?;
         self.dirty.definite.store(true, Ordering::Release);
@@ -765,9 +882,19 @@ impl PyFitsFile {
         Ok(())
     }
 
-    /// Iterate over HDUs in declaration order. Materializes any
-    /// pending slots up front so the iterator's snapshot is stable
-    /// against concurrent edits.
+    /// Iterate over HDUs in declaration order.
+    ///
+    /// Materializes every pending slot up front, so the iterator's
+    /// snapshot is stable against a concurrent edit.
+    ///
+    /// Returns
+    /// -------
+    /// Iterator[ImageHdu | BinTable | AsciiTable | RandomGroups]
+    ///
+    /// Raises
+    /// ------
+    /// FitsError
+    ///   If an HDU fails to parse from the source file.
     fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<HduIter>> {
         let snapshot = slf.materialize_all(slf.py())?;
         Py::new(
@@ -779,7 +906,31 @@ impl PyFitsFile {
         )
     }
 
-    /// Append an HDU at the end. Accepts an HDU instance or a builder.
+    /// Append an HDU at the end.
+    ///
+    /// Parameters
+    /// ----------
+    /// value : ImageHdu or BinTable or AsciiTable
+    ///   The new HDU. This also accepts a builder, meaning an
+    ///   :class:`fitsy.ImageBuilder`, a :class:`fitsy.BinTableBuilder`
+    ///   or an :class:`fitsy.AsciiTableBuilder`, as returned by
+    ///   :func:`fitsy.image`, :func:`fitsy.bintable` or
+    ///   :func:`fitsy.ascii_table`. A builder is promoted to a live,
+    ///   independently editable HDU instance.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the file was opened read-only.
+    /// TypeError
+    ///   If `value` is not an HDU instance or a builder.
+    ///
+    /// Notes
+    /// -----
+    /// Marks the file dirty, and invalidates every cached in-place
+    /// pixel-patch binding, before `value` is checked. A call that
+    /// raises `TypeError` still forces the next write to be a full
+    /// rewrite.
     fn append(&self, py: Python<'_>, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         self.dirty.definite.store(true, Ordering::Release);
@@ -789,7 +940,35 @@ impl PyFitsFile {
         Ok(())
     }
 
-    /// Insert an HDU at position ``i``. Accepts an HDU instance or a builder.
+    /// Insert an HDU at position ``i``.
+    ///
+    /// Parameters
+    /// ----------
+    /// i : int
+    ///   Target position. A negative index counts from the end.
+    ///   Clamped into ``[0, len(file)]``, so an out-of-range value
+    ///   inserts at the nearer end instead of raising.
+    /// value : ImageHdu or BinTable or AsciiTable
+    ///   The new HDU. This also accepts a builder, meaning an
+    ///   :class:`fitsy.ImageBuilder`, a :class:`fitsy.BinTableBuilder`
+    ///   or an :class:`fitsy.AsciiTableBuilder`, as returned by
+    ///   :func:`fitsy.image`, :func:`fitsy.bintable` or
+    ///   :func:`fitsy.ascii_table`. A builder is promoted to a live,
+    ///   independently editable HDU instance.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the file was opened read-only.
+    /// TypeError
+    ///   If `value` is not an HDU instance or a builder.
+    ///
+    /// Notes
+    /// -----
+    /// Marks the file dirty, and invalidates every cached in-place
+    /// pixel-patch binding, before `value` is checked. A call that
+    /// raises `TypeError` still forces the next write to be a full
+    /// rewrite.
     fn insert(&self, py: Python<'_>, i: isize, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.ensure_writable()?;
         self.dirty.definite.store(true, Ordering::Release);
@@ -804,6 +983,24 @@ impl PyFitsFile {
 
     /// Return the ``i``-th HDU. Equivalent to ``file[i]`` for
     /// non-negative integer ``i``.
+    ///
+    /// Parameters
+    /// ----------
+    /// i : int
+    ///   HDU index. Unlike ``file[i]``, does not accept a negative
+    ///   index.
+    ///
+    /// Returns
+    /// -------
+    /// ImageHdu or BinTable or AsciiTable or RandomGroups
+    ///   The matching HDU.
+    ///
+    /// Raises
+    /// ------
+    /// IndexError
+    ///   If `i` is at least ``len(file)``.
+    /// OverflowError
+    ///   If `i` is negative.
     fn hdu(&self, py: Python<'_>, i: usize) -> PyResult<Py<PyAny>> {
         if i >= self.lock_state().slots.len() {
             return Err(PyIndexError::new_err(format!("HDU index {i} out of range")));
@@ -818,13 +1015,25 @@ impl PyFitsFile {
     /// name : str
     ///   Value of the ``EXTNAME`` keyword to match.
     /// ver : int, optional
-    ///   If given, also require matching ``EXTVER`` (default 1
-    ///   when the keyword is absent).
+    ///   Value of the ``EXTVER`` keyword to also require. Default
+    ///   ``None``, which matches on `name` alone, regardless of
+    ///   ``EXTVER``. When `ver` is given, an HDU with no ``EXTVER``
+    ///   card is treated as ``EXTVER=1``.
+    ///
+    /// Returns
+    /// -------
+    /// ImageHdu or BinTable or AsciiTable or RandomGroups
+    ///   The matching HDU.
     ///
     /// Raises
     /// ------
-    /// IndexError
-    ///   If no HDU matches.
+    /// KeyError
+    ///   If no HDU matches `name` (and `ver`, when given).
+    ///
+    /// Notes
+    /// -----
+    /// Materializes each HDU, in order, until a match is found or
+    /// the list is exhausted.
     #[pyo3(signature = (name, ver=None))]
     fn hdu_by_name(&self, py: Python<'_>, name: &str, ver: Option<i64>) -> PyResult<Py<PyAny>> {
         use pyo3::exceptions::PyKeyError;
@@ -862,10 +1071,29 @@ impl PyFitsFile {
     /// Parameters
     /// ----------
     /// i : int, optional
-    ///   HDU index. Default 0 (primary HDU).
+    ///   HDU index. Default 0 (primary HDU). Does not accept a
+    ///   negative index.
     /// alt : str, optional
     ///   Single ASCII character. ``' '`` (default) selects the
-    ///   primary WCS description.
+    ///   primary WCS description; ``'A'`` through ``'Z'`` select
+    ///   alternate descriptions.
+    ///
+    /// Returns
+    /// -------
+    /// Wcs or None
+    ///   ``None`` if HDU `i`'s header carries no WCS for `alt`.
+    ///
+    /// Raises
+    /// ------
+    /// IndexError
+    ///   If `i` is at least ``len(file)``.
+    /// OverflowError
+    ///   If `i` is negative.
+    /// ValueError
+    ///   If `alt` is not exactly one character.
+    /// FitsError
+    ///   If `alt` is not ``' '`` or one of ``'A'``-``'Z'``, or if the
+    ///   header carries a malformed WCS.
     ///
     /// Notes
     /// -----
@@ -902,6 +1130,11 @@ impl PyFitsFile {
     /// - :class:`BinTable`, :class:`AsciiTable` -- data bytes are
     ///   re-emitted as captured at load time (column edits do
     ///   *not* round-trip in this release).
+    /// - :class:`RandomGroups` -- header and data section are
+    ///   re-emitted as captured at load time.
+    ///
+    /// An HDU slot that is still ``Pending`` (never accessed)
+    /// streams through unchanged, whatever its kind.
     ///
     /// If the first HDU is not an image, an empty primary image HDU
     /// (``NAXIS = 0``) is automatically prepended so the output is a
@@ -927,6 +1160,10 @@ impl PyFitsFile {
     ///   to the source file and the handle is read-only.
     /// FileExistsError
     ///   If ``path`` exists and ``overwrite`` is False.
+    /// TypeError
+    ///   If an HDU slot holds an object that is none of
+    ///   :class:`ImageHdu`, :class:`BinTable`, :class:`AsciiTable`
+    ///   or :class:`RandomGroups`.
     /// FitsError
     ///   On I/O failure.
     #[pyo3(signature = (path, overwrite=false))]
@@ -939,7 +1176,7 @@ impl PyFitsFile {
         // through a sibling-rename would unmap the live `inner` and
         // `updater` mappings out from under any held `hdu.section`
         // bindings. Detect the self-write case and dispatch
-        // accordingly: with `overwrite=False` we honour the
+        // accordingly: with `overwrite=False` we honor the
         // FileExistsError contract; with `overwrite=True` we behave
         // exactly like `flush()` (rewrite, atomic rename, reopen).
         let writes_to_self = self
@@ -949,9 +1186,9 @@ impl PyFitsFile {
             .unwrap_or(false);
         if writes_to_self {
             // A self-write is a mutation of the source file; only
-            // permitted in update mode. Astropy parity: writing to
-            // a *different* path from a readonly handle is allowed
-            // and is the canonical "save edits to a copy" workflow.
+            // permitted in update mode. Writing to a different path
+            // from a readonly handle is allowed, and is the standard
+            // way to save a copy.
             self.ensure_writable()?;
             if !overwrite {
                 return Err(PyFileExistsError::new_err(format!(
@@ -961,7 +1198,7 @@ impl PyFitsFile {
             }
             // Force a full rewrite even if no edits are pending so
             // the on-disk bytes match what `materialize_all + encode`
-            // would produce -- matches astropy semantics.
+            // would produce.
             self.dirty.definite.store(true, Ordering::Release);
             return self.persist_full_rewrite(py);
         }
@@ -1157,13 +1394,14 @@ impl PyFitsFile {
                     let details = {
                         // Use the cached `axes` snapshot so the
                         // info table never triggers a lazy data
-                        // read (the eager pixel materialisation
+                        // read (the eager pixel materialization
                         // would defeat the lazy design).
                         let dims: Vec<String> = img.axes.iter().map(ToString::to_string).collect();
                         if dims.is_empty() {
                             dtype.to_string()
                         } else {
-                            // Left-pad dtype to 7 chars so "uint8" aligns with "float32".
+                            // Left-pad dtype to 7 chars so "uint8" aligns
+                            // with "float32".
                             format!("{dtype:<7}  {}", dims.join(" \u{00d7} "))
                         }
                     };
@@ -1236,7 +1474,7 @@ impl PyFitsFile {
     /// Verify per-HDU ``CHECKSUM`` and ``DATASUM`` cards.
     ///
     /// Streams the data section of each HDU directly from disk in
-    /// fixed-size chunks (no full materialisation) and compares
+    /// fixed-size chunks (no full materialization) and compares
     /// against the values stored in the HDU header. HDUs that have
     /// neither card are reported with both fields ``None``; HDUs
     /// that only have one of the two are reported with the missing
@@ -1251,13 +1489,21 @@ impl PyFitsFile {
     ///   * ``checksum_ok`` -- ``True``/``False``/``None``.
     ///   * ``datasum_ok`` -- ``True``/``False``/``None``.
     ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///   If the file has no backing path -- built with the
+    ///   ``FitsFile()`` constructor rather than :func:`fitsy.open` --
+    ///   or if :meth:`close` was already called.
+    /// FitsError
+    ///   On an I/O failure, or if a header fails to parse.
+    ///
     /// Notes
     /// -----
-    /// Works on any file (read-only or update), and on in-memory
-    /// `FitsFile` objects whose data is already resident.
-    /// Astropy parity: equivalent to iterating
-    /// ``[hdu.verify_checksum() for hdu in hdul]`` but without
-    /// reading the data into memory.
+    /// Reads the header and data bytes currently on disk, in both
+    /// ``mode='readonly'`` and ``mode='update'``. An in-memory edit
+    /// that has not yet reached the file through :meth:`flush`,
+    /// :meth:`close`, or a clean ``__exit__`` is not reflected.
     fn verify_checksums(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use pyo3::types::{PyBool, PyDict, PyList};
         let st = self.lock_state();
@@ -1284,61 +1530,79 @@ impl PyFitsFile {
         Ok(list.into_any().unbind())
     }
 
-    /// Enable ``CHECKSUM`` / ``DATASUM`` stamping on the next
-    /// :meth:`writeto` or :meth:`flush`.
+    /// Enable ``CHECKSUM`` / ``DATASUM`` stamping on every HDU that
+    /// :meth:`writeto` emits, and on every HDU that :meth:`flush`
+    /// rewrites.
     ///
-    /// When called, every HDU emitted by the next write will gain
-    /// freshly computed ``CHECKSUM`` and ``DATASUM`` cards (per
-    /// the FITS Checksum Proposal). Existing placeholder cards in
-    /// each header are overwritten in place; missing ones are
-    /// inserted. The flag stays on for the lifetime of the
-    /// ``FitsFile`` object, matching astropy's semantics where
-    /// ``hdu.add_checksum()`` permanently mutates the HDU.
+    /// When enabled, every HDU written gains freshly computed
+    /// ``CHECKSUM`` and ``DATASUM`` cards (per the FITS Checksum
+    /// Proposal). An existing placeholder card in the header is
+    /// overwritten in place; a missing one is inserted. The flag
+    /// stays on for the lifetime of the ``FitsFile`` object; there
+    /// is no way to turn it back off or to stamp only one HDU.
     ///
     /// Notes
     /// -----
-    /// This does not stamp anything immediately -- the actual
-    /// computation happens during the next write, when the final
-    /// byte layout of each HDU is known. To verify checksums on
-    /// the resulting file, call :meth:`verify_checksums` after
-    /// the write.
-    ///
-    /// Astropy parity: equivalent to calling
-    /// ``hdu.add_checksum()`` on every HDU in the list. There is
-    /// no per-HDU variant in fitsy because checksums must be
-    /// computed against the final on-disk byte layout.
+    /// This does not stamp anything immediately. fitsy computes each
+    /// value during a write, when the final byte layout of the HDU
+    /// is known. Both :meth:`writeto` and :meth:`flush` then stamp
+    /// every HDU. This call marks the file as needing a rewrite, so
+    /// a :meth:`flush` with no other pending edit still writes the
+    /// cards. To check the result, call :meth:`verify_checksums` on
+    /// the written file.
     fn add_checksums(&self) {
         self.stamp_checksums.store(true, Ordering::Relaxed);
+        // Stamping happens during a full rewrite. Without this flag a
+        // `flush()` with no other pending edit takes the fsync-only
+        // path, and the cards never reach the file.
+        self.dirty.definite.store(true, Ordering::Release);
     }
 
     /// Flush pending edits to disk.
     ///
-    ///   ``f.append(...)``, ``del f[i]``, fancy / dtype-mismatched
-    ///   patches, edits on a tile-compressed image), rewrites the
-    ///   file via a sibling temp file + atomic ``rename``. Slots
-    ///   the user never touched are streamed byte-for-byte from
-    ///   the original file (no decode/re-encode).
+    /// A no-op when the file was opened ``mode='readonly'`` or
+    /// ``mode='denywrite'``.
     ///
-    /// Mixing modes: if you issue an in-place ``section[...]``
-    /// patch and then a non-patch mutation in the same session,
-    /// the patch reaches disk first (via ``pwrite``) and the
-    /// subsequent ``flush()`` then performs a full rewrite that
-    /// includes the patched bytes by streaming the (already
-    /// patched) source file. Patches are not lost.
+    /// In ``mode='update'``, a mutation that an in-place pixel patch
+    /// cannot satisfy -- a header edit, ``hdu.data = new_array``,
+    /// :meth:`append`, ``del file[i]``, a fancy or dtype-mismatched
+    /// ``section[...]`` write, or an edit on a tile-compressed image
+    /// -- rewrites the whole file through a sibling temp file and an
+    /// atomic rename. A slot the caller never touched is streamed
+    /// byte-for-byte from the original file, with no decode or
+    /// re-encode. Reading ``hdu.data`` alone does not by itself force
+    /// a rewrite: fitsy re-reads that HDU's data section from disk
+    /// and compares it against the cached array, and rewrites only if
+    /// the two differ.
     ///
-    /// Crash safety: in-place patches use ``pwrite`` with no undo
+    /// Mixing modes: if you issue an in-place ``section[...]`` patch
+    /// and then a non-patch mutation in the same session, the patch
+    /// reaches disk first, through ``pwrite``, and the subsequent
+    /// ``flush()`` then performs a full rewrite that includes the
+    /// patched bytes, by streaming the already-patched source file.
+    /// The patch is not lost.
+    ///
+    /// Crash safety: an in-place patch uses ``pwrite`` with no undo
     /// journal; a process death mid-patch can leave the file with
-    /// some rows updated and others not (this matches astropy's
-    /// mmap-backed update mode). The full-rewrite path is
-    /// crash-safe because it writes to a sibling temp file and
-    /// renames atomically once the bytes are durable. Note that
-    /// the parent directory is not separately ``fsync``\ ed, so a
-    /// power loss between rename and the next directory commit can
-    /// theoretically leave the rename invisible after reboot on
-    /// non-journaling filesystems. Stale ``.fitsy-tmp.*`` siblings
-    /// from a crashed rewrite are harmless and may be deleted.
+    /// some rows updated and others not. The full-rewrite path is
+    /// crash-safe, because it writes to a sibling temp file and
+    /// renames atomically once the bytes are durable. The parent
+    /// directory is not separately ``fsync``\ ed, so a power loss
+    /// between the rename and the next directory commit can, in
+    /// theory, leave the rename invisible after reboot on a
+    /// non-journaling filesystem. A stale ``.fitsy-tmp.*`` sibling
+    /// left by a crashed rewrite is harmless and may be deleted.
     ///
-    /// A no-op for read-only files.
+    /// Raises
+    /// ------
+    /// TypeError
+    ///   If a rewrite is needed and an HDU slot holds an object that
+    ///   is none of the four wrapper classes; see :meth:`writeto`.
+    /// ValueError
+    ///   If a rewrite is needed and would leave zero HDUs, or if an
+    ///   internal lock was poisoned by an earlier panic.
+    /// FitsError
+    ///   On an I/O failure, or if an HDU cannot be encoded for write.
     fn flush(&self, py: Python<'_>) -> PyResult<()> {
         if self.updater.is_none() {
             return Ok(());
@@ -1362,14 +1626,22 @@ impl PyFitsFile {
     /// Flush pending edits (if any) and release the source file
     /// handle.
     ///
-    /// After ``close()`` the slot list and any HDU wrappers Python
+    /// After ``close()``, the slot list and any HDU wrapper Python
     /// already holds remain usable as in-memory data, but the
-    /// underlying file handle is dropped so any ``Pending`` slot
-    /// that has not yet been materialized will fail to load.
-    /// Subsequent ``flush()`` / ``writeto()`` calls also raise.
+    /// underlying file handle is dropped: reading a still-``Pending``
+    /// slot then raises :class:`ValueError`. :meth:`writeto` always
+    /// visits every slot, so it raises the same way if any slot is
+    /// still ``Pending``. A later :meth:`flush` call raises only if
+    /// it decides a rewrite is needed and a ``Pending`` slot remains;
+    /// with nothing left to write, it is a successful no-op.
     ///
     /// Idempotent: calling ``close()`` more than once is safe.
-    /// Astropy parity: matches ``HDUList.close()``.
+    ///
+    /// Raises
+    /// ------
+    /// TypeError, ValueError, FitsError
+    ///   Under the same conditions as :meth:`flush`, which this
+    ///   method calls first.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         // Best-effort flush; surface errors so the caller sees them.
         self.flush(py)?;
@@ -1386,11 +1658,31 @@ impl PyFitsFile {
         Ok(())
     }
 
-    /// Context-manager entry. Returns ``self``.
+    /// Context-manager entry.
+    ///
+    /// Returns
+    /// -------
+    /// FitsFile
+    ///   ``self``.
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
+    /// Context-manager exit.
+    ///
+    /// On a clean exit -- no exception in flight -- calls
+    /// :meth:`flush` and lets any error it raises propagate.
+    ///
+    /// On exit due to an in-flight exception, makes any already
+    /// applied in-place pixel patch durable, but does not rewrite the
+    /// file for a pending header or full-array edit; any error from
+    /// that best-effort step is discarded.
+    ///
+    /// Returns
+    /// -------
+    /// bool
+    ///   Always ``False``. An in-flight exception is never
+    ///   suppressed.
     #[pyo3(signature = (exc_type=None, _exc_val=None, _exc_tb=None))]
     fn __exit__(
         &self,
@@ -1417,6 +1709,14 @@ impl PyFitsFile {
 }
 
 impl PyFitsFile {
+    /// Reject a mutation on a file opened read-only.
+    ///
+    /// Every mutating pymethod calls this first, before touching the
+    /// slot list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PyValueError`] if `self.read_only` is `true`.
     fn ensure_writable(&self) -> PyResult<()> {
         if self.read_only {
             Err(PyValueError::new_err(
@@ -1469,6 +1769,12 @@ impl HduIter {
 /// storage in `PyFitsFile.hdus`. Builders are promoted to live
 /// `ImageHdu` / `BinTable` / `AsciiTable` instances so callers can
 /// inspect and edit them after `append`/`insert`.
+///
+/// # Errors
+///
+/// Returns [`PyTypeError`] if `v` is neither an `ImageHdu`,
+/// `BinTable`, or `AsciiTable` instance, nor a builder returned by
+/// `fitsy.image`, `fitsy.bintable`, or `fitsy.ascii_table`.
 fn coerce_to_hdu(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     use crate::python::writer::{PyAsciiTableBuilder, PyBinTableBuilder, PyImageBuilder};
     if v.extract::<PyRef<'_, PyImageHdu>>().is_ok()
@@ -1497,12 +1803,20 @@ fn coerce_to_hdu(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     ))
 }
 
-/// True when the HDU is an image (or image builder) and can serve
-/// as the primary HDU.
+/// True when the HDU can serve as the primary HDU, so `writeto`
+/// does not have to prepend an empty one.
+///
+/// An image HDU and an image builder both qualify. So does a
+/// random-groups HDU: Standard Sec.6 puts random groups records in
+/// the primary HDU only, and its header already carries `SIMPLE`,
+/// never `XTENSION`. Prepending an empty primary before one would
+/// push it into extension position, where it cannot be written.
 fn is_image_like(py: Python<'_>, hdu: &Py<PyAny>) -> bool {
     use crate::python::writer::PyImageBuilder;
     let b = hdu.bind(py);
-    b.extract::<PyRef<'_, PyImageHdu>>().is_ok() || b.extract::<PyRef<'_, PyImageBuilder>>().is_ok()
+    b.extract::<PyRef<'_, PyImageHdu>>().is_ok()
+        || b.extract::<PyRef<'_, PyImageBuilder>>().is_ok()
+        || b.extract::<PyRef<'_, super::hdu::PyRandomGroups>>().is_ok()
 }
 
 /// Build an empty primary image header (`NAXIS = 0`) for the
@@ -1519,6 +1833,22 @@ fn empty_primary_header_and_bytes() -> (crate::Header, Vec<u8>) {
 
 /// Encode one HDU's current Python state into header + bytes
 /// for serialization.
+///
+/// Handles every HDU kind the bindings wrap: [`PyImageHdu`],
+/// [`PyBinTable`], [`PyAsciiTable`] and
+/// [`super::hdu::PyRandomGroups`]. Only an image HDU re-encodes its
+/// pixels. The other three keep the data section they were loaded
+/// with, so each hands back its own bytes unchanged.
+///
+/// Called only for a `HduSlot::Materialized` /
+/// `WritetoSlot::Materialized` slot; a `Pending` slot streams its
+/// source bytes directly instead and never reaches this function.
+///
+/// # Errors
+///
+/// Returns [`PyTypeError`] if `hdu` is none of the four wrapper
+/// types. Otherwise, propagates the error from
+/// [`PyImageHdu::encode`] for an image HDU.
 fn encode_hdu(
     py: Python<'_>,
     hdu: &Py<PyAny>,
@@ -1534,11 +1864,31 @@ fn encode_hdu(
     if let Ok(t) = bound.extract::<PyRef<'_, PyAsciiTable>>() {
         return Ok((t.header_clone(), t.raw.clone()));
     }
+    // A random-groups HDU owns its header and its big-endian data
+    // section, and the bindings expose no way to edit either. Write
+    // both back as they were read.
+    if let Ok(rg) = bound.extract::<PyRef<'_, super::hdu::PyRandomGroups>>() {
+        return Ok((rg.header_clone(), rg.data_clone()));
+    }
     Err(PyTypeError::new_err(
-        "FitsFile.writeto: HDU slot has unsupported type",
+        "FitsFile: HDU slot has unsupported type",
     ))
 }
 
+/// Build the Python HDU wrapper for `hdu`, dispatching on its kind.
+///
+/// `i` is `hdu`'s index in `file`; a plain image HDU keeps a
+/// [`super::hdu::ReadBinding`] to `file` at that index so `data` and
+/// `section` can pread fresh bytes later. `updater`, when `Some`,
+/// additionally attaches a [`super::hdu::UpdateBinding`] so an
+/// in-place `section[a:b] = arr` patch can reach the file.
+///
+/// # Errors
+///
+/// Returns the Python exception mapped from `fitsy.FitsError` if
+/// decompressing a tile-compressed image fails. Returns
+/// [`PyTypeError`] if `hdu` is a kind the Python bindings do not
+/// wrap: a conforming extension with an unrecognized `XTENSION`.
 fn wrap_hdu(
     py: Python<'_>,
     i: usize,
@@ -1556,7 +1906,7 @@ fn wrap_hdu(
             // Attach the lazy-read source so `data` / `section`
             // can pread fresh bytes on demand. Skipping this
             // would force the only path to be eager `from_image`
-            // materialisation (which we removed).
+            // materialization (which we removed).
             py_img.read_binding = Some(super::hdu::ReadBinding {
                 file,
                 hdu_idx: i,
@@ -1585,8 +1935,7 @@ fn wrap_hdu(
         Hdu::CompressedImage(c) => {
             // Decompress on read: the BINTABLE / ZIMAGE wrapper is
             // hidden from Python and replaced with the synthetic
-            // image view (BITPIX/NAXISn rewritten from Z*). Mirrors
-            // astropy's transparent CompImageHDU behaviour.
+            // image view (BITPIX/NAXISn rewritten from Z*).
             let _ = header;
             let owned = c.as_image().into_py_result()?;
             let mut py_img = PyImageHdu::from_built_bytes(

@@ -1,24 +1,42 @@
-//! Optional compressed-input support (cargo feature `compression`).
+//! Compressed-input support (cargo feature `compression`).
 //!
-//! Two distinct conventions are handled here:
+//! # Purpose
 //!
-//! * **Whole-file gzip** (`*.gz`): the FITS file has been compressed
-//!   with `gzip(1)`. [`maybe_gunzip`] inflates such a buffer back to
-//!   the underlying FITS bytes, leaving any non-gzipped buffer
-//!   unchanged.
+//! This module handles two distinct conventions.
 //!
-//! * **FITS tile-compressed images** (`*.fz`, Pence & Seaman 2010 /
-//!   Standard Sec.10). The image lives in a `BINTABLE` with
-//!   `ZIMAGE = T`, the `Z*` geometry keywords and a variable-length
-//!   `COMPRESSED_DATA` column, one tile per row. Any tile may fall
-//!   back to `GZIP_COMPRESSED_DATA` or raw `UNCOMPRESSED_DATA`.
+//! First, whole-file gzip, in a `*.gz` file. The FITS file was
+//! compressed with `gzip(1)`. [`maybe_gunzip`] inflates such a buffer
+//! back to the underlying FITS bytes, and leaves any other buffer
+//! unchanged.
 //!
-//! This crate implements every `ZCMPTYPE` of Standard Sec.10 Table 10:
-//! `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1` and `HCOMPRESS_1` for
-//! 8-/16-/32-/64-bit integer images, and `NOCOMPRESS`, whose tiles hold
-//! the pixel bytes verbatim. Float images are supported through
-//! `NO_DITHER` / `SUBTRACTIVE_DITHER_1` / `SUBTRACTIVE_DITHER_2`
-//! quantization, and losslessly via `GZIP_1`, `GZIP_2` or `NOCOMPRESS`.
+//! Second, FITS tile-compressed images, in a `*.fz` file (Pence &
+//! Seaman 2010, Standard Sec.10). The image lives in a `BINTABLE` that
+//! carries `ZIMAGE = T`, the `Z` geometry keywords, and a
+//! variable-length `COMPRESSED_DATA` column holding one tile per row.
+//! A tile may instead fall back to `GZIP_COMPRESSED_DATA` or to raw
+//! `UNCOMPRESSED_DATA`.
+//!
+//! # Layout
+//!
+//! [`CompressedImageHdu`] wraps such a table.
+//! [`CompressedImageHdu::as_image`] decodes it into an [`OwnedImage`].
+//! [`compress_image_to_hdu`] runs the write path.
+//!
+//! Each submodule holds one codec: `rice`, `hcompress`, `plio` and
+//! `quantize`. The gzip codecs use the `flate2` crate directly.
+//!
+//! # Design constraints
+//!
+//! The read path decodes each `ZCMPTYPE` of Standard Sec.10 Table 10.
+//! Those are `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1` and `HCOMPRESS_1`
+//! for 8-, 16-, 32- and 64-bit integer images, plus `NOCOMPRESS`,
+//! whose tiles hold the pixel bytes verbatim. A float image decodes
+//! through `NO_DITHER`, `SUBTRACTIVE_DITHER_1` or
+//! `SUBTRACTIVE_DITHER_2` quantization, and losslessly through
+//! `GZIP_1`, `GZIP_2` or `NOCOMPRESS`.
+//!
+//! The write path emits `GZIP_1` tiles only. It is lossless for every
+//! `BITPIX`, so it needs no quantization step.
 
 mod hcompress;
 mod plio;
@@ -40,8 +58,13 @@ use self::quantize::{DitherMethod, NULL_VALUE};
 /// gzip RFC 1952 magic bytes.
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
-/// If `buf` starts with the gzip magic, decompress it; otherwise
-/// return it unchanged.
+/// Inflate `buf` when it starts with the gzip magic bytes. Return it
+/// unchanged otherwise.
+///
+/// # Errors
+///
+/// [`FitsError::Io`] when `buf` starts with the magic bytes but fails
+/// to inflate as a gzip stream.
 pub fn maybe_gunzip(buf: Vec<u8>) -> Result<Vec<u8>> {
     if buf.len() < 2 || buf[..2] != GZIP_MAGIC {
         return Ok(buf);
@@ -53,7 +76,16 @@ pub fn maybe_gunzip(buf: Vec<u8>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// View over a tile-compressed image HDU.
+/// A view over a tile-compressed image HDU.
+///
+/// This wraps the `BINTABLE` that carries the tiles and reads the `Z`
+/// geometry keywords from its header. It borrows the data section from
+/// the [`FitsFile`](crate::FitsFile) that produced it, so it cannot
+/// outlive that file, and it decodes no tile until asked.
+///
+/// Call [`as_image`](Self::as_image) for a decoded [`OwnedImage`], or
+/// [`synthetic_image_header`](Self::synthetic_image_header) for the
+/// header alone.
 #[derive(Debug, Clone)]
 pub struct CompressedImageHdu<'a> {
     inner: BinTableHdu<'a>,
@@ -75,7 +107,7 @@ pub struct CompressedImageHdu<'a> {
 #[derive(Debug, Clone)]
 struct QuantizeInfo {
     dither: DitherMethod,
-    /// Per-tile seed offset (`ZDITHER0`, default 1 as in cfitsio).
+    /// Per-tile seed offset from `ZDITHER0`. This defaults to 1.
     dither_seed: u32,
     /// Integer sentinel for NaN/Inf source pixels.
     blank: i32,
@@ -114,7 +146,19 @@ enum CmpType {
 }
 
 impl<'a> CompressedImageHdu<'a> {
-    /// Wrap a `BinTableHdu` whose header carries `ZIMAGE = T`.
+    /// Wrap a [`BinTableHdu`] whose header carries `ZIMAGE = T`.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when the header does not carry
+    ///   `ZIMAGE = T`.
+    /// - [`FitsError::MissingMandatory`] when a mandatory `Z` keyword
+    ///   is absent, such as `ZBITPIX`, `ZNAXIS` or `ZCMPTYPE`.
+    /// - [`FitsError::Value`] when `ZBITPIX` holds an illegal value,
+    ///   or when `ZCMPTYPE` names a compression type outside Standard
+    ///   Sec.10 Table 10.
+    /// - [`FitsError::Data`] when the tile geometry does not divide
+    ///   the image, or when a required column is absent.
     pub fn from_bintable(inner: BinTableHdu<'a>) -> Result<Self> {
         let h = inner.header();
         if !matches!(h.first("ZIMAGE"), Some(Value::Logical(true))) {
@@ -322,26 +366,45 @@ impl<'a> CompressedImageHdu<'a> {
         &self.tile
     }
 
-    /// Build a synthetic IMAGE-HDU header from the `Z*` keywords so
-    /// callers can look up WCS, BUNIT, etc. through the same accessors
-    /// they use for an uncompressed image. Implements the inverse of
-    /// the convention in Sec.10.4: each `ZNAME` keyword is rewritten to
-    /// its image equivalent (`ZBITPIX -> BITPIX`, `ZNAXISn -> NAXISn`,
-    /// `ZCTYPEn -> CTYPEn`, ...).
+    /// Build a synthetic image-HDU header from the `Z` keywords.
+    ///
+    /// A caller then reads the WCS, the `BUNIT` and the rest through
+    /// the same accessors an uncompressed image uses. This inverts the
+    /// convention of Sec.10.4, rewriting each `Z` keyword to its image
+    /// equivalent: `ZBITPIX` to `BITPIX`, `ZNAXISn` to `NAXISn`,
+    /// `ZCTYPEn` to `CTYPEn`, and so on.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when a rewritten keyword is not a legal
+    /// FITS keyword. [`FitsError::Value`] when a `Z` keyword holds a
+    /// value of the wrong type.
     pub fn synthetic_image_header(&self) -> Result<Header> {
         synthesise_image_header(self.inner.header())
     }
 
-    /// Decompress and wrap as an [`crate::ImageHdu`]. The returned
-    /// HDU borrows from this `CompressedImageHdu` for its bytes.
+    /// Decompress every tile and wrap the result as an
+    /// [`OwnedImage`], which owns its pixel bytes.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::decompress`] and of
+    /// [`Self::synthetic_image_header`].
     pub fn as_image(&self) -> Result<OwnedImage> {
         let bytes = self.decompress()?;
         let header = self.synthetic_image_header()?;
         OwnedImage::new(header, bytes)
     }
 
-    /// Decompress all tiles into one big-endian byte buffer matching
-    /// the layout of an uncompressed image HDU.
+    /// Decompress every tile into one big-endian byte buffer, laid
+    /// out as an uncompressed image HDU would be.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when a tile fails to decode, when a tile
+    /// decodes to the wrong length, when the pixel count overflows
+    /// `usize`, or when a quantized float tile carries no scale.
+    /// [`FitsError::Io`] when a gzip tile fails to inflate.
     pub fn decompress(&self) -> Result<Vec<u8>> {
         let out_bp = self.bitpix.byte_size();
         let inner_bp = self.internal_bp;
@@ -496,7 +559,12 @@ impl OwnedImage {
     pub fn raw_bytes(&self) -> &[u8] {
         &self.bytes
     }
-    /// Read the WCS from the synthetic header.
+    /// Read the WCS of this image for alternate descriptor `alt`.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of
+    /// [`Wcs::from_header`](crate::wcs::Wcs::from_header).
     pub fn wcs(&self, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         crate::wcs::Wcs::from_header(&self.header, alt)
     }
@@ -1017,17 +1085,29 @@ fn synthesise_image_header(bt: &Header) -> Result<Header> {
     Ok(out)
 }
 
-/// Tile-compress a regular IMAGE HDU into a `(Header, data)` pair
-/// describing a tile-compressed BINTABLE (Pence & Seaman 2010 /
-/// Standard Sec.7.4). Only `GZIP_1` is emitted.
+/// Tile-compress an image HDU into a `(Header, data)` pair describing
+/// a tile-compressed `BINTABLE` (Pence & Seaman 2010, Standard
+/// Sec.7.4).
 ///
-/// * `bitpix`, `axes` describe the source image (`axes[0]` is
-///   `NAXIS1`, the fastest-varying axis).
-/// * `raw` is the source image's big-endian byte payload; its length
-///   must equal `bytes_per_pixel(bitpix) * product(axes)`.
-/// * `tile` is the tile shape in FITS axis order. `None` defaults to
-///   `(NAXIS1, 1, 1, ...)` per Pence & Seaman Sec.3.
-/// * `extname` becomes the `EXTNAME` card on the resulting BINTABLE.
+/// This emits `GZIP_1` tiles.
+///
+/// * `bitpix` and `axes` describe the source image. `axes[0]` is
+///   `NAXIS1`, the fastest-varying axis.
+/// * `raw` holds the big-endian byte payload of the source image. Its
+///   length must equal `bytes_per_pixel(bitpix) * product(axes)`.
+/// * `tile` gives the tile shape in FITS axis order. `None` defaults
+///   to `(NAXIS1, 1, 1, ...)`, per Pence & Seaman Sec.3.
+/// * `extname` becomes the `EXTNAME` card of the resulting table.
+///
+/// # Errors
+///
+/// - [`FitsError::Value`] when `bitpix` is not one of the six legal
+///   values.
+/// - [`FitsError::Data`] when `raw.len()` does not match the size that
+///   `bitpix` and `axes` imply, when `tile` has the wrong length, or
+///   when a tile dimension is 0.
+/// - [`FitsError::Header`] when the generated header holds an illegal
+///   keyword.
 pub fn compress_image_to_hdu(
     bitpix: i64,
     axes: &[u64],
@@ -1273,7 +1353,9 @@ fn finalise_zimage_header(
     Ok(())
 }
 
-/// Per-call options for [`FitsWriter::write_hdu_compressed`](crate::FitsWriter::write_hdu_compressed).
+/// Per-call options for [`write_hdu_compressed`].
+///
+/// [`write_hdu_compressed`]: crate::FitsWriter::write_hdu_compressed
 ///
 /// All fields are optional. The default value tiles by `NAXIS1` rows
 /// (per Pence & Seaman Sec.3) and emits no `EXTNAME` card.
@@ -1311,13 +1393,21 @@ impl TileOpts {
 impl<W: std::io::Write> crate::io::writer::FitsWriter<W> {
     /// Tile-compress an IMAGE HDU and stream it out as a BINTABLE.
     ///
-    /// `header` and `data` describe the **uncompressed** image, as
-    /// [`ImageBuilder`](crate::ImageBuilder) would emit it. They are
-    /// re-encoded per Sec.7.4 and written through
+    /// The `header` and `data` arguments describe the uncompressed
+    /// image, as [`ImageBuilder`](crate::ImageBuilder) emits it. This
+    /// re-encodes them per Sec.7.4 and writes them through
     /// [`write_hdu`](Self::write_hdu).
     ///
-    /// Only `GZIP_1` is emitted. [`TileOpts`] controls tile shape and
-    /// `EXTNAME`.
+    /// The `opts` argument sets the tile shape and the `EXTNAME` of
+    /// the resulting table. Pass `&TileOpts::default()` for the
+    /// default tile shape.
+    ///
+    /// This emits `GZIP_1` tiles.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`compress_image_to_hdu`] and of
+    /// [`write_hdu`](Self::write_hdu).
     pub fn write_hdu_compressed(
         &mut self,
         header: &Header,

@@ -40,7 +40,10 @@ pub fn factor_to(unit: &str, canonical: Dimension) -> Result<f64> {
 
 /// Convert one value between two unit strings, levels included.
 ///
-/// This is the general form: [`factor_to`] is the special case where a
+/// The `value` argument is measured in the unit that `from` spells,
+/// and the result is measured in the unit that `to` spells.
+///
+/// This is the general form. [`factor_to`] is the special case where a
 /// plain multiplier suffices.
 ///
 /// # Errors
@@ -56,9 +59,13 @@ pub fn convert(value: f64, from: &str, to: &str) -> Result<f64> {
 /// Convert one value, consulting `equivalencies` when the two units are
 /// not directly commensurable.
 ///
-/// A direct conversion always wins; the equivalencies are tried in order
-/// only when it fails. This is how a wavelength reaches a frequency --
-/// see [`Equivalence`].
+/// The `value` argument is measured in the unit that `from` spells,
+/// and the result is measured in the unit that `to` spells. The
+/// `equivalencies` argument lists the physical relations to try.
+///
+/// A direct conversion always wins. The equivalencies are tried in
+/// order only when it fails. This is how a wavelength reaches a
+/// frequency. See [`Equivalence`].
 ///
 /// # Errors
 ///
@@ -88,12 +95,13 @@ pub fn convert_with(
 
 /// A conversion that unit algebra cannot reach on its own.
 ///
-/// Wavelength to frequency needs `c`; brightness temperature needs a
-/// frequency and a solid angle. Those are *physics*, and they carry
-/// parameters -- a rest frequency, a beam size -- so they are
-/// implementations of this trait living in the modules that own that
-/// physics, not entries in a unit table. This module never learns a
-/// speed of light.
+/// Wavelength to frequency needs `c`. Brightness temperature needs a
+/// frequency and a solid angle. Both are physics, and both carry
+/// parameters, such as a rest frequency or a beam size.
+///
+/// Each such conversion is therefore an implementation of this trait,
+/// living in the module that owns that physics. None is an entry in a
+/// unit table. This module never learns a speed of light.
 ///
 /// See [`super::Spectral`].
 pub trait Equivalence {

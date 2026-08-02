@@ -23,25 +23,26 @@
 //!
 //! Two things a `Header` cannot carry on its own:
 //!
-//! * **`NAXISi`.** No image dimensions are known here, so zeros are
-//!   emitted; merge into a header that has the real values.
-//! * **The `-TAB` lookup table**, which Paper III puts in a separate
-//!   BINTABLE. The pointer cards name it, but the caller has to carry
-//!   that extension along.
+//! * `NAXISi`. No image dimensions are known here, so this emits
+//!   zeros. Merge the result into a header that carries the real
+//!   values.
+//! * The `-TAB` lookup table, which Paper III puts in a separate
+//!   `BINTABLE`. The pointer cards name that extension, and the caller
+//!   carries it along.
 //!
-//! `RESTFRQa` / `RESTWAVa` carry the alternate code, as Table 22
-//! specifies, so an alternate description keeps its own rest quantity
-//! and reads back the same way in wcslib and astropy.
+//! `RESTFRQa` and `RESTWAVa` carry the alternate code, as Table 22
+//! specifies. An alternate description therefore keeps its own rest
+//! quantity.
 //!
-//! The output is the **interpretation**, not a reproduction of the
-//! source header (see the layering note in [`crate::wcs`]): keywords
-//! the parse dropped as meaningless in context -- `EQUINOX` under
-//! ICRS, a spectral frame with no spectral axis -- are not written,
-//! because they were never retained. The contract is
+//! The output is the interpretation, not a reproduction of the source
+//! header. The layering note in [`crate::wcs`] explains why. A keyword
+//! that the parse dropped as meaningless in context, such as `EQUINOX`
+//! under ICRS or a spectral frame with no spectral axis, is not
+//! written, because it was never retained. The contract is
 //! `from_header(to_header(w)) == w`.
 //!
-//! Values are written **resolved** rather than as-found, since the
-//! Paper II Sec.2.4 defaults depend on the projection's `theta0`.
+//! Values go out resolved rather than as found, because the Paper II
+//! Sec.2.4 defaults depend on the `theta0` of the projection.
 
 use std::fmt::Write as _;
 
@@ -55,13 +56,25 @@ use crate::wcs::tpv::Tpv;
 use crate::wcs::{Wcs, alt_suffix};
 
 impl Wcs {
-    /// Build a fresh [`Header`] holding the WCS keywords for this
-    /// object under the chosen `alt` (`' '` for the primary
-    /// description, `'A'..'Z'` for an alternate).
+    /// Build a fresh [`Header`] holding the WCS keywords of this
+    /// object under descriptor `alt`.
     ///
-    /// Re-parsing the result reproduces this `Wcs`. See the
-    /// module-level note for the two pieces a bare `Header` cannot
-    /// carry (`NAXISi`, and the `-TAB` lookup extension).
+    /// Pass `' '` for `alt` to select the primary description, or a
+    /// letter from `A` to `Z` for an alternate.
+    ///
+    /// Parsing the result reproduces this `Wcs`. The module
+    /// documentation names the two pieces that a bare [`Header`]
+    /// cannot carry: the `NAXISi` cards, and the `-TAB` lookup
+    /// extension.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `alt` is neither a space nor a letter
+    /// from `A` to `Z`.
+    /// [`crate::FitsError::Header`] when a generated keyword is not a
+    /// legal FITS keyword, which happens
+    /// when the axis count pushes an indexed keyword past eight
+    /// characters.
     pub fn to_header(&self, alt: char) -> Result<Header> {
         let suffix = alt_suffix(alt)?;
         let n = self.naxis();
@@ -514,10 +527,11 @@ impl Wcs {
 /// not `0.0` (TPV registry), so omitting a deliberately-zeroed linear
 /// term would restore identity scaling on the way back in.
 ///
-/// It also settles a disagreement -- wcslib skips that default when an
-/// axis has no `PVi_m` cards at all, so a header with only `PV2_*`
-/// reads 3.5 arcsec differently in astropy. Emitting both axes brings
-/// the two within 1e-10 arcsec.
+/// Emitting `PVi_1` on both axes also removes an ambiguity. A header
+/// that carries `PV2_*` alone leaves `PV1_1` to a default that readers
+/// resolve differently, and the two readings can differ by several
+/// arcseconds. Writing both axes fixes the reading to within 1e-10
+/// arcseconds.
 fn write_tpv(
     h: &mut Header,
     tpv: &Tpv,
@@ -798,9 +812,10 @@ fn write_sip_poly(h: &mut Header, prefix: &str, poly: &SipPoly) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort human-readable comment for a `CTYPE` value. Mirrors
-/// the strings wcslib emits (e.g. "TAN (gnomonic) projection +
-/// SIP distortions") so produced headers are self-documenting.
+/// Human-readable comment for a `CTYPE` value, such as
+/// "TAN (gnomonic) projection + SIP distortions". This makes a
+/// generated header self-documenting. An unrecognized `CTYPE` yields
+/// an empty comment.
 fn ctype_comment(ctype: &str) -> &'static str {
     let upper = ctype.trim();
     let has_sip = upper.ends_with("-SIP");

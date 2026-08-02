@@ -8,18 +8,18 @@
 //!
 //! Equations (Paper II Sec.2.4):
 //!
-//! $$ \sin\delta = \`sin\theta\sin\delta_p` + \cos\theta\cos\delta_p\cos(\phi-\phi_p) $$
-//! $$ \alpha - \`alpha_p` = \mathrm{atan2}(-\cos\theta\sin(\phi-\phi_p), \;
-//!     \`sin\theta\cos\delta_p` - \cos\theta\sin\delta_p\cos(\phi-\phi_p)) $$
+//! ```text
+//! sin(delta) = sin(theta) sin(delta_p)
+//!            + cos(theta) cos(delta_p) cos(phi - phi_p)
+//!
+//! alpha - alpha_p = atan2(-cos(theta) sin(phi - phi_p),
+//!                          sin(theta) cos(delta_p)
+//!                        - cos(theta) sin(delta_p) cos(phi - phi_p))
+//! ```
 //!
 //! where `(alpha_p, delta_p)` is the celestial pole's position and `phi_p` is
 //! the native longitude of the celestial pole (`LONPOLE`, with the
 //! defaults from Paper II Sec.2.4).
-
-#![allow(
-    clippy::doc_markdown,
-    reason = "math formulae use backtick notation for subscripts within KaTeX blocks"
-)]
 
 use crate::error::{FitsError, Result};
 use crate::wcs::{D2R, R2D};
@@ -126,7 +126,8 @@ impl CelestialFrame {
 }
 
 /// Equatorial reference system identifier (Standard Sec.8.4, Paper II
-/// Sec.3.1, RADESYS keyword). Only meaningful for [`CelestialFrame::Equatorial`].
+/// Sec.3.1, `RADESYS` keyword). This carries meaning only for
+/// [`CelestialFrame::Equatorial`].
 // `non_exhaustive`: new realizations of the equatorial system keep
 // appearing, each one promoted out of `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -206,15 +207,25 @@ pub struct CelestialRotation {
 }
 
 impl CelestialRotation {
-    /// Construct from the fiducial point and pole conventions
+    /// Construct from the fiducial point and the pole conventions
     /// (Paper II Sec.2.4, Sec.7).
     ///
-    /// `lonpole`/`latpole` are the raw header values, or `None` for
-    /// the defaults. `theta0` is the native latitude of the fiducial
-    /// point (`90deg` zenithal, `0deg` cylindrical, the reference
-    /// latitude for conics), from the projection unless `PVi_2`
-    /// overrides it. `phi0_deg` is its native longitude (`PVi_1`),
-    /// normally zero.
+    /// The `lonpole` and `latpole` arguments take the raw header
+    /// values, or `None` for the defaults.
+    ///
+    /// The `theta0_deg` argument is the native latitude of the
+    /// fiducial point. It is 90 degrees for a zenithal projection, 0
+    /// for a cylindrical one, and the reference latitude for a conic
+    /// one. The projection supplies it unless `PVi_2` overrides it.
+    ///
+    /// The `phi0_deg` argument is the native longitude of that point,
+    /// from `PVi_1`. It is normally 0.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the fiducial point and the pole
+    /// convention admit no pole, or when `LATPOLE` selects neither of
+    /// the two candidate poles.
     pub fn new(
         alpha0: f64,
         delta0: f64,

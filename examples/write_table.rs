@@ -1,6 +1,9 @@
-//! Build and write a binary table HDU.
+//! Build and write a binary table extension.
 //!
-//! Run from the repo root:
+//! This shows `BinTableBuilder` declaring columns, packing the row
+//! bytes in the declared order, and rendering the header.
+//!
+//! Run from the repository root:
 //!
 //!     cargo run --example write_table
 
