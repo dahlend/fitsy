@@ -58,7 +58,7 @@ pub(crate) fn checked_strides(axes: &[u64]) -> Result<Vec<u64>> {
 /// Advance an N-D iteration counter `idx` to the next position within
 /// `shape`. Axis 0 is *not* iterated (callers vary it as a contiguous
 /// row); axes 1..N are incremented in order with carry. Returns
-/// `false` once the highest axis wraps, signalling iteration is done.
+/// `false` once the highest axis wraps, signaling iteration is done.
 ///
 /// `idx.len()` must equal `shape.len()`. For 1-D shapes (`shape.len()
 /// == 1`) iteration is always exhausted after the first row, so this

@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory() as td:
     work = os.path.join(td, "edited.fits")
 
     # ---- 0. Stage a fresh file --------------------------------------------
-    # Synthesised so the example is self-contained.
+    # Synthesized so the example is self-contained.
     rng = np.random.default_rng(42)
     pixels = rng.integers(0, 1000, size=(256, 256), dtype=np.int32)
     fitsy.write(

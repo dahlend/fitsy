@@ -49,7 +49,7 @@ with fitsy.open("image.fits") as f:
     data = hdu.data                        # full array in RAM, native byte order
     tile = hdu.section[0:256, 0:256]       # decode only this slice (large files)
     wcs = hdu.wcs()
-    ra, dec = wcs.pixel_to_celestial(512.0, 512.0)
+    ra, dec = wcs.pixel_to_world([512.0, 512.0])
 
 # Write
 img = fitsy.image(np.zeros((512, 512), dtype=np.float32),
@@ -82,7 +82,7 @@ let Hdu::Image(img) = file.hdu(0)? else {
 };
 let data = img.read_physical()?;       // BZERO/BSCALE applied, f64 output
 let wcs = file.wcs(0, ' ')?.unwrap();
-let (ra, dec) = wcs.pixel_to_celestial(512.0, 512.0)?;
+let world = wcs.pixel_to_world(&[512.0, 512.0])?;
 
 // Write
 let pixels = vec![0.0_f32; 512 * 512];

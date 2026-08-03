@@ -12,7 +12,7 @@ use crate::error::{FitsError, Result};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Unit {
     /// Multiplier converting a value in this unit to the canonical
-    /// units (metre, kilogram, second, degree, ...).
+    /// units (meter, kilogram, second, degree, ...).
     ///
     /// For a level this is the linear part it is measured against: the
     /// `arcsec^-2` of `mag/arcsec2`.
@@ -57,8 +57,8 @@ impl Converter {
 impl Unit {
     /// A linear unit: `scale` of the canonical unit for `dimension`.
     ///
-    /// `Unit::new(1.0, dimensions::LENGTH)` is the metre;
-    /// `Unit::new(1e3, dimensions::LENGTH)` is the kilometre.
+    /// `Unit::new(1.0, dimensions::LENGTH)` is the meter;
+    /// `Unit::new(1e3, dimensions::LENGTH)` is the kilometer.
     #[must_use]
     pub const fn new(scale: f64, dimension: Dimension) -> Self {
         Self {

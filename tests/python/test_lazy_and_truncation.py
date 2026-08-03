@@ -27,7 +27,7 @@ def test_open_does_not_read_pixel_bytes(tmp_path: Path) -> None:
         # On Unix this is safe; on Windows it would fail with a
         # sharing violation, but the test file is small enough that
         # we just verify the read path returns an error rather than
-        # SIGBUS / undefined behaviour.
+        # SIGBUS / undefined behavior.
         # Drop our handle on the file briefly to allow truncate on
         # Windows-style locking.
         del f

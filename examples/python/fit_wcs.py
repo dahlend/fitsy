@@ -38,7 +38,7 @@ assert (
 print(f'rms = {fit.rms_arcsec:.3f}"  max = {fit.max_arcsec:.3f}"')
 
 # `fit.wcs` is a fully usable Wcs.
-ra, dec = fit.wcs.pixel_to_celestial(150.0, 150.0)
+ra, dec = fit.wcs.pixel_to_world([150.0, 150.0])
 print(f"center: RA={ra:.4f}  Dec={dec:.4f}")
 
 # Serialize back to a header dict for writing.

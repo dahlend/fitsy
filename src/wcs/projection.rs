@@ -8,7 +8,7 @@
 //!
 //! All Paper II projection codes are implemented natively in
 //! [`crate::wcs::projections`] (zenithal, cylindrical, pseudo-
-//! cylindrical, conic, polyconic, quadrilateralised cube, and
+//! cylindrical, conic, polyconic, quadrilateralized cube, and
 //! `HEALPix`). XPH inverse currently has a known face-disambiguation
 //! limitation that is exercised by an `#[ignore]`d test.
 

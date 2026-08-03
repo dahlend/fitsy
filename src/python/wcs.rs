@@ -1,11 +1,11 @@
 //! `PyWcs` -- Python wrapper around `crate::wcs::Wcs`.
 
-use numpy::{AllowTypeChange, IntoPyArray, PyArray2, PyArrayLike2, PyArrayMethods};
+use numpy::{AllowTypeChange, IntoPyArray, PyArray2, PyArrayLike2, PyArrayLikeDyn, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyList, PyTuple};
 
-use crate::wcs::Wcs;
+use crate::wcs::{AxisKind, Wcs};
 
 use super::IntoPyResult;
 use super::header::PyHeader;
@@ -32,6 +32,29 @@ fn pixel_offset(origin: u8) -> PyResult<f64> {
     }
 }
 
+/// Check the column count of a 2-D batch against `naxis`.
+///
+/// The Rust batch entry points take the points flat. They can only
+/// test the total length. A `(N, 3)` array on a two-axis WCS therefore
+/// reads as `3N/2` points whenever `N` is even. The result reshapes
+/// back to `(N, 3)` and reports no error. A transposed `(naxis, N)`
+/// array passes the same test and pairs the wrong values together.
+/// Only the caller's shape separates these two cases from a real
+/// batch, so this layer holds the check.
+///
+/// # Errors
+///
+/// Returns [`PyValueError`] if `cols` is not `naxis`.
+fn check_batch_cols(method: &str, cols: usize, naxis: usize) -> PyResult<()> {
+    if cols == naxis {
+        return Ok(());
+    }
+    Err(PyValueError::new_err(format!(
+        "{method}: expected a batch of shape (N, {naxis}) for a {naxis}-axis WCS, \
+         got {cols} columns; pass the transpose if the points run down the columns"
+    )))
+}
+
 /// World Coordinate System for an HDU.
 ///
 /// Constructed via :meth:`FitsFile.wcs`, :meth:`ImageHdu.wcs`, or
@@ -43,7 +66,9 @@ fn pixel_offset(origin: u8) -> PyResult<f64> {
 /// --------
 /// >>> with fitsy.open("image.fits") as f:
 /// ...     wcs = f[0].wcs()
-/// ...     ra, dec = wcs.pixel_to_celestial(512.0, 512.0)
+/// ...     kinds = wcs.axis_kinds()
+/// ...     world = wcs.pixel_to_world([512.0, 512.0])
+/// ...     ra = world[kinds.index("longitude")]
 #[pyclass(name = "Wcs", module = "fitsy")]
 #[derive(Debug)]
 pub struct PyWcs {
@@ -213,6 +238,74 @@ impl PyWcs {
         self.inner.celestial_axes()
     }
 
+    /// Kind of coordinate each axis carries, in axis order.
+    ///
+    /// Use this to find an axis by meaning rather than by position.
+    /// :meth:`pixel_to_world` returns one value per axis in the same
+    /// order, so entry ``i`` here names value ``i`` there.
+    ///
+    /// Returns
+    /// -------
+    /// list of str
+    ///   One entry per axis, each one of ``'longitude'``,
+    ///   ``'latitude'``, ``'spectral'``, ``'time'``, ``'phase'``,
+    ///   ``'stokes'`` or ``'linear'``.
+    ///
+    /// Notes
+    /// -----
+    /// The kind comes from the type half of ``CTYPEia``, so an axis
+    /// driven by a ``-TAB`` lookup still reports its coordinate type.
+    /// :meth:`is_tabular` reports the lookup itself.
+    ///
+    /// Examples
+    /// --------
+    /// Find the spectral axis of a cube and read its world value:
+    ///
+    /// >>> with fitsy.open("cube.fits") as f:
+    /// ...     wcs = f[0].wcs()
+    /// ...     kinds = wcs.axis_kinds()
+    /// ...     world = wcs.pixel_to_world([31.0, 23.0, 4.0])
+    /// ...     freq = world[kinds.index("spectral")]
+    fn axis_kinds(&self) -> Vec<&'static str> {
+        self.inner
+            .axis_kinds()
+            .into_iter()
+            .map(|k| match k {
+                AxisKind::Longitude => "longitude",
+                AxisKind::Latitude => "latitude",
+                AxisKind::Spectral => "spectral",
+                AxisKind::Time => "time",
+                AxisKind::Phase => "phase",
+                AxisKind::Stokes => "stokes",
+                AxisKind::Linear => "linear",
+            })
+            .collect()
+    }
+
+    /// Whether an axis takes its coordinate from a ``-TAB`` lookup.
+    ///
+    /// Parameters
+    /// ----------
+    /// axis : int
+    ///   Zero-based axis index.
+    ///
+    /// Returns
+    /// -------
+    /// bool
+    ///   ``True`` when axis ``axis`` is tabular. ``False`` for any
+    ///   other axis, and for an index this WCS does not have.
+    ///
+    /// Notes
+    /// -----
+    /// This is a property of the algorithm, not of the coordinate, so
+    /// it is independent of :meth:`axis_kinds`. A tabular axis needs
+    /// its binary table loaded before it can transform, which
+    /// :meth:`fitsy.FitsFile.wcs` does and :meth:`fitsy.ImageHdu.wcs`
+    /// does not.
+    fn is_tabular(&self, axis: usize) -> bool {
+        self.inner.is_tabular(axis)
+    }
+
     /// Size of the image this WCS came from, in FITS axis order
     /// (``NAXIS1`` first), or ``None`` when unknown.
     ///
@@ -232,168 +325,231 @@ impl PyWcs {
             .transpose()
     }
 
-    /// Sky positions of the image's four corner pixels.
+    /// World coordinates of the image's corner pixels.
     ///
-    /// Corners are the centers of the corner pixels -- ``(0, 0)``,
-    /// ``(nx-1, 0)``, ``(nx-1, ny-1)``, ``(0, ny-1)`` -- returned
-    /// counter-clockwise in pixel space starting at the origin. For
-    /// the outer edge of the grid instead, call
-    /// :meth:`pixel_to_celestial` with ``-0.5`` and ``n - 0.5``.
+    /// Corners are pixel centers, not the outer edge of the grid. For
+    /// the outer edge, call :meth:`pixel_to_world` with ``-0.5`` and
+    /// ``n - 0.5``.
+    ///
+    /// Corners come back in Gray-code order, so consecutive corners
+    /// differ on one axis alone. A two-axis image therefore yields
+    /// ``(0, 0)``, ``(nx-1, 0)``, ``(nx-1, ny-1)``, ``(0, ny-1)``,
+    /// which walks the image counter-clockwise in pixel space and
+    /// closes the ring.
     ///
     /// Returns
     /// -------
     /// numpy.ndarray
-    ///   Shape ``(4, 2)`` array of ``(ra, dec)`` in degrees.
+    ///   Shape ``(2**k, naxis)``. ``k`` is the number of axes
+    ///   :attr:`pixel_shape` covers, which is :attr:`naxis` for a
+    ///   normal image. A two-axis image gives ``(4, 2)`` of
+    ///   ``(ra, dec)`` in degrees. A corner the WCS cannot transform
+    ///   comes back as ``nan``. See the notes below.
     ///
     /// Raises
     /// ------
     /// FitsError
-    ///   If the WCS has no celestial axis pair. Also raised if
-    ///   :attr:`pixel_shape` is ``None`` -- a fitted WCS has no
-    ///   image to take corners from -- if it has too few axes to
-    ///   cover the celestial pair, or if a celestial axis has
-    ///   length zero.
+    ///   In three cases:
+    ///
+    ///   - :attr:`pixel_shape` is ``None``. A fitted WCS has no image
+    ///     to take corners from.
+    ///   - An axis :attr:`pixel_shape` covers has length zero.
+    ///   - The WCS has more than 16 axes.
+    ///
+    /// Notes
+    /// -----
+    /// This reports corners, not an axis-aligned bounding box. A
+    /// rotated image has corners outside the box its own minimum and
+    /// maximum describe, and an ``RA`` axis that crosses zero makes
+    /// such a box meaningless.
+    ///
+    /// Corners go through :meth:`pixel_to_world` in its batch form.
+    /// A corner outside the projection's domain therefore fills its row
+    /// with ``nan`` instead of raising. A wide-field ``SIN`` or ``AZP``
+    /// image can put every corner outside that domain. The whole array
+    /// is then ``nan``. Test the result with ``numpy.isfinite``. Pass
+    /// one corner to :meth:`pixel_to_world` to read the reason it
+    /// failed.
+    ///
+    /// ``WCSAXES`` may exceed ``NAXIS``. A coordinate axis past the end
+    /// of :attr:`pixel_shape` then has no length to take a corner from.
+    /// That axis holds its reference pixel for every corner. The corner
+    /// count follows the image, and every corner still carries a full
+    /// world vector.
     fn footprint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let corners = self.inner.footprint().into_py_result()?;
-        let mut flat = Vec::with_capacity(8);
-        for (a, b) in corners {
-            flat.push(a);
-            flat.push(b);
-        }
-        let arr = flat.into_pyarray(py);
-        Ok(arr.reshape([4, 2]).expect("reshape (4,2)"))
+        let flat = self.inner.footprint().into_py_result()?;
+        let naxis = self.inner.naxis();
+        let corners = flat.len().checked_div(naxis).unwrap_or(0);
+        flat.into_pyarray(py).reshape([corners, naxis])
     }
 
-    /// Forward transform a single pixel coordinate.
+    /// Forward transform pixel coordinates to world coordinates.
+    ///
+    /// Accepts one point or many. A length-``naxis`` sequence is one
+    /// point and returns a list. An ``(N, naxis)`` array is ``N``
+    /// points and returns an ``(N, naxis)`` array.
     ///
     /// Parameters
     /// ----------
-    /// pix : sequence of float
-    ///   Length-``naxis`` pixel coordinate.
+    /// pix : array-like
+    ///   Shape ``(naxis,)`` for a single point, or ``(N, naxis)`` for
+    ///   a batch.
     /// origin : int, optional
     ///   ``0`` (default) treats ``pix`` as 0-based, ``1`` treats it as
     ///   1-based FITS coordinates.
     ///
     /// Returns
     /// -------
-    /// list of float
-    ///   World coordinates with units given by :attr:`cunit`.
+    /// list of float or numpy.ndarray
+    ///   World coordinates with units given by :attr:`cunit`. A list
+    ///   for a single point, an ``(N, naxis)`` array for a batch.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///   If ``origin`` is neither ``0`` nor ``1``.
+    ///   In three cases:
+    ///
+    ///   - ``origin`` is neither ``0`` nor ``1``.
+    ///   - ``pix`` is neither 1-D nor 2-D.
+    ///   - A batch does not have exactly :attr:`naxis` columns. An
+    ///     ``(naxis, N)`` array is the transpose of a batch, not a
+    ///     batch of ``N`` points.
     /// FitsError
-    ///   If ``pix`` does not have :attr:`naxis` elements, if the WCS
-    ///   has unresolved ``-TAB`` axes, or if ``pix`` falls outside
-    ///   the projection's valid domain.
+    ///   In three cases:
+    ///
+    ///   - A single point does not have :attr:`naxis` elements.
+    ///   - The WCS has unresolved ``-TAB`` axes.
+    ///   - ``pix`` falls outside the projection's valid domain. This
+    ///     applies to a single point only.
+    ///
+    /// Notes
+    /// -----
+    /// The two forms differ on a point the WCS cannot transform. The
+    /// single-point form raises, so the message names the reason. The
+    /// batch form fills that point with ``nan`` and keeps going,
+    /// because a wide field routinely mixes valid and invalid pixels.
     #[pyo3(signature = (pix, origin=0))]
-    fn pixel_to_world(&self, pix: Vec<f64>, origin: u8) -> PyResult<Vec<f64>> {
+    fn pixel_to_world<'py>(
+        &self,
+        py: Python<'py>,
+        pix: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
+        origin: u8,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let off = pixel_offset(origin)?;
-        let shifted: Vec<f64> = pix.iter().map(|p| p + off).collect();
-        self.inner.pixel_to_world(&shifted).into_py_result()
+        let view = pix.as_array();
+        // `origin = 0` makes the shift a no-op, and a C-contiguous
+        // array already holds the points in the layout the transform
+        // wants. Borrow it in that case: a batch copy is a whole second
+        // array, and it buys nothing here.
+        //
+        // Otherwise fall back. `iter()` walks an ndarray view in
+        // logical row-major order whatever its memory layout, so a
+        // sliced or non-contiguous input still arrives one whole point
+        // at a time.
+        let owned;
+        let flat: &[f64] = if let Some(s) = view.as_slice().filter(|_| off == 0.0) {
+            s
+        } else {
+            owned = view.iter().map(|p| p + off).collect::<Vec<f64>>();
+            &owned
+        };
+        match *view.shape() {
+            [_] => {
+                let out = self.inner.pixel_to_world(flat).into_py_result()?;
+                Ok(PyList::new(py, out)?.into_any())
+            }
+            [rows, cols] => {
+                check_batch_cols("pixel_to_world", cols, self.inner.naxis())?;
+                let out = self.inner.pixel_to_world_many(flat).into_py_result()?;
+                Ok(out.into_pyarray(py).reshape([rows, cols])?.into_any())
+            }
+            ref s => Err(PyValueError::new_err(format!(
+                "pixel_to_world: expected a 1-D or 2-D array, got {}-D",
+                s.len()
+            ))),
+        }
     }
 
-    /// Inverse transform world to pixel.
+    /// Inverse transform world coordinates to pixel coordinates.
+    ///
+    /// Accepts one point or many, and mirrors :meth:`pixel_to_world`
+    /// in both shape handling and error handling.
     ///
     /// Parameters
     /// ----------
-    /// world : sequence of float
-    ///   Length-``naxis`` world coordinate.
+    /// world : array-like
+    ///   Shape ``(naxis,)`` for a single point, or ``(N, naxis)`` for
+    ///   a batch.
     /// origin : int, optional
     ///   ``0`` (default) returns 0-based pixel coordinates,
     ///   ``1`` returns 1-based FITS coordinates.
     ///
     /// Returns
     /// -------
-    /// list of float
-    ///   Pixel coordinate in the chosen origin.
+    /// list of float or numpy.ndarray
+    ///   Pixel coordinates in the chosen origin. A list for a single
+    ///   point, an ``(N, naxis)`` array for a batch.
     ///
     /// Raises
     /// ------
     /// ValueError
-    ///   If ``origin`` is neither ``0`` nor ``1``.
+    ///   In three cases:
+    ///
+    ///   - ``origin`` is neither ``0`` nor ``1``.
+    ///   - ``world`` is neither 1-D nor 2-D.
+    ///   - A batch does not have exactly :attr:`naxis` columns.
     /// FitsError
-    ///   If ``world`` does not have :attr:`naxis` elements, if the
-    ///   WCS has unresolved ``-TAB`` axes, or if the inverse
-    ///   transform does not converge.
+    ///   In three cases:
+    ///
+    ///   - A single point does not have :attr:`naxis` elements.
+    ///   - The WCS has unresolved ``-TAB`` axes.
+    ///   - The inverse transform does not converge. This applies to a
+    ///     single point only.
+    ///
+    /// Notes
+    /// -----
+    /// As in :meth:`pixel_to_world`, the batch form yields ``nan`` for
+    /// a point that does not transform rather than raising.
     #[pyo3(signature = (world, origin=0))]
-    fn world_to_pixel(&self, world: Vec<f64>, origin: u8) -> PyResult<Vec<f64>> {
+    fn world_to_pixel<'py>(
+        &self,
+        py: Python<'py>,
+        world: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
+        origin: u8,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let off = pixel_offset(origin)?;
-        let mut out = self.inner.world_to_pixel(&world).into_py_result()?;
-        for p in &mut out {
-            *p -= off;
+        let view = world.as_array();
+        // `origin` shifts the *result* here, not the input, so a
+        // C-contiguous array is borrowed whatever the origin. See
+        // `pixel_to_world` for the fallback.
+        let owned;
+        let flat: &[f64] = if let Some(s) = view.as_slice() {
+            s
+        } else {
+            owned = view.iter().copied().collect::<Vec<f64>>();
+            &owned
+        };
+        match *view.shape() {
+            [_] => {
+                let mut out = self.inner.world_to_pixel(flat).into_py_result()?;
+                for p in &mut out {
+                    *p -= off;
+                }
+                Ok(PyList::new(py, out)?.into_any())
+            }
+            [rows, cols] => {
+                check_batch_cols("world_to_pixel", cols, self.inner.naxis())?;
+                let mut out = self.inner.world_to_pixel_many(flat).into_py_result()?;
+                for p in &mut out {
+                    *p -= off;
+                }
+                Ok(out.into_pyarray(py).reshape([rows, cols])?.into_any())
+            }
+            ref s => Err(PyValueError::new_err(format!(
+                "world_to_pixel: expected a 1-D or 2-D array, got {}-D",
+                s.len()
+            ))),
         }
-        Ok(out)
-    }
-
-    /// Forward transform a single celestial pixel.
-    ///
-    /// Parameters
-    /// ----------
-    /// px, py : float
-    ///   Pixel coordinates.
-    /// origin : int, optional
-    ///   ``0`` (default) treats inputs as 0-based; ``1`` as
-    ///   1-based FITS coordinates.
-    ///
-    /// Returns
-    /// -------
-    /// tuple of float
-    ///   ``(ra, dec)`` (or ``(lon, lat)``) in degrees.
-    ///
-    /// Raises
-    /// ------
-    /// FitsError
-    ///   If the WCS has no celestial axis pair, if it has
-    ///   unresolved ``-TAB`` axes, or if ``(px, py)`` falls outside
-    ///   the projection's valid domain.
-    ///
-    /// Notes
-    /// -----
-    /// For a WCS with more than two axes, every axis besides the
-    /// celestial pair is evaluated at its reference pixel
-    /// (``CRPIX``).
-    #[pyo3(signature = (px, py, origin=0))]
-    fn pixel_to_celestial(&self, px: f64, py: f64, origin: u8) -> PyResult<(f64, f64)> {
-        let off = pixel_offset(origin)?;
-        self.inner
-            .pixel_to_celestial(px + off, py + off)
-            .into_py_result()
-    }
-
-    /// Inverse celestial transform.
-    ///
-    /// Parameters
-    /// ----------
-    /// ra, dec : float
-    ///   Sky coordinates in degrees.
-    /// origin : int, optional
-    ///   ``0`` (default) returns 0-based ``(px, py)``; ``1``
-    ///   returns 1-based FITS pixel coordinates.
-    ///
-    /// Returns
-    /// -------
-    /// tuple of float
-    ///   Pixel coordinates in the chosen origin.
-    ///
-    /// Raises
-    /// ------
-    /// FitsError
-    ///   If the WCS has no celestial axis pair, if it has
-    ///   unresolved ``-TAB`` axes, or if ``(ra, dec)`` has no
-    ///   corresponding point in the projection.
-    ///
-    /// Notes
-    /// -----
-    /// For a WCS with more than two axes, every axis besides the
-    /// celestial pair is fixed at its reference value (``CRVAL``),
-    /// which resolves to its reference pixel.
-    #[pyo3(signature = (ra, dec, origin=0))]
-    fn celestial_to_pixel(&self, ra: f64, dec: f64, origin: u8) -> PyResult<(f64, f64)> {
-        let off = pixel_offset(origin)?;
-        let (px, py) = self.inner.celestial_to_pixel(ra, dec).into_py_result()?;
-        Ok((px - off, py - off))
     }
 
     /// Local pixel scale at ``(px, py)``.
@@ -433,118 +589,6 @@ impl PyWcs {
         self.inner
             .pixel_scale_at(px + off, py + off)
             .into_py_result()
-    }
-
-    /// Batch celestial forward transform.
-    ///
-    /// Parameters
-    /// ----------
-    /// pixels : array-like
-    ///   Shape ``(N, 2)`` array-like of pixel coordinates (numpy
-    ///   array, list of lists, tuple of tuples, etc.).
-    /// origin : int, optional
-    ///   ``0`` (default) treats inputs as 0-based; ``1`` as
-    ///   1-based FITS coordinates.
-    ///
-    /// Returns
-    /// -------
-    /// numpy.ndarray
-    ///   Shape ``(N, 2)`` array of ``(ra, dec)`` in degrees. Pixels
-    ///   outside the projection's valid domain come back as ``nan``
-    ///   rather than aborting the call. Mask them with
-    ///   ``numpy.isfinite`` if needed.
-    ///
-    /// Raises
-    /// ------
-    /// FitsError
-    ///   Only for whole-WCS problems -- no celestial axis pair, or
-    ///   unresolved ``-TAB`` axes. Use :meth:`pixel_to_celestial` on
-    ///   a single point to get a diagnostic for an individual
-    ///   out-of-domain coordinate.
-    #[pyo3(signature = (pixels, origin=0))]
-    fn pixel_to_celestial_many<'py>(
-        &self,
-        py: Python<'py>,
-        pixels: PyArrayLike2<'py, f64, AllowTypeChange>,
-        origin: u8,
-    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let off = pixel_offset(origin)?;
-        let view = pixels.as_array();
-        if view.ncols() != 2 {
-            return Err(PyValueError::new_err(
-                "pixel_to_celestial_many expects an (N, 2) array",
-            ));
-        }
-        let pairs: Vec<(f64, f64)> = view
-            .outer_iter()
-            .map(|row| (row[0] + off, row[1] + off))
-            .collect();
-        let out = self
-            .inner
-            .pixel_to_celestial_many(&pairs)
-            .into_py_result()?;
-        let mut flat = Vec::with_capacity(out.len() * 2);
-        for (a, b) in out {
-            flat.push(a);
-            flat.push(b);
-        }
-        let n = pairs.len();
-        let arr = flat.into_pyarray(py);
-        Ok(arr.reshape([n, 2]).expect("reshape (N,2)"))
-    }
-
-    /// Batch celestial inverse transform.
-    ///
-    /// Parameters
-    /// ----------
-    /// sky : array-like
-    ///   Shape ``(N, 2)`` array-like of ``(ra, dec)`` in degrees
-    ///   (numpy array, list of lists, tuple of tuples, etc.).
-    /// origin : int, optional
-    ///   ``0`` (default) returns 0-based pixel coordinates,
-    ///   ``1`` returns 1-based FITS coordinates.
-    ///
-    /// Returns
-    /// -------
-    /// numpy.ndarray
-    ///   Shape ``(N, 2)`` array of pixel coordinates. Sky positions
-    ///   the projection cannot represent come back as ``nan``
-    ///   rather than aborting the call.
-    ///
-    /// Raises
-    /// ------
-    /// FitsError
-    ///   Only for whole-WCS problems -- no celestial axis pair, or
-    ///   unresolved ``-TAB`` axes. Use :meth:`celestial_to_pixel` on
-    ///   a single point to get a diagnostic for an individual
-    ///   out-of-domain coordinate.
-    #[pyo3(signature = (sky, origin=0))]
-    fn celestial_to_pixel_many<'py>(
-        &self,
-        py: Python<'py>,
-        sky: PyArrayLike2<'py, f64, AllowTypeChange>,
-        origin: u8,
-    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let off = pixel_offset(origin)?;
-        let view = sky.as_array();
-        if view.ncols() != 2 {
-            return Err(PyValueError::new_err(
-                "celestial_to_pixel_many expects an (N, 2) array",
-            ));
-        }
-        let pairs: Vec<(f64, f64)> = view.outer_iter().map(|row| (row[0], row[1])).collect();
-        let out = self
-            .inner
-            .celestial_to_pixel_many(&pairs)
-            .into_py_result()?;
-        let mut flat = Vec::with_capacity(out.len() * 2);
-        for (a, b) in out {
-            flat.push(a - off);
-            flat.push(b - off);
-        }
-        let n = pairs.len();
-        let arr = flat.into_pyarray(py);
-        Ok(arr.reshape([n, 2]).expect("reshape (N,2)"))
     }
 
     fn __repr__(&self) -> String {

@@ -260,9 +260,10 @@ impl TabGroup {
     /// of the group, when the coordinate array is not monotonic along
     /// an axis, or when the multi-dimensional inverse does not
     /// converge.
-    // Deliberate: `celestial_to_pixel` fills the axes the caller did
-    // not ask about with `CRVAL`, routinely nowhere near a `-TAB`
-    // axis's tabulated range.
+    // Deliberate. A caller may supply only the celestial pair and let
+    // the rest default to `CRVAL`. That value routinely falls outside
+    // a `-TAB` axis's tabulated range. This reports the error rather
+    // than extrapolating.
     pub fn inverse(&self, world: &[f64]) -> Result<Vec<f64>> {
         let m = self.rank();
         if world.len() != m {
@@ -596,7 +597,7 @@ fn interp_inverse(a: &[f64], v: f64) -> Result<f64> {
     // Detect non-monotonicity early -- otherwise binary search
     // returns silently wrong answers on a wiggly array.
     //
-    // Equal neighbours are *not* a break: Paper III Sec.6.1.1 permits
+    // Equal neighbors are *not* a break: Paper III Sec.6.1.1 permits
     // "two adjacent index values in the vector [to] have the same
     // value", which is how the convention encodes a discontinuity.
     // Testing `w[1] >= w[0]` against `ascending` rejected exactly that
@@ -867,7 +868,7 @@ mod tests {
 
     /// Index vectors apply per axis in the multi-dimensional case too.
     #[test]
-    fn multi_dimensional_honours_index_vectors() {
+    fn multi_dimensional_honors_index_vectors() {
         let mut tab = two_d();
         // Second axis sampled at 1, 3, 5 rather than 1, 2, 3.
         tab.index = vec![None, Some(vec![1.0, 3.0, 5.0])];

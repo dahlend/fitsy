@@ -219,7 +219,7 @@ def main() -> None:
         back = w.wcs_world2pix(world.reshape(-1, 1), 0).ravel()
         assert np.allclose(back, PIXELS, atol=1e-6), f"{name}: wcslib round trip failed"
 
-        # wcslib normalises the whole description to SI, so it answers in
+        # wcslib normalizes the whole description to SI, so it answers in
         # 'm' for a header that declared 'Angstrom'. fitsy answers in the
         # declared CUNIT, so undo that here rather than in the test.
         declared = hdr.get("CUNIT1", "")

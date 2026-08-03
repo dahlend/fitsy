@@ -4,7 +4,7 @@
 //! together with a 13-term positional plate model (AMD terms 14-20
 //! are magnitude and color terms, which evaluate to zero for image
 //! astrometry). The model is
-//! signalled by the simultaneous presence of `PLTRAH`, `PLTDECD`,
+//! signaled by the simultaneous presence of `PLTRAH`, `PLTDECD`,
 //! `PPO1..6`, `XPIXELSZ`, `YPIXELSZ`, `CNPIX1`, `CNPIX2`, and
 //! `AMDX1..20` and `AMDY1..20`. Such a header usually also carries a
 //! placeholder `RA---TAN` and `DEC--TAN` description with `CRVAL` near

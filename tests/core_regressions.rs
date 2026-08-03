@@ -55,7 +55,7 @@ fn empty_primary() -> Vec<u8> {
 /// column is scaled (Sec.7.3.3.2): the sentinel must surface as NaN, not
 /// be scaled into a plausible physical number.
 #[test]
-fn scaled_int_column_honours_tnull() {
+fn scaled_int_column_honors_tnull() {
     let mut buf = empty_primary();
     let cards = [
         "XTENSION= 'BINTABLE'",

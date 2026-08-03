@@ -325,7 +325,7 @@ fn diff_raw_bytes(a: &[u8], b: &[u8], opts: &DiffOptions) -> (Vec<DataDiff>, usi
     sink.finish()
 }
 
-/// Collects differences while honouring `max_diffs`, so each
+/// Collects differences while honoring `max_diffs`, so each
 /// comparator can stay a plain loop.
 struct DiffSink<'a> {
     diffs: Vec<DataDiff>,
@@ -370,9 +370,9 @@ impl<'a> DiffSink<'a> {
 }
 
 /// Compare image pixels in physical units (`BZERO` and `BSCALE`
-/// applied, `BLANK` mapped to NaN), honouring the float tolerances.
+/// applied, `BLANK` mapped to NaN), honoring the float tolerances.
 ///
-/// Byte-wise comparison was the previous behaviour and is wrong twice
+/// Byte-wise comparison was the previous behavior and is wrong twice
 /// over: it ignores `rtol`/`atol` entirely, and it reports byte
 /// offsets rather than pixel numbers. Two files whose pixels agree to
 /// within tolerance but differ in the last mantissa bit compared as
@@ -604,7 +604,7 @@ fn table_bytes_identical(a: &[u8], b: &[u8], ha: &Header, hb: &Header) -> bool {
 }
 
 /// Compare a BINTABLE cell by cell, in decoded (post-`TSCAL`/`TZERO`)
-/// values, honouring the float tolerances.
+/// values, honoring the float tolerances.
 fn diff_bintable_data(
     a: &crate::hdu::bintable::BinTableHdu<'_>,
     b: &crate::hdu::bintable::BinTableHdu<'_>,

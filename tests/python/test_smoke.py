@@ -131,27 +131,27 @@ def test_wcs_celestial(tmp_path):
     assert wcs is not None
     assert wcs.is_celestial
     # CRPIX=5.0 is FITS 1-based, so origin=0 puts the reference pixel at (4, 4).
-    ra, dec = wcs.pixel_to_celestial(4.0, 4.0)
+    ra, dec = wcs.pixel_to_world([4.0, 4.0])
     assert ra == pytest.approx(180.0, abs=1e-9)
     assert dec == pytest.approx(0.0, abs=1e-9)
-    px, py = wcs.celestial_to_pixel(ra, dec)
+    px, py = wcs.world_to_pixel([ra, dec])
     assert px == pytest.approx(4.0, abs=1e-9)
     assert py == pytest.approx(4.0, abs=1e-9)
     # Same query with origin=1 should agree with the FITS reference value.
-    ra1, dec1 = wcs.pixel_to_celestial(5.0, 5.0, origin=1)
+    ra1, dec1 = wcs.pixel_to_world([5.0, 5.0], origin=1)
     assert ra1 == pytest.approx(180.0, abs=1e-9)
     assert dec1 == pytest.approx(0.0, abs=1e-9)
 
     pts = np.array([[4.0, 4.0], [3.0, 5.0]], dtype=np.float64)
-    sky = wcs.pixel_to_celestial_many(pts)
+    sky = wcs.pixel_to_world(pts)
     assert sky.shape == (2, 2)
-    back = wcs.celestial_to_pixel_many(sky)
+    back = wcs.world_to_pixel(sky)
     np.testing.assert_allclose(back, pts, atol=1e-9)
     # origin=1 round-trip
     pts1 = pts + 1.0
-    sky1 = wcs.pixel_to_celestial_many(pts1, origin=1)
+    sky1 = wcs.pixel_to_world(pts1, origin=1)
     np.testing.assert_allclose(sky1, sky, atol=1e-12)
-    back1 = wcs.celestial_to_pixel_many(sky1, origin=1)
+    back1 = wcs.world_to_pixel(sky1, origin=1)
     np.testing.assert_allclose(back1, pts1, atol=1e-9)
 
 
@@ -444,7 +444,7 @@ def test_fit_wcs_recovers_synthetic_tan(tmp_path):
     xs = np.linspace(20, 180, 5)
     ys = np.linspace(20, 180, 5)
     pixels = np.array([[x, y] for x in xs for y in ys], dtype=np.float64)
-    sky = truth.pixel_to_celestial_many(pixels, origin=1)
+    sky = truth.pixel_to_world(pixels, origin=1)
 
     fit = fitsy.fit_wcs(pixels, sky, projection="TAN", origin=1)
     # Sub-milliarcsec is sufficient for clean synthetic TAN+CD data.
@@ -473,7 +473,7 @@ def test_fit_wcs_with_sip(tmp_path):
     xs = np.linspace(10, 190, 8)
     ys = np.linspace(10, 190, 8)
     pixels = np.array([[x, y] for x in xs for y in ys], dtype=np.float64)
-    sky = truth.pixel_to_celestial_many(pixels, origin=1)
+    sky = truth.pixel_to_world(pixels, origin=1)
 
     # Without SIP: this is just TAN, so RMS should be ~0 already.
     fit_lin = fitsy.fit_wcs(pixels, sky, projection="TAN", origin=1)
@@ -500,7 +500,7 @@ def test_fit_wcs_save_and_reopen(tmp_path):
     truth = fitsy.open(str(src))[0].wcs()
 
     pix = np.array([[10, 10], [10, 90], [90, 10], [90, 90], [50, 50]], dtype=np.float64)
-    sky = truth.pixel_to_celestial_many(pix, origin=1)
+    sky = truth.pixel_to_world(pix, origin=1)
 
     fit = fitsy.fit_wcs(pix, sky, projection="TAN", origin=1)
     assert fit.rms_arcsec < 1e-6
@@ -513,8 +513,8 @@ def test_fit_wcs_save_and_reopen(tmp_path):
 
     reopened = fitsy.open(str(out))[0].wcs()
     for p in pix:
-        ra1, de1 = truth.pixel_to_celestial(p[0], p[1], origin=1)
-        ra2, de2 = reopened.pixel_to_celestial(p[0], p[1], origin=1)
+        ra1, de1 = truth.pixel_to_world([p[0], p[1]], origin=1)
+        ra2, de2 = reopened.pixel_to_world([p[0], p[1]], origin=1)
         assert abs(ra1 - ra2) < 1e-9
         assert abs(de1 - de2) < 1e-9
 
@@ -744,8 +744,8 @@ def _origin_test_wcs(tmp_path):
 def test_wcs_origin_default_is_zero(tmp_path):
     """A pixel queried with origin=0 matches the FITS-1 query at +1."""
     wcs = _origin_test_wcs(tmp_path)
-    ra0, dec0 = wcs.pixel_to_celestial(10.0, 20.0)
-    ra1, dec1 = wcs.pixel_to_celestial(11.0, 21.0, origin=1)
+    ra0, dec0 = wcs.pixel_to_world([10.0, 20.0])
+    ra1, dec1 = wcs.pixel_to_world([11.0, 21.0], origin=1)
     assert ra0 == pytest.approx(ra1, abs=1e-12)
     assert dec0 == pytest.approx(dec1, abs=1e-12)
 
@@ -753,8 +753,8 @@ def test_wcs_origin_default_is_zero(tmp_path):
 def test_wcs_origin_inverse_round_trip(tmp_path):
     wcs = _origin_test_wcs(tmp_path)
     for origin in (0, 1):
-        ra, dec = wcs.pixel_to_celestial(33.0, 44.0, origin=origin)
-        px, py = wcs.celestial_to_pixel(ra, dec, origin=origin)
+        ra, dec = wcs.pixel_to_world([33.0, 44.0], origin=origin)
+        px, py = wcs.world_to_pixel([ra, dec], origin=origin)
         assert px == pytest.approx(33.0, abs=1e-7)
         assert py == pytest.approx(44.0, abs=1e-7)
 
@@ -763,11 +763,11 @@ def test_wcs_origin_many_consistency(tmp_path):
     wcs = _origin_test_wcs(tmp_path)
     pts0 = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float64)
     pts1 = pts0 + 1.0
-    sky0 = wcs.pixel_to_celestial_many(pts0)
-    sky1 = wcs.pixel_to_celestial_many(pts1, origin=1)
+    sky0 = wcs.pixel_to_world(pts0)
+    sky1 = wcs.pixel_to_world(pts1, origin=1)
     np.testing.assert_allclose(sky0, sky1, atol=1e-12)
-    back0 = wcs.celestial_to_pixel_many(sky0)
-    back1 = wcs.celestial_to_pixel_many(sky1, origin=1)
+    back0 = wcs.world_to_pixel(sky0)
+    back1 = wcs.world_to_pixel(sky1, origin=1)
     np.testing.assert_allclose(back0, pts0, atol=1e-9)
     np.testing.assert_allclose(back1, pts1, atol=1e-9)
 
@@ -786,7 +786,7 @@ def test_wcs_origin_pixel_to_world_and_back(tmp_path):
 def test_wcs_origin_invalid_raises(tmp_path):
     wcs = _origin_test_wcs(tmp_path)
     with pytest.raises(ValueError, match="origin must be 0"):
-        wcs.pixel_to_celestial(1.0, 1.0, origin=2)
+        wcs.pixel_to_world([1.0, 1.0], origin=2)
 
 
 def test_fit_wcs_origin_zero_matches_origin_one(tmp_path):
@@ -802,7 +802,7 @@ def test_fit_wcs_origin_zero_matches_origin_one(tmp_path):
     pix0 = np.array(
         [[10, 10], [10, 90], [90, 10], [90, 90], [50, 50]], dtype=np.float64
     )
-    sky = truth.pixel_to_celestial_many(pix0)  # origin=0
+    sky = truth.pixel_to_world(pix0)  # origin=0
 
     fit0 = fitsy.fit_wcs(pix0, sky)  # origin=0 default
     fit1 = fitsy.fit_wcs(pix0 + 1.0, sky, origin=1)
@@ -810,6 +810,6 @@ def test_fit_wcs_origin_zero_matches_origin_one(tmp_path):
     assert fit0.rms_arcsec < 1e-3
     assert fit1.rms_arcsec < 1e-3
     # And both fitted WCS objects describe the same celestial mapping.
-    p0 = fit0.wcs.pixel_to_celestial_many(pix0)
-    p1 = fit1.wcs.pixel_to_celestial_many(pix0)
+    p0 = fit0.wcs.pixel_to_world(pix0)
+    p1 = fit1.wcs.pixel_to_world(pix0)
     np.testing.assert_allclose(p0, p1, atol=1e-9)

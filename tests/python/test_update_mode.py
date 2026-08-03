@@ -338,7 +338,7 @@ def test_data_setitem_persists_in_update_mode(tmp_path: Path) -> None:
 
     The array handed out is cached, so in-place numpy edits are
     invisible to the library; update-mode handles mark the file dirty
-    on materialisation so ``flush`` writes the cache back.
+    on materialization so ``flush`` writes the cache back.
     """
     p = tmp_path / "img.fits"
     arr = np.zeros((3, 4), dtype=np.int32)
@@ -377,7 +377,7 @@ def test_data_is_read_only_when_not_in_update_mode(tmp_path: Path) -> None:
 
 
 def test_compressed_image_data_setitem_persists(tmp_path: Path) -> None:
-    """Tile-compressed pixels materialise eagerly, so the dirty mark has
+    """Tile-compressed pixels materialize eagerly, so the dirty mark has
     to happen where the array is handed out, not on lazy load."""
     p = tmp_path / "z.fits"
     arr = np.arange(64, dtype=np.int16).reshape(8, 8)

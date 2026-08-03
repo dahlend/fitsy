@@ -24,7 +24,7 @@ use crate::error::{FitsError, Result};
 /// Decoded `HCOMPRESS_1` parameters carried in `ZNAMEn`/`ZVALn`.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct HcompressParams {
-    /// Quantisation scale factor (1 = lossless, 0 = trust payload).
+    /// Quantization scale factor (1 = lossless, 0 = trust payload).
     pub scale: i32,
     /// Apply `hsmooth` between inverse-transform levels.
     pub smooth: bool,

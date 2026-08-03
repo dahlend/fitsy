@@ -17,7 +17,7 @@
 //! ```
 //!
 //! `expr` may be a signed integer, a decimal, or a ratio of integers;
-//! the last two must be parenthesised. Multiplication and division
+//! the last two must be parenthesized. Multiplication and division
 //! share a precedence level and associate left to right, so
 //! `erg/s/cm2/Angstrom` reads as `erg s^-1 cm^-2 Angstrom^-1`, which
 //! is the form a flux-calibrated spectrum uses.
@@ -27,7 +27,7 @@
 //!
 //! # Canonical units
 //!
-//! [`Unit::scale`] is relative to metre, kilogram, second, degree,
+//! [`Unit::scale`] is relative to meter, kilogram, second, degree,
 //! kelvin, ampere, mole and candela. The angular base is degree rather
 //! than radian, because the standard specifies every angular FITS
 //! keyword in degrees.

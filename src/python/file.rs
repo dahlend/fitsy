@@ -615,7 +615,7 @@ impl PyFitsFile {
                 writer = writer.with_checksums();
             }
             let mut emitted_primary = false;
-            // Determine if we need to synthesise an empty primary:
+            // Determine if we need to synthesize an empty primary:
             // only when the first emitted HDU isn't an image-like
             // (BinTable / AsciiTable can't be a primary).
             let needs_synth_primary = matches!(
@@ -1292,7 +1292,7 @@ impl PyFitsFile {
                     }
                 }
             }
-            // Synthesise an empty primary if the first emitted HDU
+            // Synthesize an empty primary if the first emitted HDU
             // can't legally be a primary.
             let mut emitted_primary = false;
             let needs_synth_primary = match snapshot.first() {

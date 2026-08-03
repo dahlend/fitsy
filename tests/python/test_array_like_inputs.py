@@ -202,13 +202,9 @@ def _wcs() -> fitsy.Wcs:
 def test_wcs_batch_accepts_lists():
     w = _wcs()
     pix = [[0.0, 0.0], [100.0, 200.0], [399.0, 399.0]]
-    np.testing.assert_allclose(
-        w.pixel_to_celestial_many(pix), w.pixel_to_celestial_many(np.array(pix))
-    )
-    sky = w.pixel_to_celestial_many(pix)
-    np.testing.assert_allclose(
-        w.celestial_to_pixel_many(sky.tolist()), w.celestial_to_pixel_many(sky)
-    )
+    np.testing.assert_allclose(w.pixel_to_world(pix), w.pixel_to_world(np.array(pix)))
+    sky = w.pixel_to_world(pix)
+    np.testing.assert_allclose(w.world_to_pixel(sky.tolist()), w.world_to_pixel(sky))
 
 
 def test_wcs_batch_accepts_integer_dtype():
@@ -216,8 +212,79 @@ def test_wcs_batch_accepts_integer_dtype():
     w = _wcs()
     pix = np.array([[0, 0], [100, 200]])
     np.testing.assert_allclose(
-        w.pixel_to_celestial_many(pix),
-        w.pixel_to_celestial_many(pix.astype(np.float64)),
+        w.pixel_to_world(pix),
+        w.pixel_to_world(pix.astype(np.float64)),
+    )
+
+
+@pytest.mark.parametrize("method", ["pixel_to_world", "world_to_pixel"])
+@pytest.mark.parametrize("shape", [(2, 4), (3, 1), (4, 3)])
+def test_wcs_batch_rejects_a_wrong_column_count(method, shape):
+    """Refuse a batch column count that is not ``naxis``.
+
+    The flat Rust entry point sees the total length alone. A ``(2, 4)``
+    array on a two-axis WCS divides evenly by that test. Without this
+    check the result reshapes back to ``(2, 4)`` and is wrong.
+    """
+    w = _wcs()
+    with pytest.raises(ValueError, match="expected a batch of shape"):
+        getattr(w, method)(np.zeros(shape))
+
+
+def test_wcs_batch_rejects_a_transposed_batch():
+    """``(naxis, N)`` is the transpose of a batch, not a batch of N."""
+    w = _wcs()
+    pix = np.array([[0.0, 0.0], [100.0, 200.0], [399.0, 399.0]])
+    assert np.asarray(w.pixel_to_world(pix)).shape == (3, 2)
+    with pytest.raises(ValueError, match="pass the transpose"):
+        w.pixel_to_world(pix.T)
+
+
+def test_wcs_batch_accepts_an_empty_batch():
+    """Zero points is a valid batch, not an error."""
+    w = _wcs()
+    assert np.asarray(w.pixel_to_world(np.zeros((0, 2)))).shape == (0, 2)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(lambda a: np.asfortranarray(a), id="f_order"),
+        pytest.param(lambda a: np.repeat(a, 2, axis=0)[::2], id="strided_rows"),
+        pytest.param(lambda a: np.hstack([a, a])[:, :2], id="sliced_columns"),
+        pytest.param(lambda a: a.astype(">f8"), id="byteswapped"),
+        pytest.param(lambda a: a.astype(np.int64), id="int_dtype"),
+    ],
+)
+@pytest.mark.parametrize("method", ["pixel_to_world", "world_to_pixel"])
+def test_wcs_batch_layout_does_not_change_the_answer(method, make):
+    """A C-contiguous batch is used in place; anything else is gathered.
+
+    Those are two code paths, and a layout that took the wrong one would
+    read the points transposed or strided and return plausible-looking
+    nonsense. The two must agree exactly, not merely closely.
+    """
+    w = _wcs()
+    base = np.array(
+        [[0.0, 0.0], [100.0, 200.0], [399.0, 399.0], [12.0, 34.0]], dtype=np.float64
+    )
+    if method == "world_to_pixel":
+        base = np.asarray(w.pixel_to_world(base))
+
+    view = make(base)
+    got = np.asarray(getattr(w, method)(view))
+    want = np.asarray(getattr(w, method)(np.ascontiguousarray(view, dtype=np.float64)))
+    np.testing.assert_array_equal(got, want)
+
+
+def test_wcs_batch_origin_one_still_shifts():
+    """`origin=1` takes the gathering path, since the shift is not a no-op."""
+    w = _wcs()
+    pix = np.array([[10.0, 20.0], [300.0, 250.0]])
+    np.testing.assert_allclose(
+        w.pixel_to_world(pix, origin=0),
+        w.pixel_to_world(pix + 1.0, origin=1),
+        atol=1e-12,
     )
 
 

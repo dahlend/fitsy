@@ -529,7 +529,7 @@ impl FitsFile {
 
     /// Fill `dst` from the data section of HDU `i`, starting `offset`
     /// bytes in. Lets a caller stream the section through a small fixed
-    /// buffer instead of materialising it whole.
+    /// buffer instead of materializing it whole.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_range_into(&self, i: usize, offset: u64, dst: &mut [u8]) -> Result<()> {
         let span = self.hdu_spans.get(i).ok_or_else(|| {
@@ -951,7 +951,7 @@ impl FitsFile {
     }
 
     /// Iterator that transparently decompresses tile-compressed image
-    /// HDUs. Each `Hdu::CompressedImage` is materialised as an
+    /// HDUs. Each `Hdu::CompressedImage` is materialized as an
     /// [`OwnedImage`](crate::OwnedImage); all other HDUs are yielded
     /// as `Decompressed::Hdu(_)` unchanged.
     #[cfg(feature = "compression")]

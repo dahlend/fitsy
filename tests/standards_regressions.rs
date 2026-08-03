@@ -4,6 +4,22 @@
 use fitsy::header::card::CARD_SIZE;
 use fitsy::{FitsAppender, FitsFile, Hdu, Header, ImageBuilder, Wcs};
 
+/// Sky position of a celestial pixel, as `(lon, lat)`.
+///
+/// The public API takes one pixel value per axis and returns one world
+/// value per axis, both in axis order. This helper supplies the
+/// celestial pair and holds every other axis at its reference pixel,
+/// so a cube compares against the equivalent 2-D image. Every WCS in
+/// this file puts longitude on axis 1.
+fn sky(wcs: &Wcs, px: f64, py: f64) -> (f64, f64) {
+    // `CRPIX` is 1-based and the API is 0-based, hence the shift.
+    let mut point: Vec<f64> = wcs.linear.crpix().iter().map(|c| c - 1.0).collect();
+    point[0] = px;
+    point[1] = py;
+    let w = wcs.pixel_to_world(&point).expect("pixel_to_world");
+    (w[0], w[1])
+}
+
 const BLOCK: usize = 2880;
 
 fn block(cards: &[&str]) -> Vec<u8> {
@@ -69,8 +85,8 @@ fn crota_applies_to_a_cube_not_just_a_2d_image() {
     flat.push("CROTA2  =                 30.0");
     cube.push("CROTA2  =                 30.0");
 
-    let (fx, fy) = wcs_of(&flat).pixel_to_celestial(0.0, 0.0).unwrap();
-    let (cx, cy) = wcs_of(&cube).pixel_to_celestial(0.0, 0.0).unwrap();
+    let (fx, fy) = sky(&wcs_of(&flat), 0.0, 0.0);
+    let (cx, cy) = sky(&wcs_of(&cube), 0.0, 0.0);
     assert!(
         (fx - cx).abs() < 1e-12 && (fy - cy).abs() < 1e-12,
         "CROTA2 dropped for NAXIS=3: 2-D gives ({fx}, {fy}), cube gives ({cx}, {cy})"
@@ -78,7 +94,7 @@ fn crota_applies_to_a_cube_not_just_a_2d_image() {
 
     // And the rotation is really applied, rather than both agreeing
     // on the unrotated answer.
-    let (ux, uy) = wcs_of(TAN_2D).pixel_to_celestial(0.0, 0.0).unwrap();
+    let (ux, uy) = sky(&wcs_of(TAN_2D), 0.0, 0.0);
     assert!(
         (fx - ux).abs() > 1e-3 || (fy - uy).abs() > 1e-3,
         "CROTA2 had no effect at all"
@@ -189,8 +205,8 @@ fn generic_xlon_xlat_round_trips() {
         .unwrap()
         .unwrap();
     assert!(reparsed.is_celestial(), "XLON/XLAT lost on round trip");
-    let a = w.pixel_to_celestial(10.0, 20.0).unwrap();
-    let b = reparsed.pixel_to_celestial(10.0, 20.0).unwrap();
+    let a = sky(&w, 10.0, 20.0);
+    let b = sky(&reparsed, 10.0, 20.0);
     assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
 }
 
@@ -225,8 +241,8 @@ fn longitude_axis_pv_relocates_the_fiducial_point() {
     assert!((moved.celestial.as_ref().unwrap().rotation.phi0 - 90.0).abs() < 1e-12);
     assert!((moved.celestial.as_ref().unwrap().rotation.theta0 - 20.0).abs() < 1e-12);
 
-    let a = plain.pixel_to_celestial(0.0, 0.0).unwrap();
-    let b = moved.pixel_to_celestial(0.0, 0.0).unwrap();
+    let a = sky(&plain, 0.0, 0.0);
+    let b = sky(&moved, 0.0, 0.0);
     assert!(
         (a.0 - b.0).abs() > 1e-6 || (a.1 - b.1).abs() > 1e-6,
         "PV1_1/PV1_2 ignored: both give {a:?}"
@@ -235,7 +251,7 @@ fn longitude_axis_pv_relocates_the_fiducial_point() {
     // The reference pixel still lands on CRVAL: moving the fiducial
     // point moves the projection origin, not the reference point.
     // (CRPIX is 1-based, this API 0-based.)
-    let (ra, dec) = moved.pixel_to_celestial(49.0, 49.0).unwrap();
+    let (ra, dec) = sky(&moved, 49.0, 49.0);
     assert!(
         (ra - 10.0).abs() < 1e-9 && (dec - 20.0).abs() < 1e-9,
         "reference pixel no longer maps to CRVAL: ({ra}, {dec})"
@@ -245,7 +261,7 @@ fn longitude_axis_pv_relocates_the_fiducial_point() {
     let reparsed = Wcs::from_header(&moved.to_header(' ').unwrap(), ' ')
         .unwrap()
         .unwrap();
-    let c = reparsed.pixel_to_celestial(0.0, 0.0).unwrap();
+    let c = sky(&reparsed, 0.0, 0.0);
     assert!(
         (b.0 - c.0).abs() < 1e-9 && (b.1 - c.1).abs() < 1e-9,
         "relocated fiducial point lost on round trip"

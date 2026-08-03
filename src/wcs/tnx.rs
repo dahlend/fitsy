@@ -77,13 +77,13 @@ pub struct TnxSurface {
     pub nj: u32,
     /// Which cross terms the expansion retains.
     pub cross: TnxCrossTerm,
-    /// Lower bound of the `xi` normalisation range.
+    /// Lower bound of the `xi` normalization range.
     pub xi_min: f64,
-    /// Upper bound of the `xi` normalisation range.
+    /// Upper bound of the `xi` normalization range.
     pub xi_max: f64,
-    /// Lower bound of the `eta` normalisation range.
+    /// Lower bound of the `eta` normalization range.
     pub eta_min: f64,
-    /// Upper bound of the `eta` normalisation range.
+    /// Upper bound of the `eta` normalization range.
     pub eta_max: f64,
     /// Coefficients in IRAF row-major order: outer loop over `j`,
     /// inner loop over `i`, restricted to entries selected by
@@ -140,7 +140,7 @@ impl TnxSurface {
         let eta_max = next(&mut tokens, "eta_max")?;
         if xi_max <= xi_min || eta_max <= eta_min {
             return Err(FitsError::Wcs(
-                "TNX: degenerate normalisation interval".into(),
+                "TNX: degenerate normalization interval".into(),
             ));
         }
         let mut coeffs: Vec<f64> = Vec::new();

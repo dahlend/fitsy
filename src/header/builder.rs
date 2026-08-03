@@ -429,7 +429,7 @@ fn write_string_value_with_continue(
     let cont_quote_budget = CARD_SIZE - KEYWORD_LEN - VALUE_INDICATOR_LEN - 2;
 
     if is_hierarch(keyword) {
-        // CONTINUE chaining is not standardised for HIERARCH. Either
+        // CONTINUE chaining is not standardized for HIERARCH. Either
         // the value fits on the single card (no 8-char minimum applies
         // to HIERARCH) or we hard-fail.
         if escaped.len() <= first_quote_budget {

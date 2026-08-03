@@ -65,7 +65,7 @@ const WAVENUMBER: Dimension = LENGTH.powf(-1.0);
 
 // -- exact by the 2019 SI definitions -----------------------------------
 
-/// Speed of light in vacuum, `c`. This value is exact; it defines the metre.
+/// Speed of light in vacuum, `c`. This value is exact; it defines the meter.
 pub const SPEED_OF_LIGHT: Quantity = c(299_792_458.0, VELOCITY);
 
 /// Planck constant, `h`. This value is exact; it defines the kilogram.

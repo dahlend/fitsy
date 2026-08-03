@@ -39,7 +39,7 @@ Pixel coordinate convention
    coordinates** (numpy / C convention): the center of the first pixel
    is ``0.0``, and the center of the last pixel along ``NAXISn`` is
    ``float(NAXISn) - 1``. A numpy index ``[row, col]`` maps directly
-   to ``pixel_to_celestial(col, row)``.
+   to ``pixel_to_world([col, row])``.
 
    Pass ``origin=1`` (Python) to use the FITS 1-based convention
    (matching ``CRPIX`` in the header). The Rust API is always 0-based;
@@ -48,14 +48,40 @@ Pixel coordinate convention
    .. code-block:: python
 
       # The pixel at numpy index [row, col] = [128, 256]
-      ra, dec = wcs.pixel_to_celestial(256.0, 128.0)
+      ra, dec = wcs.pixel_to_world([256.0, 128.0])
 
 Batch transforms
 ----------------
 
-Use :meth:`~fitsy.Wcs.pixel_to_celestial_many` and
-:meth:`~fitsy.Wcs.celestial_to_pixel_many` for ``(N, 2)`` numpy inputs.
-The Rust equivalents take ``&[(f64, f64)]`` slices.
+:meth:`~fitsy.Wcs.pixel_to_world` and
+:meth:`~fitsy.Wcs.world_to_pixel` take one point or many. A
+length-``naxis`` sequence is one point and returns a list. An
+``(N, naxis)`` array is ``N`` points and returns an ``(N, naxis)``
+array. One path serves every axis kind, celestial or not:
+
+.. code-block:: python
+
+   sky = wcs.pixel_to_world(np.array([[31.0, 23.0], [10.0, 40.0]]))
+
+Pair it with :meth:`~fitsy.Wcs.axis_kinds` to read a column by meaning
+rather than by position; see `Finding an axis by meaning`_ below.
+
+The column count must be exactly ``naxis``. An ``(naxis, N)`` array is
+the transpose of a batch, not a batch of ``N`` points. Such an array
+raises a ``ValueError`` instead of pairing the wrong values together.
+Pass ``pixels.T`` when your points run down the columns.
+
+In Rust the batch entry points are ``Wcs::pixel_to_world_many`` and
+``Wcs::world_to_pixel_many``, which take the points flat --
+``NAXIS`` values per point, end to end -- and return the same
+layout. They see no shape. They reject only a length that is not a
+whole multiple of ``NAXIS``.
+
+Prefer a batch call over a loop. In Python the gain is about fortyfold,
+because one call crosses the language boundary once and converts its
+arguments once. In Rust it is two to seven times, from building the
+working buffers once for the whole call rather than per point; the
+cheaper the projection, the more that saving is worth.
 
 Most projections cover only part of the plane -- SIN's unit circle,
 ZPN below ``PV2_0``, AZP beyond the horizon -- so a wide field
@@ -65,23 +91,51 @@ with ``numpy.isfinite`` to drop them:
 
 .. code-block:: python
 
-   sky = wcs.pixel_to_celestial_many(pixels)
+   sky = wcs.pixel_to_world(pixels)
    good = numpy.isfinite(sky).all(axis=1)
 
-They raise only when the *whole* WCS cannot transform: no celestial
-axis pair, or unresolved ``-TAB`` axes. The single-point
-:meth:`~fitsy.Wcs.pixel_to_celestial` and
-:meth:`~fitsy.Wcs.celestial_to_pixel` still raise for an
-out-of-domain coordinate, which is where to go for a diagnostic
-message explaining *why* a point failed.
+A batch call raises only when the *whole* WCS cannot transform, which
+means unresolved ``-TAB`` axes or a malformed point count. Passing a
+single point instead raises for an out-of-domain coordinate, which is
+where to go for a diagnostic message explaining *why* that point
+failed.
+
+Finding an axis by meaning
+--------------------------
+
+:meth:`~fitsy.Wcs.pixel_to_world` returns one value per axis, in axis
+order. :meth:`~fitsy.Wcs.axis_kinds` says what each of those values is,
+so a caller locates an axis by what it carries rather than by where it
+sits:
+
+.. code-block:: python
+
+   with fitsy.open("cube.fits") as f:
+       wcs = f[0].wcs()
+       kinds = wcs.axis_kinds()      # ['longitude', 'latitude', 'spectral']
+       world = wcs.pixel_to_world([31.0, 23.0, 4.0])
+       freq = world[kinds.index("spectral")]
+
+Each entry is one of ``'longitude'``, ``'latitude'``, ``'spectral'``,
+``'time'``, ``'phase'``, ``'stokes'`` or ``'linear'``. Reading by
+meaning matters because axis order is not fixed: FITS permits
+``CTYPE1 = 'DEC--TAN'`` with ``CTYPE2 = 'RA---TAN'``, and real archives
+hold such headers. On one, ``axis_kinds()`` reports
+``['latitude', 'longitude']``, while indexing position 0 for right
+ascension returns declination.
+
+The kind names the type half of ``CTYPEia``, the part before the
+algorithm code. ``RA---TAN`` and ``RA---TAB`` are both ``'longitude'``.
+For the ``-TAB`` case, which needs its lookup table loaded before the
+axis can transform, ask :meth:`~fitsy.Wcs.is_tabular`.
 
 Image extent and footprint
 --------------------------
 
 A WCS parsed from an image header also records that image's size as
 :attr:`~fitsy.Wcs.pixel_shape` (FITS axis order, ``NAXIS1`` first),
-which :meth:`~fitsy.Wcs.footprint` uses to return the sky positions of
-the four corner pixels.
+which :meth:`~fitsy.Wcs.footprint` uses to return the world positions of
+the corner pixels.
 
 .. code-block:: python
 
@@ -89,6 +143,34 @@ the four corner pixels.
        wcs = f[0].wcs()
        print(wcs.pixel_shape)   # e.g. (1448, 2172)
        print(wcs.footprint())   # (4, 2) array of (ra, dec)
+
+The shape is ``(2**k, naxis)``, where ``k`` is the number of axes
+``pixel_shape`` covers. That is ``naxis`` for a normal image. A
+two-axis image gives the familiar four corners; a three-axis cube gives
+eight, covering the spectral or time axis as well. Corners come back in
+Gray-code order, so consecutive corners differ on one axis alone, and a
+two-axis image walks counter-clockwise from the origin and closes the
+ring.
+
+These are corners, not an axis-aligned bounding box. A rotated image has
+corners outside the box its own minimum and maximum describe, and an
+``RA`` axis crossing zero makes such a box meaningless -- a one-degree
+field straddling the wrap reports ``RA`` from ``0.18`` to ``359.81``.
+Use the corner polygon, or take minima and maxima yourself on axes where
+you know neither hazard applies.
+
+Corners go through the batch transform, so they follow its ``nan``
+rule. A corner outside the projection's domain comes back as a row of
+``nan`` rather than raising. A wide-field ``SIN`` or ``AZP`` image can
+put every corner outside that domain. Test the result with
+``numpy.isfinite``. Pass one corner to
+:meth:`~fitsy.Wcs.pixel_to_world` to read the reason it failed.
+
+``WCSAXES`` may exceed ``NAXIS``. A coordinate axis past the end of
+``pixel_shape`` then has no length to take a corner from. That axis
+holds its reference pixel for every corner. The corner count follows
+the image, and every corner still carries a full ``naxis``-value world
+vector.
 
 ``pixel_shape`` is a snapshot of the ``NAXISn`` cards, not part of the
 coordinate description. It is ``None`` for a WCS from

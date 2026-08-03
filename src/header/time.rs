@@ -511,7 +511,7 @@ impl Header {
     /// reference time" and `TSTART`/`TSTOP` as relative to the
     /// reference time *and* `TIMEOFFS`).
     ///
-    /// `TIMEOFFS` is read in `TIMEUNIT`, honouring a per-card `[unit]`
+    /// `TIMEOFFS` is read in `TIMEUNIT`, honoring a per-card `[unit]`
     /// annotation. Sec.9.4.1 restricts the keyword to tables; a
     /// [`Header`] does not know its HDU type, so it is applied
     /// wherever it appears.
@@ -539,7 +539,7 @@ impl Header {
     }
 
     /// `TIMEPIXR` (Sec.9.4.2) -- where in a pixel its time stamp sits,
-    /// from 0.0 to 1.0. Defaults to 0.5, the pixel centre, though 0.0
+    /// from 0.0 to 1.0. Defaults to 0.5, the pixel center, though 0.0
     /// is usual for event lists, where clock readings are truncations
     /// rather than rounded values.
     ///

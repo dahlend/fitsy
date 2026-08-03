@@ -28,7 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fitsy::units`: a Sec.4.3 unit parser returning scale and dimensions,
   a lenient mode for informal spellings, and `mag`/`dB`/`Np` as levels.
 - `atol` on `fitsy.diff` / `DiffOptions::absolute_tolerance`.
-- `Wcs.pixel_shape` and `Wcs.footprint()`.
+- `Wcs.pixel_shape`, and `Wcs.footprint()` returning the `2^NAXIS`
+  corner pixels in world coordinates.
+- `Wcs::axis_kind`, `Wcs::axis_kinds`, `AxisKind` and `Wcs::is_tabular`:
+  what each axis carries, by meaning rather than position.
+- Batch transforms `Wcs::pixel_to_world_many` / `world_to_pixel_many`,
+  taking the points flat, `NAXIS` per point.
+- Python `Wcs.pixel_to_world` / `world_to_pixel` take one point or
+  many: a length-`naxis` sequence, or an `(N, naxis)` array.
 - `Clone` on `Wcs`, `WcsFit`, the HDU views, and the builders.
 
 ### Changed
@@ -41,9 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameters, pole conventions, TPV, TNX/ZPX, DSS, spectral and `-TAB`
   cards it used to drop.
 - `diff` compares image pixels and table cells numerically, in physical
-  units, honouring `rtol`/`atol`.
+  units, honoring `rtol`/`atol`.
 - Batch WCS transforms yield `NaN` outside the projection's domain
   instead of failing the whole call.
+- WCS transforms run 5x faster on `TAN` and 13x on `AIR`: a batch
+  builds its buffers once, and a two-axis celestial WCS is specialized.
+- SIP evaluates by Horner's scheme, `A` and `B` in one pass; ~1.7x on
+  an order-3 forward transform.
+- The Python `Wcs` transforms read a C-contiguous batch in place.
 - The image, table, and WCS entry points accept any array-like, and
   native byte-order arrays skip the Python round trip on write.
 - Scaled `BITPIX` 8/16 images decode to `float32`, matching astropy.
@@ -79,9 +91,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking (Rust): new `BinValue::StrArray` for `A` columns with `TDIMn`.
 - Breaking (Rust): `CelestialRotation::new` takes `phi0`;
   `LinearTransform::from_crota` takes the rotated axis pair.
+- Breaking (Rust): `CelestialRotation::theta_p` becomes a method, so
+  the cached sine and cosine cannot fall out of step with it.
+- The WCS transforms reject a `linear` field whose rank disagrees with
+  the axis count, instead of panicking.
+
+### Removed
+
+- Breaking: `Wcs::pixel_to_celestial`, `celestial_to_pixel` and their
+  `_many` forms, in Rust and Python. Use `pixel_to_world` /
+  `world_to_pixel`, locating the pair with `axis_kinds`.
 
 ### Fixed
 
+- The celestial rotation read the latitude from `asin`, ill-conditioned
+  at the zenithal pole: `TAN` drift 7.5e-8 pixels, now 4.8e-12.
+- `AIR` folded silently below a `PV2_1` of about -76.5 degrees, where
+  `R` turns over: `PV2_1 = -80` sent `theta = -77` to `-18`.
+- `AIR` inverts by bracketed Newton with a closed-form derivative, not
+  fixed-width bisection: round-trip error 1.1e-5 to 2.7e-10 pixels.
+- `ZEA`, `SZP` and `AIR` each canceled at the pole their field sits
+  on; all three now use the half-angle form.
 - ASCII table real fields follow Sec.7.2.5 in full: the implicit
   decimal point (`F10.3` over `12345` is 12.345) and `1.234+05` forms.
 - A blank ASCII table numeric field reads as zero (Sec.7.2.5), not
@@ -126,7 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   far-side sources inside the image; each forward errors, like wcslib.
 - `HPX` put the polar facet one facet too far at exactly `phi = +180`
   (`x` was 223.08 instead of 136.92 at `H = 4`, `theta = 88`).
-- Native longitude was normalised to `[-180, 180)` where Paper II
+- Native longitude was normalized to `[-180, 180)` where Paper II
   defines `(-180, 180]`, mirroring the antipodal meridian.
 - The three projection-domain fixes lift wcslib agreement over a
   280-point sweep of all 28 projections from 174/224 to 275/280.

@@ -264,7 +264,7 @@ def test_wcs_parity(name):
             # found a celestial WCS, so fitsy finding none -- or
             # raising on the way -- is a real divergence. This used to
             # fall through to `continue`, which meant a parser that
-            # stopped recognising celestial axes skipped the suite
+            # stopped recognizing celestial axes skipped the suite
             # green.
             try:
                 fwcs = fhdu.wcs()
@@ -297,9 +297,9 @@ def test_wcs_parity(name):
             pix = np.array(expected["pix"], dtype=np.float64)
             want = np.array(expected["sky"], dtype=np.float64)
             try:
-                got = fwcs.pixel_to_celestial_many(pix, origin=0)
+                got = fwcs.pixel_to_world(pix, origin=0)
             except Exception as e:  # noqa: BLE001 - reported, not swallowed
-                problems.append(f"HDU {i}: pixel_to_celestial_many failed: {e}")
+                problems.append(f"HDU {i}: pixel_to_world failed: {e}")
                 continue
             sep = great_circle_arcsec(np.asarray(got, dtype=np.float64), want)
             finite = sep[np.isfinite(sep)]

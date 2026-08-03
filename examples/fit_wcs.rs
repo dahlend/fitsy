@@ -37,8 +37,9 @@ fn main() -> Result<(), fitsy::FitsError> {
     }
 
     // The fitted Wcs is fully usable for forward / inverse transforms.
-    let (ra, dec) = fit.wcs.pixel_to_celestial(150.0, 150.0)?;
-    println!("center: RA={ra:.4}  Dec={dec:.4}");
+    // `fit_wcs` always emits RA on axis 1 and Dec on axis 2.
+    let world = fit.wcs.pixel_to_world(&[150.0, 150.0])?;
+    println!("center: RA={:.4}  Dec={:.4}", world[0], world[1]);
 
     Ok(())
 }

@@ -872,7 +872,7 @@ fn decode_cell(col: &BinColumn, raw: &[u8], heap: &[u8]) -> Result<BinValue> {
                 )));
             }
             let slice = &heap[off..off + bytes_needed];
-            // Synthesise a fake column with the inner type and decode
+            // Synthesize a fake column with the inner type and decode
             // it through the same path. The inner column inherits
             // TSCAL/TZERO/TNULL since Sec.7.3.5 says VLA elements are
             // the same physical kind as a fixed column would be.

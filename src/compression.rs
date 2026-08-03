@@ -380,7 +380,7 @@ impl<'a> CompressedImageHdu<'a> {
     /// FITS keyword. [`FitsError::Value`] when a `Z` keyword holds a
     /// value of the wrong type.
     pub fn synthetic_image_header(&self) -> Result<Header> {
-        synthesise_image_header(self.inner.header())
+        synthesize_image_header(self.inner.header())
     }
 
     /// Decompress every tile and wrap the result as an
@@ -732,7 +732,7 @@ fn copy_tile(bytes: &[u8], out: &mut [u8], what: &str) -> Result<()> {
 }
 
 /// Pence & Seaman 2010 Sec.3.3: `HCOMPRESS_1` carries `SCALE`
-/// (integer quantisation) and `SMOOTH` (0/1) via `ZNAMEn`/`ZVALn`.
+/// (integer quantization) and `SMOOTH` (0/1) via `ZNAMEn`/`ZVALn`.
 /// `SCALE = 0` (or absent) means "trust the value embedded in the
 /// payload".
 fn parse_hcompress_params(h: &Header) -> Result<(i32, bool)> {
@@ -1000,7 +1000,7 @@ fn scatter_tile(
 /// Sec.10.2 reserves a fixed set of `Z*` names and copies every other
 /// image keyword verbatim -- there is no "strip the leading Z" rule, so
 /// `ZP` and `ZD` pass through. The reserved names are either re-emitted
-/// by `synthesise_image_header` or bookkeeping, so this only drops them.
+/// by `synthesize_image_header` or bookkeeping, so this only drops them.
 fn z_to_image_keyword(k: &str) -> Option<String> {
     const T_PREFIXES: &[&str] = &[
         "TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP", "TBCOL",
@@ -1027,7 +1027,7 @@ fn z_to_image_keyword(k: &str) -> Option<String> {
     Some(k.to_string())
 }
 
-fn synthesise_image_header(bt: &Header) -> Result<Header> {
+fn synthesize_image_header(bt: &Header) -> Result<Header> {
     let mut out = Header::empty();
     let bitpix = bt.optional_int("ZBITPIX").unwrap_or(8);
     let znaxis = bt.optional_int("ZNAXIS").unwrap_or(0);
@@ -1253,7 +1253,7 @@ pub fn compress_image_to_hdu(
             ax += 1;
             if ax == outer {
                 let mut h = Header::empty();
-                finalise_zimage_header(
+                finalize_zimage_header(
                     &mut h,
                     bitpix,
                     axes,
@@ -1268,7 +1268,7 @@ pub fn compress_image_to_hdu(
         }
     }
     let mut h = Header::empty();
-    finalise_zimage_header(
+    finalize_zimage_header(
         &mut h,
         bitpix,
         axes,
@@ -1290,7 +1290,7 @@ fn concat(mut a: Vec<u8>, b: &[u8]) -> Vec<u8> {
     clippy::too_many_arguments,
     reason = "all parameters are required to build the tile-compressed FITS extension header"
 )]
-fn finalise_zimage_header(
+fn finalize_zimage_header(
     h: &mut Header,
     bitpix: i64,
     axes: &[u64],

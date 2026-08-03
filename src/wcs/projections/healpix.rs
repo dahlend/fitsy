@@ -44,11 +44,11 @@ impl Hpx {
         (self.k - 1.0) / self.k
     }
 
-    /// Centre longitude of the polar facet holding `phi`.
+    /// Center longitude of the polar facet holding `phi`.
     // The index `floor((phi + 180) H / 360)` runs `0..H-1` over
     // `(-180, 180]` except at the closed endpoint, where `phi = 180`
     // gives `H` and walks off the ring -- hence the clamp.
-    fn facet_centre(&self, phi: f64) -> f64 {
+    fn facet_center(&self, phi: f64) -> f64 {
         let width = 360.0 / self.h;
         let idx = ((phi + 180.0) / width).floor().clamp(0.0, self.h - 1.0);
         idx * width - 180.0 + width / 2.0
@@ -75,7 +75,7 @@ impl Projection for Hpx {
             let abs_s = s.abs();
             let sigma = (self.k * (1.0 - abs_s)).sqrt();
             let h = self.h;
-            let phi_c = self.facet_centre(phi);
+            let phi_c = self.facet_center(phi);
             let x = phi_c + (phi - phi_c) * sigma;
             let y_mag = 90.0 * (self.k + 1.0 - 2.0 * sigma) / h;
             Ok((x, if s >= 0.0 { y_mag } else { -y_mag }))
@@ -102,7 +102,7 @@ impl Projection for Hpx {
                 -sin_abs.asin() * R2D
             };
             let half = 360.0 / self.h / 2.0;
-            let phi_c = self.facet_centre(x);
+            let phi_c = self.facet_center(x);
             // The polar facets are diamonds: at parameter sigma the facet
             // half-width is (180/H) sigma, so points outside that band are
             // not part of the projection (WCSLIB returns an error there too).

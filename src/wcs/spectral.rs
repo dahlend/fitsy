@@ -42,7 +42,7 @@ pub use crate::units::constants::raw::SPEED_OF_LIGHT;
 /// Planck constant, J*s (CODATA 2018, exact since 2019 SI redef).
 pub use crate::units::constants::raw::PLANCK;
 
-/// Refractive index of dry air. The `lambda_a` argument is in metres.
+/// Refractive index of dry air. The `lambda_a` argument is in meters.
 ///
 /// This is the Cox (2000) form, from Allen's Astrophysical Quantities,
 /// for air at 15 degrees Celsius and 760 mmHg:
@@ -51,7 +51,7 @@ pub use crate::units::constants::raw::PLANCK;
 /// n = 1 + 1e-6 (64.328 + 29498.1/(146 - s^2) + 255.4/(41 - s^2))
 /// ```
 ///
-/// with `s = 1/lambda_a` in inverse micrometres.
+/// with `s = 1/lambda_a` in inverse micrometers.
 ///
 /// This is not Paper III eq. (7). That equation describes air near 0
 /// degrees Celsius, and so gives a refractivity about 5 percent
@@ -106,7 +106,7 @@ fn air_to_vacuum_derivative(lambda_a_m: f64) -> f64 {
     1.0 + 1e-6 * (f - sf)
 }
 
-/// Air wavelength -> vacuum wavelength, metres: `lambda = n(lambda_a)
+/// Air wavelength -> vacuum wavelength, meters: `lambda = n(lambda_a)
 /// lambda_a`, the shape of Paper III eq. (6) with the index of
 /// [`air_refractive_index`].
 fn air_to_vacuum(lambda_a: f64) -> Result<f64> {
@@ -119,7 +119,7 @@ fn air_to_vacuum(lambda_a: f64) -> Result<f64> {
     Ok(air_refractive_index(lambda_a) * lambda_a)
 }
 
-/// Vacuum wavelength -> air wavelength, metres: the exact inverse of
+/// Vacuum wavelength -> air wavelength, meters: the exact inverse of
 /// [`air_to_vacuum`].
 // Paper III eq. (9) offers the shortcut `lambda / n(lambda)`, but that
 // is only an approximate inverse of eq. (6) -- out by 4e-9 relative,
@@ -240,12 +240,12 @@ enum SpectralClass {
     V,
 }
 
-/// Linearised intermediate variable `X` for a non-linear algorithm
+/// Linearized intermediate variable `X` for a non-linear algorithm
 /// (Paper III Sec.3.3: the *first* letter of the algorithm code).
 // `non_exhaustive`: Table 25 registers new codes over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Linearised {
+pub enum Linearized {
     /// Frequency-linear (`-F2*`).
     Freq,
     /// Vacuum-wavelength-linear (`-W2*`).
@@ -267,7 +267,7 @@ pub enum SpectralAlgorithm {
     Log,
     /// `-X2Y` -- the variable `X` is linear in pixel; `S` is
     /// recovered through the F<->W<->A<->V conversions.
-    Linear(Linearised),
+    Linear(Linearized),
     /// `-GRI` / `-GRA` -- a grating, prism or grism disperser
     /// (Paper III Sec.5.1). The axis is linear in the grism parameter
     /// `Gamma`, the detector offset in camera focal lengths. The
@@ -290,10 +290,10 @@ impl SpectralAlgorithm {
         let c = code.trim().to_ascii_uppercase();
         Some(match c.as_str() {
             "LOG" => Self::Log,
-            "F2W" | "F2V" | "F2A" => Self::Linear(Linearised::Freq),
-            "W2F" | "W2V" | "W2A" => Self::Linear(Linearised::Wave),
-            "A2F" | "A2W" | "A2V" => Self::Linear(Linearised::AirWave),
-            "V2F" | "V2W" | "V2A" => Self::Linear(Linearised::Velo),
+            "F2W" | "F2V" | "F2A" => Self::Linear(Linearized::Freq),
+            "W2F" | "W2V" | "W2A" => Self::Linear(Linearized::Wave),
+            "A2F" | "A2W" | "A2V" => Self::Linear(Linearized::AirWave),
+            "V2F" | "V2W" | "V2A" => Self::Linear(Linearized::Velo),
             "GRI" => Self::Grism { air: false },
             "GRA" => Self::Grism { air: true },
             _ => return None,
@@ -388,7 +388,7 @@ impl Grism {
         Ok(s.asin())
     }
 
-    /// Medium wavelength (metres) from the exit angle (Paper III
+    /// Medium wavelength (meters) from the exit angle (Paper III
     /// eq. 15).
     fn lambda_from_gamma(self, gamma: f64, lambda_r: f64) -> Result<f64> {
         let numer = (self.n_r - self.n_r_prime * lambda_r) * (self.alpha * D2R).sin() + gamma.sin();
@@ -428,7 +428,7 @@ impl Grism {
 /// enters the chain identically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum XKind {
-    Lin(Linearised),
+    Lin(Linearized),
     Grism { air: bool },
 }
 
@@ -531,7 +531,7 @@ impl SpectralAxis {
             _ => {}
         }
         // A rest quantity is only needed when a non-linear algorithm
-        // forces a trip through absolute frequency: the linearised
+        // forces a trip through absolute frequency: the linearized
         // variable is velocity, or the user-facing type is
         // velocity-like and has to be related to its associate
         // variable. A bare `VRAD`/`VOPT`/`ZOPT`/`VELO`/`BETA` axis is
@@ -551,7 +551,7 @@ impl SpectralAxis {
         // on the first transform.
         let needs_rest = match algorithm {
             Some(SpectralAlgorithm::Linear(lx)) => {
-                kind.class() == SpectralClass::V || lx == Linearised::Velo
+                kind.class() == SpectralClass::V || lx == Linearized::Velo
             }
             Some(SpectralAlgorithm::Grism { .. }) => kind.class() == SpectralClass::V,
             _ => false,
@@ -646,21 +646,21 @@ impl SpectralAxis {
         Ok(w_si / self.unit_to_si)
     }
 
-    /// `w -> S` for every algorithm that linearises some variable `X`
+    /// `w -> S` for every algorithm that linearizes some variable `X`
     /// (Paper III eq. 2 and, for grisms, eq. 24).
     fn forward_via_x(&self, x_kind: XKind, w_si: f64) -> Result<f64> {
         let f_r = self.f_at_reference()?;
-        let x_r = self.linearised_from_freq(x_kind, f_r)?;
+        let x_r = self.linearized_from_freq(x_kind, f_r)?;
         let dxds = self.dxds_at_reference(x_kind, f_r)?;
         let x = x_r + dxds * w_si;
-        let f = self.freq_from_linearised(x_kind, x)?;
+        let f = self.freq_from_linearized(x_kind, x)?;
         self.s_from_freq(f)
     }
 
     /// The inverse chain, traversed in the reverse direction.
     fn inverse_via_x(&self, x_kind: XKind, s_si: f64) -> Result<f64> {
         let f_r = self.f_at_reference()?;
-        let x_r = self.linearised_from_freq(x_kind, f_r)?;
+        let x_r = self.linearized_from_freq(x_kind, f_r)?;
         let dxds = self.dxds_at_reference(x_kind, f_r)?;
         if dxds == 0.0 {
             return Err(FitsError::Wcs(
@@ -668,7 +668,7 @@ impl SpectralAxis {
             ));
         }
         let f = self.freq_from_s(s_si)?;
-        let x = self.linearised_from_freq(x_kind, f)?;
+        let x = self.linearized_from_freq(x_kind, f)?;
         Ok((x - x_r) / dxds)
     }
 
@@ -814,11 +814,11 @@ impl SpectralAxis {
         })
     }
 
-    fn linearised_from_freq(&self, x_kind: XKind, f: f64) -> Result<f64> {
+    fn linearized_from_freq(&self, x_kind: XKind, f: f64) -> Result<f64> {
         Ok(match x_kind {
-            XKind::Lin(Linearised::Freq) => f,
-            XKind::Lin(Linearised::Wave) => SPEED_OF_LIGHT / f,
-            XKind::Lin(Linearised::AirWave) => vacuum_to_air(SPEED_OF_LIGHT / f)?,
+            XKind::Lin(Linearized::Freq) => f,
+            XKind::Lin(Linearized::Wave) => SPEED_OF_LIGHT / f,
+            XKind::Lin(Linearized::AirWave) => vacuum_to_air(SPEED_OF_LIGHT / f)?,
             // Paper III Sec.5.1.3 steps 2-3 run backwards: medium
             // wavelength -> exit angle -> grism parameter (eq. 23).
             XKind::Grism { air } => {
@@ -827,7 +827,7 @@ impl SpectralAxis {
                 let gamma = g.gamma_from_lambda(medium_wavelength(air, f)?, lambda_r)?;
                 (gamma - g.gamma_r(lambda_r)? - g.theta * D2R).tan()
             }
-            XKind::Lin(Linearised::Velo) => {
+            XKind::Lin(Linearized::Velo) => {
                 // Apparent velocity of radiation at frequency f
                 // relative to the rest frequency, m/s.
                 //
@@ -843,18 +843,18 @@ impl SpectralAxis {
         })
     }
 
-    fn freq_from_linearised(&self, x_kind: XKind, x: f64) -> Result<f64> {
+    fn freq_from_linearized(&self, x_kind: XKind, x: f64) -> Result<f64> {
         Ok(match x_kind {
-            XKind::Lin(Linearised::Freq) => x,
-            XKind::Lin(Linearised::Wave) => {
+            XKind::Lin(Linearized::Freq) => x,
+            XKind::Lin(Linearized::Wave) => {
                 if x <= 0.0 {
                     return Err(FitsError::Wcs(
-                        "spectral: linearised wavelength must be positive".into(),
+                        "spectral: linearized wavelength must be positive".into(),
                     ));
                 }
                 SPEED_OF_LIGHT / x
             }
-            XKind::Lin(Linearised::AirWave) => SPEED_OF_LIGHT / air_to_vacuum(x)?,
+            XKind::Lin(Linearized::AirWave) => SPEED_OF_LIGHT / air_to_vacuum(x)?,
             // Paper III Sec.5.1.3 steps 2-3: grism parameter -> exit
             // angle -> medium wavelength.
             XKind::Grism { air } => {
@@ -863,11 +863,11 @@ impl SpectralAxis {
                 let gamma = x.atan() + g.gamma_r(lambda_r)? + g.theta * D2R;
                 freq_from_medium_wavelength(air, g.lambda_from_gamma(gamma, lambda_r)?)?
             }
-            XKind::Lin(Linearised::Velo) => {
+            XKind::Lin(Linearized::Velo) => {
                 let beta = x / SPEED_OF_LIGHT;
                 if beta.abs() >= 1.0 {
                     return Err(FitsError::Wcs(
-                        "spectral: linearised |v| must be < c".into(),
+                        "spectral: linearized |v| must be < c".into(),
                     ));
                 }
                 // `rest_freq()`, not `self.restfrq`: RESTWAV alone is
@@ -888,10 +888,10 @@ impl SpectralAxis {
     fn dxds_at_reference(&self, x_kind: XKind, f_r: f64) -> Result<f64> {
         // Chain rule: dX/dS = (dX/dF) * (dF/dS).
         let dxdf = match x_kind {
-            XKind::Lin(Linearised::Freq) => 1.0,
-            XKind::Lin(Linearised::Wave) => -SPEED_OF_LIGHT / (f_r * f_r),
+            XKind::Lin(Linearized::Freq) => 1.0,
+            XKind::Lin(Linearized::Wave) => -SPEED_OF_LIGHT / (f_r * f_r),
             // dlambda_a/dF = (dlambda/dF) / (dlambda/dlambda_a).
-            XKind::Lin(Linearised::AirWave) => {
+            XKind::Lin(Linearized::AirWave) => {
                 let lambda_a = vacuum_to_air(SPEED_OF_LIGHT / f_r)?;
                 -SPEED_OF_LIGHT / (f_r * f_r) / air_to_vacuum_derivative(lambda_a)
             }
@@ -908,7 +908,7 @@ impl SpectralAxis {
                 };
                 g.dgamma_dlambda(g.gamma_r(lambda_r)?)? * dlambda_df
             }
-            XKind::Lin(Linearised::Velo) => {
+            XKind::Lin(Linearized::Velo) => {
                 let f0 = self.rest_freq()?;
                 // V = c*(1 - r^2)/(1 + r^2) where r = F/F_0
                 // dV/dF = -4*c*F/(F_0^2*(1 + r^2)^2)
@@ -1031,7 +1031,7 @@ pub struct SourceFrame {
 /// Table 25's "default units" column.
 ///
 /// Keyed on the *type*, not the class: `FREQ`, `ENER` and `WAVN` all
-/// linearise through frequency but are `s^-1`, `J` and `m^-1`
+/// linearize through frequency but are `s^-1`, `J` and `m^-1`
 /// respectively, and confusing them is exactly the mistake worth
 /// catching.
 fn required_dimension(kind: SpectralKind) -> crate::units::Dimension {
@@ -1119,7 +1119,7 @@ mod tests {
         let ax = SpectralAxis::new(
             2,
             SpectralKind::Wave,
-            Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+            Some(SpectralAlgorithm::Linear(Linearized::Freq)),
             500e-9,
             "m",
             Some(SPEED_OF_LIGHT / 500e-9),
@@ -1142,7 +1142,7 @@ mod tests {
         let ax = SpectralAxis::new(
             2,
             SpectralKind::Freq,
-            Some(SpectralAlgorithm::Linear(Linearised::Wave)),
+            Some(SpectralAlgorithm::Linear(Linearized::Wave)),
             6.0e14,
             "Hz",
             None,
@@ -1165,7 +1165,7 @@ mod tests {
         let ax = SpectralAxis::new(
             2,
             SpectralKind::Vopt,
-            Some(SpectralAlgorithm::Linear(Linearised::Wave)),
+            Some(SpectralAlgorithm::Linear(Linearized::Wave)),
             0.0,
             "m/s",
             None,
@@ -1186,7 +1186,7 @@ mod tests {
         let ax = SpectralAxis::new(
             2,
             SpectralKind::Velo,
-            Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+            Some(SpectralAlgorithm::Linear(Linearized::Freq)),
             0.0,
             "m/s",
             Some(1.420e9),
@@ -1228,7 +1228,7 @@ mod tests {
         let r = SpectralAxis::new(
             2,
             SpectralKind::Vopt,
-            Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+            Some(SpectralAlgorithm::Linear(Linearized::Freq)),
             0.0,
             "m/s",
             None,
@@ -1236,11 +1236,11 @@ mod tests {
             None,
         );
         assert!(r.is_err());
-        // ... and so does a wavelength axis linearised in velocity.
+        // ... and so does a wavelength axis linearized in velocity.
         let r = SpectralAxis::new(
             2,
             SpectralKind::Wave,
-            Some(SpectralAlgorithm::Linear(Linearised::Velo)),
+            Some(SpectralAlgorithm::Linear(Linearized::Velo)),
             500e-9,
             "m",
             None,
@@ -1327,7 +1327,7 @@ mod tests {
             let ax = SpectralAxis::new(
                 0,
                 SpectralKind::Vopt,
-                Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+                Some(SpectralAlgorithm::Linear(Linearized::Freq)),
                 0.0,
                 "m/s",
                 Some(f0),
@@ -1350,7 +1350,7 @@ mod tests {
         let z = SpectralAxis::new(
             0,
             SpectralKind::Zopt,
-            Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+            Some(SpectralAlgorithm::Linear(Linearized::Freq)),
             -1.0,
             "",
             Some(1.4e9),
@@ -1363,7 +1363,7 @@ mod tests {
         let v = SpectralAxis::new(
             0,
             SpectralKind::Vopt,
-            Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+            Some(SpectralAlgorithm::Linear(Linearized::Freq)),
             0.0,
             "m/s",
             Some(1.4e9),
@@ -1444,22 +1444,22 @@ mod tests {
     /// The offsets are a percent or so of CRVAL, i.e. what a real
     /// dispersion axis actually spans. Much smaller than that and the
     /// `x - x_r` of the inverse cancels away most of its significant
-    /// digits -- inherent to Paper III's linearise-then-subtract form,
+    /// digits -- inherent to Paper III's linearize-then-subtract form,
     /// not something this implementation can avoid.
     #[test]
-    fn every_linearised_variable_round_trips() {
+    fn every_linearized_variable_round_trips() {
         const W_NM: [f64; 4] = [-2e-8, -5e-9, 5e-9, 2e-8];
         const W_HZ: [f64; 4] = [-2e13, -5e12, 5e12, 2e13];
         const W_MS: [f64; 4] = [-1e7, -1e6, 1e6, 1e7];
 
         // (kind, X, CRVAL, CUNIT, intermediate offsets)
-        let cases: &[(SpectralKind, Linearised, f64, &str, [f64; 4])] = &[
-            (SpectralKind::Awav, Linearised::Freq, 5e-7, "m", W_NM),
-            (SpectralKind::Awav, Linearised::Wave, 5e-7, "m", W_NM),
-            (SpectralKind::Awav, Linearised::Velo, 5e-7, "m", W_NM),
-            (SpectralKind::Wave, Linearised::AirWave, 5e-7, "m", W_NM),
-            (SpectralKind::Freq, Linearised::AirWave, 6e14, "Hz", W_HZ),
-            (SpectralKind::Velo, Linearised::AirWave, 0.0, "m/s", W_MS),
+        let cases: &[(SpectralKind, Linearized, f64, &str, [f64; 4])] = &[
+            (SpectralKind::Awav, Linearized::Freq, 5e-7, "m", W_NM),
+            (SpectralKind::Awav, Linearized::Wave, 5e-7, "m", W_NM),
+            (SpectralKind::Awav, Linearized::Velo, 5e-7, "m", W_NM),
+            (SpectralKind::Wave, Linearized::AirWave, 5e-7, "m", W_NM),
+            (SpectralKind::Freq, Linearized::AirWave, 6e14, "Hz", W_HZ),
+            (SpectralKind::Velo, Linearized::AirWave, 0.0, "m/s", W_MS),
         ];
         for &(kind, lin, crval, unit, offsets) in cases {
             let ax = SpectralAxis::new(
@@ -1568,12 +1568,12 @@ mod tests {
             (SpectralKind::Awav, Some(SpectralAlgorithm::Log), None),
             (
                 SpectralKind::Awav,
-                Some(SpectralAlgorithm::Linear(Linearised::Freq)),
+                Some(SpectralAlgorithm::Linear(Linearized::Freq)),
                 None,
             ),
             (
                 SpectralKind::Wave,
-                Some(SpectralAlgorithm::Linear(Linearised::AirWave)),
+                Some(SpectralAlgorithm::Linear(Linearized::AirWave)),
                 None,
             ),
             (

@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn f32_signaling_nan_round_trip() {
-        // Signalling NaN payload.
+        // Signaling NaN payload.
         let bits = 0x7fa0_0001_u32;
         let bytes = bits.to_be_bytes();
         let x = f32_from_be_bytes_preserving_nan(&bytes);

@@ -363,7 +363,7 @@ fn pixel_list_matrix_is_indexed_by_column() {
     .unwrap();
     assert_same_transform(&tw.wcs, &img, PROBES);
 
-    // The long form TPCn_ka, legitimised by the WCS papers' errata, is
+    // The long form TPCn_ka, legitimized by the WCS papers' errata, is
     // the same matrix.
     let mut long = common.to_vec();
     long.extend_from_slice(&[
@@ -572,7 +572,7 @@ fn pixel_list_spectral_axis_uses_table_rest_frequency() {
             .and_then(|f| f.specsys.as_deref()),
         Some("BARYCENT")
     );
-    assert_eq!(tw.wcs.spectral.len(), 1, "spectral axis recognised");
+    assert_eq!(tw.wcs.spectral.len(), 1, "spectral axis recognized");
 
     let img = Wcs::from_header(
         &image_naxis(

@@ -32,7 +32,7 @@ const TIME_SCALES: &[&str] = &[
 ];
 
 /// True if `code` names a Table 29 time scale, ignoring any
-/// parenthesised realization (`TT(TAI)`, `UTC(NIST)`).
+/// parenthesized realization (`TT(TAI)`, `UTC(NIST)`).
 #[must_use]
 pub fn is_time_scale(code: &str) -> bool {
     let base = base_time_scale(code.trim()).to_ascii_uppercase();

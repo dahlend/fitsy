@@ -73,8 +73,8 @@ impl Default for WcsFitOptions {
 #[derive(Debug, Clone)]
 pub struct WcsFit {
     /// The fitted WCS, ready for
-    /// [`Wcs::pixel_to_celestial`](crate::Wcs::pixel_to_celestial) and
-    /// [`Wcs::celestial_to_pixel`](crate::Wcs::celestial_to_pixel).
+    /// [`Wcs::pixel_to_world`](crate::Wcs::pixel_to_world) and
+    /// [`Wcs::world_to_pixel`](crate::Wcs::world_to_pixel).
     pub wcs: Wcs,
     /// Per-point residual `(delta_alpha * cos delta, delta_dec)`, in
     /// arcseconds. Each entry maps one input pixel through the fitted
@@ -201,13 +201,16 @@ pub fn fit_celestial_wcs(
     )?;
 
     // Residuals (round-tripped through the final Wcs).
-    // Use the caller-provided (0-based) pixels here; `Wcs::pixel_to_celestial`
-    // is itself 0-based so we must not feed it the shifted version.
+    // Use the caller-provided (0-based) pixels here; the transform is
+    // itself 0-based so we must not feed it the shifted version.
     let mut residuals = Vec::with_capacity(n);
     let mut sumsq = 0.0_f64;
     let mut max_r = 0.0_f64;
     for (i, &(px, py)) in pixels_0based.iter().enumerate() {
-        let (ra_pred, dec_pred) = wcs.pixel_to_celestial(px, py)?;
+        // `build_wcs` above emits a 2-axis WCS with RA on axis 1, so
+        // the world vector is `[ra, dec]` with no axis lookup needed.
+        let w = wcs.pixel_to_world(&[px, py])?;
+        let (ra_pred, dec_pred) = (w[0], w[1]);
         let (ra_obs, dec_obs) = sky[i];
         let cosd = dec_obs.to_radians().cos();
         let dra = wrap_lon_deg(ra_pred - ra_obs) * cosd * 3600.0;
@@ -648,7 +651,24 @@ fn lstsq_qr(mat: &mut [f64], rhs: &mut [f64], m: usize, n: usize) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// Sky position of a celestial pixel, as `(lon, lat)`.
+    ///
+    /// The public API takes one pixel value per axis and returns one
+    /// world value per axis, both in axis order. This supplies the
+    /// celestial pair and holds every other axis at its reference
+    /// pixel, which is what these round-trip comparisons assume.
+    fn sky_at(wcs: &Wcs, px: f64, py: f64) -> (f64, f64) {
+        let (lon, lat) = wcs.celestial_axes().expect("celestial pair");
+        // `CRPIX` is 1-based and the API is 0-based, hence the shift.
+        let mut point: Vec<f64> = wcs.linear.crpix().iter().map(|c| c - 1.0).collect();
+        point[lon] = px;
+        point[lat] = py;
+        let w = wcs.pixel_to_world(&point).expect("pixel_to_world");
+        (w[lon], w[lat])
+    }
 
     /// Build a known TAN WCS, sample a grid, and verify the fit
     /// recovers it to high precision.
@@ -680,7 +700,7 @@ mod tests {
             for j in 0..5 {
                 let px = 20.0 + 40.0 * f64::from(i);
                 let py = 15.0 + 30.0 * f64::from(j);
-                let (ra, dec) = truth.pixel_to_celestial(px, py).unwrap();
+                let (ra, dec) = sky_at(&truth, px, py);
                 pixels.push((px, py));
                 sky.push((ra, dec));
             }
@@ -713,7 +733,7 @@ mod tests {
             for j in 0..4 {
                 let px = 50.0 + 70.0 * f64::from(i);
                 let py = 60.0 + 50.0 * f64::from(j);
-                let (ra, dec) = truth.pixel_to_celestial(px, py).unwrap();
+                let (ra, dec) = sky_at(&truth, px, py);
                 pixels.push((px, py));
                 sky.push((ra, dec));
             }
@@ -755,7 +775,7 @@ mod tests {
             for j in 0..10 {
                 let px = 10.0 + 18.0 * f64::from(i);
                 let py = 10.0 + 18.0 * f64::from(j);
-                let (ra, dec) = truth.pixel_to_celestial(px, py).unwrap();
+                let (ra, dec) = sky_at(&truth, px, py);
                 pixels.push((px, py));
                 sky.push((ra, dec));
             }
@@ -789,7 +809,7 @@ mod tests {
             for j in 0..5 {
                 let px = 10.0 + 20.0 * f64::from(i);
                 let py = 10.0 + 20.0 * f64::from(j);
-                let (ra, dec) = truth.pixel_to_celestial(px, py).unwrap();
+                let (ra, dec) = sky_at(&truth, px, py);
                 pixels.push((px, py));
                 sky.push((ra, dec));
             }

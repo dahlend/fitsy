@@ -15,5 +15,5 @@ with fitsy.open("examples/data/ngc2403.fits.gz") as f:
 
     wcs = hdu.wcs()  # Wcs (TAN + SIP)
     if wcs is not None:
-        ra, dec = wcs.pixel_to_celestial(724.0, 1086.0)
+        ra, dec = wcs.pixel_to_world([724.0, 1086.0])
         print(f"center: RA={ra:.4f}  Dec={dec:.4f}")

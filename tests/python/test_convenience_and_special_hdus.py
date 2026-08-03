@@ -315,7 +315,7 @@ def test_table_data_is_read_only(tmp_path):
     """``BinTable.data`` is rebuilt on every access, so an edit could
     never reach the file (or even the next read). It is frozen so a
     write raises instead of vanishing -- matching the documented
-    contract and the long-standing behaviour of ``column()``."""
+    contract and the long-standing behavior of ``column()``."""
     p = tmp_path / "t.fits"
     _write_string_array_column(p, "15A", "(5,3)", ["alphabeta gamma"], 15)
     with fitsy.open(str(p)) as f:

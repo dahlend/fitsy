@@ -316,7 +316,7 @@ impl<'a> AsciiTableHdu<'a> {
         // a strong indicator of a malformed file (a TBCOL off-by-one
         // is one of the most common real-world ASCII-table errors),
         // so we report it as a warning-style error: callers who need
-        // the lenient behaviour can simply ignore the column-by-name
+        // the lenient behavior can simply ignore the column-by-name
         // accessors and read raw row bytes themselves.
         let mut sorted: Vec<&AsciiColumn> = columns.iter().collect();
         sorted.sort_by_key(|c| c.start);

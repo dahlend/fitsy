@@ -278,7 +278,7 @@ fn parse_value(field: &str, keyword: &str) -> Result<Value> {
         return Ok(Value::Logical(false));
     }
 
-    // Complex: parenthesised pair, e.g. `(1.0, 2.0)`.
+    // Complex: parenthesized pair, e.g. `(1.0, 2.0)`.
     if let Some(inner) = trimmed.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
         let mut parts = inner.split(',');
         let re = parts.next().ok_or_else(|| FitsError::Value {

@@ -363,11 +363,13 @@ pub(crate) fn as_native_ndarray<'py>(
 /// ...     fitsy.image(np.zeros((10, 10), dtype=np.float32)),
 /// ... ])
 ///
-/// Convert a pixel position to a sky position:
+/// Convert a pixel position to a world position:
 ///
 /// >>> with fitsy.open("image.fits") as f:
 /// ...     wcs = f[0].wcs()
-/// ...     ra, dec = wcs.pixel_to_celestial(512.0, 512.0)
+/// ...     kinds = wcs.axis_kinds()
+/// ...     world = wcs.pixel_to_world([512.0, 512.0])
+/// ...     ra = world[kinds.index("longitude")]
 #[pymodule]
 fn fitsy(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

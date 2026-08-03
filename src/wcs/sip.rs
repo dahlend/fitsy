@@ -82,12 +82,13 @@ impl SipPoly {
         Ok(Self { order, coeffs })
     }
 
-    /// Number of coefficient rows, capped at [`SIP_MAX_ORDER`].
+    /// Number of coefficient rows, and the row stride of `coeffs`.
     ///
-    /// [`Self::from_terms`] rejects a higher order, but the fields are
-    /// public, so a hand-built polynomial could exceed it. Clamping
-    /// truncates such a polynomial instead of indexing past the power
-    /// tables below.
+    /// [`Self::from_terms`] sizes `coeffs` as `(order + 1)^2` and
+    /// refuses an order above [`SIP_MAX_ORDER`]. The fields are public,
+    /// so a hand-built polynomial can hold any size. This takes the
+    /// largest square the coefficients hold. A stride other than the
+    /// true `order + 1` reads the wrong terms.
     #[inline]
     fn dim(&self) -> usize {
         debug_assert!(
@@ -95,38 +96,37 @@ impl SipPoly {
             "SIP order {} exceeds the maximum {SIP_MAX_ORDER}",
             self.order
         );
-        (self.order.min(SIP_MAX_ORDER) as usize) + 1
-    }
-
-    /// Powers `1, x, x^2, ... x^SIP_MAX_ORDER`.
-    ///
-    /// Fixed-size because the order is capped: a `Vec` here would
-    /// allocate twice per Newton iteration in [`Sip::inverse`].
-    #[inline]
-    fn powers(x: f64) -> [f64; SIP_MAX_ORDER as usize + 1] {
-        let mut out = [1.0_f64; SIP_MAX_ORDER as usize + 1];
-        for i in 1..out.len() {
-            out[i] = out[i - 1] * x;
-        }
-        out
+        ((self.order as usize) + 1).min(self.coeffs.len().isqrt())
     }
 
     /// Evaluate `Sigma c_{p,q} * u^p * v^q`.
+    ///
+    /// This uses Horner's scheme in both variables. Each row `p`
+    /// collapses over `v`, and the rows then collapse over `u`. The
+    /// cost is one multiply-add per coefficient. No power of `u` or `v`
+    /// is formed.
+    ///
+    /// The alternative is to tabulate the powers once and multiply out.
+    /// That table has to be sized for the largest order the convention
+    /// allows, so an order-2 polynomial pays for an order-9 one.
+    /// Skipping zero coefficients does not recover the difference. The
+    /// work tracks the declared order either way, and the branch costs
+    /// more than the multiply-add it avoids.
     #[must_use]
     pub fn eval(&self, u: f64, v: f64) -> f64 {
         let n = self.dim();
-        let up = Self::powers(u);
-        let vp = Self::powers(v);
         let mut s = 0.0_f64;
-        for p in 0..n {
+        // Rows from the top, so each step multiplies the accumulated
+        // higher-order rows by `u` before adding this one.
+        for p in (0..n).rev() {
             let row = p * n;
-            let pmax = n - 1 - p;
-            for q in 0..=pmax {
-                let c = self.coeffs[row + q];
-                if c != 0.0 {
-                    s += c * up[p] * vp[q];
-                }
+            // Row `p` runs to degree `order - p`: the triangle bound.
+            let qmax = n - 1 - p;
+            let mut r = self.coeffs[row + qmax];
+            for q in (0..qmax).rev() {
+                r = r * v + self.coeffs[row + q];
             }
+            s = s * u + r;
         }
         s
     }
@@ -137,28 +137,30 @@ impl SipPoly {
     /// Differentiating term by term is exact and costs one pass,
     /// where a central difference costs four extra evaluations and
     /// carries a step-size error.
+    ///
+    /// This uses the Horner recurrence of [`Self::eval`] and carries
+    /// the derivative alongside it. For a Horner step `s <- s * x + c`,
+    /// the derivative satisfies `d <- d * x + s`, where `s` holds its
+    /// value from before the step. Applying that in `v` gives the
+    /// `d/dv` of each row. Applying it in `u` gives `d/du` over the
+    /// collapsed rows.
     #[must_use]
     pub fn eval_with_derivatives(&self, u: f64, v: f64) -> (f64, f64, f64) {
         let n = self.dim();
-        let up = Self::powers(u);
-        let vp = Self::powers(v);
         let (mut s, mut du, mut dv) = (0.0_f64, 0.0_f64, 0.0_f64);
-        for p in 0..n {
+        for p in (0..n).rev() {
             let row = p * n;
-            let pmax = n - 1 - p;
-            for q in 0..=pmax {
-                let c = self.coeffs[row + q];
-                if c == 0.0 {
-                    continue;
-                }
-                s += c * up[p] * vp[q];
-                if p > 0 {
-                    du += c * (p as f64) * up[p - 1] * vp[q];
-                }
-                if q > 0 {
-                    dv += c * (q as f64) * up[p] * vp[q - 1];
-                }
+            let qmax = n - 1 - p;
+            let mut r = self.coeffs[row + qmax];
+            let mut rd = 0.0_f64;
+            for q in (0..qmax).rev() {
+                rd = rd * v + r;
+                r = r * v + self.coeffs[row + q];
             }
+            // `du` consumes the previous `s`, so it updates first.
+            du = du * u + s;
+            s = s * u + r;
+            dv = dv * u + rd;
         }
         (s, du, dv)
     }
@@ -187,7 +189,87 @@ impl Sip {
     /// `A_0_1`, belong to the polynomial and add in the same way.
     #[must_use]
     pub fn forward(&self, u: f64, v: f64) -> (f64, f64) {
-        (u + self.a.eval(u, v), v + self.b.eval(u, v))
+        // `A` and `B` are independent Horner recurrences over the same
+        // `(u, v)`. Evaluated one after the other, they form two serial
+        // dependency chains run back to back. This evaluation is bound
+        // by that chain, not by the number of multiply-adds in it.
+        // Walking both tables in one loop lets the two chains overlap.
+        // That costs nothing extra and hides most of the second chain.
+        //
+        // The fused loop applies only when the two agree on shape.
+        // `A_ORDER` and `B_ORDER` are separate keywords, and a header
+        // may differ on them.
+        let n = self.a.dim();
+        if n != self.b.dim() {
+            return (u + self.a.eval(u, v), v + self.b.eval(u, v));
+        }
+        // Bound once so the indexing below needs no per-term check.
+        let (ac, bc) = (&self.a.coeffs[..n * n], &self.b.coeffs[..n * n]);
+        let (mut sa, mut sb) = (0.0_f64, 0.0_f64);
+        for p in (0..n).rev() {
+            let row = p * n;
+            let qmax = n - 1 - p;
+            let (mut ra, mut rb) = (ac[row + qmax], bc[row + qmax]);
+            for q in (0..qmax).rev() {
+                ra = ra * v + ac[row + q];
+                rb = rb * v + bc[row + q];
+            }
+            sa = sa * u + ra;
+            sb = sb * u + rb;
+        }
+        (u + sa, v + sb)
+    }
+
+    /// `A` and `B` with their partial derivatives, in one pass.
+    ///
+    /// This is [`SipPoly::eval_with_derivatives`] on both polynomials,
+    /// fused the way [`Self::forward`] fuses [`SipPoly::eval`], and for
+    /// the same reason. Each polynomial carries three accumulators that
+    /// depend on the step before, so a `(value, d/du, d/dv)` pass is
+    /// three serial chains. Running `A` and `B` back to back makes six
+    /// chains into two groups of three. Interleaving them leaves one
+    /// group of six, which is wider than the dependency and fills the
+    /// stalls the narrower version leaves.
+    ///
+    /// [`Self::inverse`] calls this once per Newton step, so it is the
+    /// whole inner loop of the inverse.
+    ///
+    /// Each accumulator sees the same operations in the same order as
+    /// the unfused version, so the results are identical bit for bit.
+    /// `fused_derivatives_match_separate` holds that.
+    #[inline]
+    fn eval_both_with_derivatives(&self, u: f64, v: f64) -> ((f64, f64, f64), (f64, f64, f64)) {
+        // As in `forward`: fuse only when `A_ORDER` and `B_ORDER` agree.
+        let n = self.a.dim();
+        if n != self.b.dim() {
+            return (
+                self.a.eval_with_derivatives(u, v),
+                self.b.eval_with_derivatives(u, v),
+            );
+        }
+        let (ac, bc) = (&self.a.coeffs[..n * n], &self.b.coeffs[..n * n]);
+        let (mut sa, mut dua, mut dva) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let (mut sb, mut dub, mut dvb) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for p in (0..n).rev() {
+            let row = p * n;
+            let qmax = n - 1 - p;
+            let (mut ra, mut rb) = (ac[row + qmax], bc[row + qmax]);
+            let (mut rda, mut rdb) = (0.0_f64, 0.0_f64);
+            for q in (0..qmax).rev() {
+                rda = rda * v + ra;
+                ra = ra * v + ac[row + q];
+                rdb = rdb * v + rb;
+                rb = rb * v + bc[row + q];
+            }
+            // `du` consumes the previous `s`, so it updates first.
+            dua = dua * u + sa;
+            sa = sa * u + ra;
+            dva = dva * u + rda;
+            dub = dub * u + sb;
+            sb = sb * u + rb;
+            dvb = dvb * u + rdb;
+        }
+        ((sa, dua, dva), (sb, dub, dvb))
     }
 
     /// Inverse distortion, `(u', v') -> (u, v)`.
@@ -228,8 +310,7 @@ impl Sip {
             // Residual and exact Jacobian of
             // F(u,v) = (u + A(u,v), v + B(u,v)) in one pass; the
             // identity part contributes the 1 on each diagonal.
-            let (a, a_du, a_dv) = self.a.eval_with_derivatives(u, v);
-            let (b, b_du, b_dv) = self.b.eval_with_derivatives(u, v);
+            let ((a, a_du, a_dv), (b, b_du, b_dv)) = self.eval_both_with_derivatives(u, v);
             let rx = (u + a) - up;
             let ry = (v + b) - vp;
             if rx.abs() < tol && ry.abs() < tol {
@@ -274,6 +355,64 @@ mod tests {
     #[test]
     fn poly_rejects_overflow_term() {
         assert!(SipPoly::from_terms(2, &[(2, 1, 0.5)]).is_err());
+    }
+
+    /// The fused `A`/`B` derivative pass must equal the two separate
+    /// passes bit for bit.
+    ///
+    /// `Sip::eval_both_with_derivatives` interleaves two Horner
+    /// recurrences to let their dependency chains overlap. It is a
+    /// scheduling change alone: each accumulator sees the same
+    /// operations in the same order. Anything less than bit equality
+    /// means an operation moved, and `Sip::inverse` would then converge
+    /// to a different last digit than the polynomials say it should.
+    ///
+    /// The unequal-order case is covered too, since it takes the
+    /// fallback rather than the fused loop.
+    #[test]
+    fn fused_derivatives_match_separate() {
+        let full = |order: u32| {
+            let terms: Vec<(u32, u32, f64)> = (0..=order)
+                .flat_map(|p| (0..=(order - p)).map(move |q| (p, q)))
+                .enumerate()
+                .map(|(i, (p, q))| (p, q, ((i % 7) as f64 - 3.0) * 1e-4))
+                .collect();
+            SipPoly::from_terms(order, &terms).unwrap()
+        };
+        // Equal orders take the fused loop; unequal takes the fallback.
+        for (oa, ob) in [(2_u32, 2_u32), (3, 3), (5, 5), (2, 4), (4, 2), (1, 1)] {
+            let sip = Sip {
+                a: full(oa),
+                b: full(ob),
+                ap: None,
+                bp: None,
+            };
+            for &(u, v) in &[
+                (0.0_f64, 0.0_f64),
+                (1.0, -1.0),
+                (37.5, -12.25),
+                (-2048.0, 2047.0),
+                (1e-9, 1e-9),
+            ] {
+                let want_a = sip.a.eval_with_derivatives(u, v);
+                let want_b = sip.b.eval_with_derivatives(u, v);
+                let (got_a, got_b) = sip.eval_both_with_derivatives(u, v);
+                for (got, want, name) in [
+                    (got_a.0, want_a.0, "A"),
+                    (got_a.1, want_a.1, "dA/du"),
+                    (got_a.2, want_a.2, "dA/dv"),
+                    (got_b.0, want_b.0, "B"),
+                    (got_b.1, want_b.1, "dB/du"),
+                    (got_b.2, want_b.2, "dB/dv"),
+                ] {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "orders ({oa}, {ob}) at ({u}, {v}): {name} fused {got} vs separate {want}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

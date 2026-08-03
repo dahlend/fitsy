@@ -755,7 +755,7 @@ impl PyBinTable {
         Ok(PyList::new(py, names)?.call_method0("__iter__")?.unbind())
     }
 
-    /// Materialise every column as a plain ``dict[str, ndarray | list]``.
+    /// Materialize every column as a plain ``dict[str, ndarray | list]``.
     ///
     /// Returns
     /// -------
@@ -934,7 +934,7 @@ fn generic_to_pylist(py: Python<'_>, cells: &[BinValue], shape: Option<&[usize]>
     let list = PyList::empty(py);
     for c in cells {
         // Each numeric variant calls a different `into_pyarray`
-        // monomorphisation; clippy flags the bodies as identical but
+        // monomorphization; clippy flags the bodies as identical but
         // they aren't (different element types).
         #[allow(
             clippy::match_same_arms,
@@ -1363,7 +1363,7 @@ impl PyAsciiTable {
         Ok(PyList::new(py, names)?.call_method0("__iter__")?.unbind())
     }
 
-    /// Materialise every column as a plain ``dict[str, ndarray | list]``.
+    /// Materialize every column as a plain ``dict[str, ndarray | list]``.
     ///
     /// Returns
     /// -------

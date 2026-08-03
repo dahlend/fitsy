@@ -112,7 +112,7 @@ clippy.cast_possible_wrap = {level = "allow", priority = 2}
 # Mathematical / scientific code routinely uses short variable names (x, y, z, r, n, etc.)
 clippy.many_single_char_names = {level = "allow", priority = 2}
 # Every public function that returns `Result` documents its error conditions in
-# an `# Errors` section. See documentation_style.md Sec.3.
+# an `# Errors` section.
 clippy.missing_errors_doc = {level = "deny", priority = 2}
 
 # General list

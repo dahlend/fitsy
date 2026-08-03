@@ -80,10 +80,10 @@ pub use dss::Dss;
 pub use fit::{WcsFit, WcsFitOptions, fit_celestial_wcs};
 pub use linear::LinearTransform;
 pub use projection::{Projection, ProjectionKind};
-// `Linearised` and `Grism` are reachable from `SpectralAlgorithm`'s
+// `Linearized` and `Grism` are reachable from `SpectralAlgorithm`'s
 // variants, so a caller matching on one needs them at the same level.
 pub use spectral::{
-    Grism, Linearised, SourceFrame, SpectralAlgorithm, SpectralAxis, SpectralFrame, SpectralKind,
+    Grism, Linearized, SourceFrame, SpectralAlgorithm, SpectralAxis, SpectralFrame, SpectralKind,
 };
 pub use tab::{TabGroup, TabSpec};
 pub use table::TableWcs;
@@ -119,7 +119,7 @@ pub(crate) fn alt_suffix(alt: char) -> Result<String> {
 /// # Examples
 ///
 /// ```
-/// use fitsy::{Header, Wcs};
+/// use fitsy::{AxisKind, Header, Wcs};
 ///
 /// let mut h = Header::empty();
 /// h.push("NAXIS", 2_i64, None)?;
@@ -135,9 +135,12 @@ pub(crate) fn alt_suffix(alt: char) -> Result<String> {
 /// let wcs = Wcs::from_header(&h, ' ')?.expect("header declares a WCS");
 ///
 /// // Pixel coordinates are 0-based, so CRPIX 32 is pixel 31.
-/// let (ra, dec) = wcs.pixel_to_celestial(31.0, 23.0)?;
-/// assert!((ra - 150.0).abs() < 1e-9);
-/// assert!((dec - 2.5).abs() < 1e-9);
+/// // `pixel_to_world` returns one value per axis, in axis order;
+/// // `axis_kinds` says which value is which.
+/// let world = wcs.pixel_to_world(&[31.0, 23.0])?;
+/// assert_eq!(wcs.axis_kinds(), vec![AxisKind::Longitude, AxisKind::Latitude]);
+/// assert!((world[0] - 150.0).abs() < 1e-9);
+/// assert!((world[1] - 2.5).abs() < 1e-9);
 /// # Ok::<(), fitsy::FitsError>(())
 /// ```
 #[derive(Debug, Clone)]
@@ -284,7 +287,329 @@ pub(crate) struct WcsParts {
     pub pixel_shape: Option<Vec<u64>>,
 }
 
+/// The kind of coordinate an axis carries.
+///
+/// This names the *type* half of `CTYPEia`, the part before the
+/// algorithm code (Sec.8.1). The algorithm half describes how the
+/// coordinate is computed, not what it is, so `RA---TAN` and
+/// `RA---TAB` are both [`AxisKind::Longitude`]. Ask
+/// [`Wcs::is_tabular`] for the `-TAB` case, which is the one algorithm
+/// a caller usually has to plan around.
+///
+/// Obtain one with [`Wcs::axis_kind`], or the whole set with
+/// [`Wcs::axis_kinds`].
+///
+/// This enum is exhaustive. Sec.8.1 fixes the set of coordinate types,
+/// and a caller matching on it should get a compile error rather than
+/// a silent fallthrough if that set ever grows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AxisKind {
+    /// Celestial longitude, such as `RA` or `GLON`.
+    ///
+    /// This kind comes from the celestial pair, not from the type code
+    /// alone. Sec.8.2 defines a spherical projection over two axes. A
+    /// longitude with no matching latitude therefore has no projection.
+    /// The pipeline transforms that axis linearly. [`Wcs::axis_kind`]
+    /// reports [`AxisKind::Linear`] for it. Use
+    /// [`Wcs::celestial_axes`] to locate the pair itself.
+    Longitude,
+    /// Celestial latitude, such as `DEC` or `GLAT`.
+    ///
+    /// This kind pairs with [`AxisKind::Longitude`] and follows the
+    /// same rule.
+    Latitude,
+    /// Spectral axis (Paper III): `FREQ`, `WAVE`, `ENER`, and the
+    /// rest of [`SpectralKind`].
+    Spectral,
+    /// Time axis (Sec.9.5.3).
+    Time,
+    /// Phase axis (Sec.9.6).
+    Phase,
+    /// Stokes polarization (Sec.8.1 Table 25).
+    Stokes,
+    /// A plain linear axis, and any type this crate does not
+    /// recognize. `CDELT` and `CRVAL` still describe it.
+    Linear,
+}
+
+/// Working buffers for one coordinate transform.
+///
+/// A transform needs four vectors of length `NAXIS`. Allocating them
+/// per point dominates the cost of a batch call. The batch entry
+/// points therefore build one `Scratch` and reuse it for every point.
+#[derive(Debug)]
+struct Scratch {
+    /// Forward: 1-based pixel coordinates. Unused by the inverse.
+    pix: Vec<f64>,
+    /// Pixel offsets from `CRPIX`, before or after the linear matrix.
+    dp: Vec<f64>,
+    /// Intermediate world coordinates.
+    intermediate: Vec<f64>,
+    /// Result. World coordinates forward, pixel coordinates inverse.
+    out: Vec<f64>,
+    /// Values for one multi-axis `-TAB` group. Grows to the size of
+    /// the largest group and then stays there.
+    tab: Vec<f64>,
+}
+
+impl Scratch {
+    fn new(naxis: usize) -> Self {
+        Self {
+            pix: vec![0.0; naxis],
+            dp: vec![0.0; naxis],
+            intermediate: vec![0.0; naxis],
+            out: vec![0.0; naxis],
+            tab: Vec::new(),
+        }
+    }
+}
+
+/// A two-axis celestial WCS with at most a SIP distortion attached,
+/// with every per-point input resolved.
+///
+/// [`Wcs::pixel_to_world_into`] is written for the general case, so it
+/// re-derives loop-invariant state for every point. It probes six
+/// `Option` fields. It walks the spectral and `-TAB` lists. It reads
+/// `CRPIX` and the matrix through slice-returning accessors, indexes
+/// the celestial pair with runtime indices, and reaches the projection
+/// through an `Arc`. None of that varies across a batch.
+///
+/// This resolves all of it once. The parts it removes are worth about a
+/// third of the per-point cost on a `TAN` batch. That saving is spread
+/// across six small terms rather than concentrated in one.
+///
+/// This path carries SIP and TPV rather than declining them. They are
+/// the two common distortions on survey images, and each costs a few
+/// multiply-adds of its own. Sending them to the general body added the
+/// per-point overhead above on top of that cost.
+///
+/// The saving is smaller for TPV than for SIP, because a TPV inverse
+/// iterates and that iteration dominates what the specialization
+/// removes. It is still a saving, and it costs the other paths nothing.
+///
+/// The two paths must agree bit for bit. `fast_path_matches_general` in
+/// `tests/wcs.rs` is what holds them together.
+struct FastCelestial<'a> {
+    /// 1-based reference pixel, both axes.
+    crpix: [f64; 2],
+    /// Combined linear matrix, row-major.
+    matrix: [f64; 4],
+    /// Index of the longitude axis, 0 or 1. Latitude is the other.
+    lon: usize,
+    /// `CUNIT` scaling to degrees, longitude then latitude.
+    cunit_to_deg: (f64, f64),
+    /// Projection-plane offset of the fiducial point.
+    fiducial_offset: (f64, f64),
+    /// Inverse of `matrix`, row-major.
+    inverse: [f64; 4],
+    /// Borrowed out of the `Arc` once, so the loop pays a vtable call
+    /// rather than a vtable call behind a refcount indirection.
+    projection: &'a dyn Projection,
+    /// Native to celestial rotation.
+    rotation: &'a celestial::CelestialRotation,
+    /// Pixel-space SIP distortion, when the header carries one.
+    sip: Option<&'a sip::Sip>,
+    /// Intermediate-space TPV distortion, when the header carries one.
+    ///
+    /// Borrowed rather than copied: the two coefficient tables are 640
+    /// bytes, which is not something to move per point.
+    tpv: Option<&'a tpv::Tpv>,
+}
+
+impl FastCelestial<'_> {
+    /// One point, or `None` when the projection rejects it.
+    ///
+    /// Mirrors the surviving steps of [`Wcs::pixel_to_world_into`] in
+    /// the same order, so the two produce identical bits.
+    #[inline]
+    fn point(&self, px: f64, py: f64) -> Option<(f64, f64)> {
+        // 0-based -> 1-based, then offset from CRPIX.
+        let mut d0 = px + 1.0 - self.crpix[0];
+        let mut d1 = py + 1.0 - self.crpix[1];
+        // SIP pixel-space distortion, which the general body applies to
+        // the celestial pair in `(lon, lat)` order and writes back to
+        // the same two slots.
+        if let Some(sip) = self.sip {
+            if self.lon == 0 {
+                (d0, d1) = sip.forward(d0, d1);
+            } else {
+                (d1, d0) = sip.forward(d1, d0);
+            }
+        }
+        // Linear matrix.
+        let i0 = self.matrix[0] * d0 + self.matrix[1] * d1;
+        let i1 = self.matrix[2] * d0 + self.matrix[3] * d1;
+        // The general body writes `CRVAL + intermediate` for every axis
+        // and then overwrites both celestial slots. With two celestial
+        // axes those writes are dead, so this omits them.
+        let (ilon, ilat) = if self.lon == 0 { (i0, i1) } else { (i1, i0) };
+        let (fx, fy) = self.cunit_to_deg;
+        let (mut x, mut y) = (ilon * fx, ilat * fy);
+        // TPV sits between the linear stage and the projection.
+        if let Some(tpv) = self.tpv {
+            (x, y) = tpv.forward(x, y);
+        }
+        let (phi, theta) = self
+            .projection
+            .x2s(x + self.fiducial_offset.0, y + self.fiducial_offset.1)
+            .ok()?;
+        Some(self.rotation.native_to_celestial(phi, theta))
+    }
+
+    /// One point of the inverse, or `None` when the projection or the
+    /// SIP inverse rejects it.
+    ///
+    /// Mirrors the surviving steps of [`Wcs::world_to_pixel_into`].
+    /// `CRVAL` does not appear. The general body seeds `intermediate`
+    /// with `world - CRVAL`, then overwrites both celestial slots from
+    /// the projection. With two celestial axes that seed is dead.
+    #[inline]
+    fn inverse_point(&self, lon_deg: f64, lat_deg: f64) -> Option<(f64, f64)> {
+        let (phi, theta) = self.rotation.celestial_to_native(lon_deg, lat_deg);
+        let (x_proj, y_proj) = self.projection.s2x(phi, theta).ok()?;
+        let mut x = x_proj - self.fiducial_offset.0;
+        let mut y = y_proj - self.fiducial_offset.1;
+        // Inverse TPV, before the `CUNIT` rescaling, which is the order
+        // the general body uses. It iterates, so it can fail to
+        // converge -- a per-point rejection like the projection's.
+        if let Some(tpv) = self.tpv {
+            (x, y) = tpv.inverse(x, y).ok()?;
+        }
+        let (fx, fy) = self.cunit_to_deg;
+        let (ilon, ilat) = (x / fx, y / fy);
+        // Back into axis order before the inverse matrix.
+        let (i0, i1) = if self.lon == 0 {
+            (ilon, ilat)
+        } else {
+            (ilat, ilon)
+        };
+        let mut d0 = self.inverse[0] * i0 + self.inverse[1] * i1;
+        let mut d1 = self.inverse[2] * i0 + self.inverse[3] * i1;
+        // Inverse SIP, after the inverse matrix and before `CRPIX`,
+        // which is the order the general body uses. It iterates, so it
+        // can fail to converge. That is a per-point rejection, like the
+        // one the projection reports.
+        if let Some(sip) = self.sip {
+            if self.lon == 0 {
+                (d0, d1) = sip.inverse(d0, d1).ok()?;
+            } else {
+                (d1, d0) = sip.inverse(d1, d0).ok()?;
+            }
+        }
+        // 1-based -> 0-based.
+        Some((self.crpix[0] + d0 - 1.0, self.crpix[1] + d1 - 1.0))
+    }
+
+    /// The inverse batch, in the flat layout of
+    /// [`Wcs::world_to_pixel_many`].
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `world` is not a whole number of points.
+    fn world_to_pixel_many(&self, world: &[f64]) -> Result<Vec<f64>> {
+        if !world.len().is_multiple_of(2) {
+            return Err(FitsError::Wcs(format!(
+                "expected a whole multiple of 2 world coordinates, got {}",
+                world.len()
+            )));
+        }
+        let mut out = vec![0.0; world.len()];
+        let lat = 1 - self.lon;
+        for (src, dst) in world.chunks_exact(2).zip(out.chunks_exact_mut(2)) {
+            match self.inverse_point(src[self.lon], src[lat]) {
+                Some((px, py)) => {
+                    dst[0] = px;
+                    dst[1] = py;
+                }
+                None => dst.fill(f64::NAN),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The batch, in the flat layout of [`Wcs::pixel_to_world_many`].
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `pix` is not a whole number of points.
+    fn pixel_to_world_many(&self, pix: &[f64]) -> Result<Vec<f64>> {
+        if !pix.len().is_multiple_of(2) {
+            return Err(FitsError::Wcs(format!(
+                "expected a whole multiple of 2 pixel coordinates, got {}",
+                pix.len()
+            )));
+        }
+        let mut out = vec![0.0; pix.len()];
+        let lat = 1 - self.lon;
+        for (src, dst) in pix.chunks_exact(2).zip(out.chunks_exact_mut(2)) {
+            match self.point(src[0], src[1]) {
+                Some((alpha, delta)) => {
+                    dst[self.lon] = alpha;
+                    dst[lat] = delta;
+                }
+                None => dst.fill(f64::NAN),
+            }
+        }
+        Ok(out)
+    }
+}
+
 impl Wcs {
+    /// Resolve the fast path, or `None` when the general body is
+    /// needed.
+    ///
+    /// The conditions cover what this path reproduces: two axes, both
+    /// celestial, and no spectral, tabular or plate-solution stage.
+    /// This path carries SIP and TPV. It declines `TNX`, which is
+    /// rarer and needs its own resolved state.
+    fn fast_celestial(&self) -> Option<FastCelestial<'_>> {
+        if self.naxis() != 2
+            || !self.spectral.is_empty()
+            || !self.tab.is_empty()
+            || !self.tab_specs.is_empty()
+            || self.dss.is_some()
+        {
+            return None;
+        }
+        let c = self.celestial.as_ref()?;
+        if c.tnx.is_some() {
+            return None;
+        }
+        // Both axes must be the celestial pair, or an axis would need
+        // the `CRVAL` step this path skips.
+        if c.pair.lon.max(c.pair.lat) > 1 || c.pair.lon == c.pair.lat {
+            return None;
+        }
+        let m = self.linear.matrix_row_major();
+        let inv = self.linear.inverse_row_major();
+        let crpix = self.linear.crpix();
+        if m.len() != 4 || inv.len() != 4 || crpix.len() != 2 {
+            return None;
+        }
+        Some(FastCelestial {
+            crpix: [crpix[0], crpix[1]],
+            matrix: [m[0], m[1], m[2], m[3]],
+            inverse: [inv[0], inv[1], inv[2], inv[3]],
+            lon: c.pair.lon,
+            cunit_to_deg: c.cunit_to_deg,
+            fiducial_offset: c.fiducial_offset,
+            projection: c.projection.as_ref(),
+            rotation: &c.rotation,
+            sip: c.sip.as_ref(),
+            tpv: c.tpv.as_ref(),
+        })
+    }
+}
+
+impl Wcs {
+    /// Largest `NAXIS` [`Self::footprint`] accepts.
+    ///
+    /// The corner count doubles with every axis. `NAXIS` comes from
+    /// the header, so an unchecked value would let a file ask for an
+    /// unbounded allocation. Sixteen axes is 65536 corners, which
+    /// exceeds any WCS in use.
+    pub const MAX_FOOTPRINT_AXES: usize = 16;
+
     /// Number of coordinate axes.
     ///
     /// This is the WCS axis count, which `WCSAXESa` may set higher than
@@ -400,81 +725,157 @@ impl Wcs {
     ///
     /// This convention holds for every pixel-coordinate method on
     /// `Wcs`: [`pixel_to_world`], [`world_to_pixel`],
-    /// [`pixel_to_celestial`], [`celestial_to_pixel`],
-    /// [`pixel_to_celestial_many`], [`celestial_to_pixel_many`] and
-    /// [`pixel_scale_at`].
+    /// [`pixel_to_world_many`], [`world_to_pixel_many`],
+    /// [`footprint`] and [`pixel_scale_at`].
+    ///
+    /// This method transforms one point and fails on a point it cannot
+    /// transform. [`pixel_to_world_many`] transforms a batch and marks
+    /// such a point `NaN` instead.
     ///
     /// A world value comes back in the unit its `CUNIT` names. A
     /// celestial axis therefore reports degrees.
     ///
     /// # Errors
     ///
-    /// [`FitsError::Wcs`] in four cases:
+    /// [`FitsError::Wcs`] in five cases:
     ///
     /// - `pix.len()` does not equal `NAXIS`.
+    /// - The `linear` field does not describe `NAXIS` axes.
     /// - A `-TAB` axis remains unresolved.
     /// - The point lies outside the domain of the projection.
     /// - A spectral or tabular axis cannot evaluate the point.
     ///
     /// [`pixel_to_world`]: Self::pixel_to_world
     /// [`world_to_pixel`]: Self::world_to_pixel
-    /// [`pixel_to_celestial`]: Self::pixel_to_celestial
-    /// [`celestial_to_pixel`]: Self::celestial_to_pixel
-    /// [`pixel_to_celestial_many`]: Self::pixel_to_celestial_many
-    /// [`celestial_to_pixel_many`]: Self::celestial_to_pixel_many
+    /// [`pixel_to_world_many`]: Self::pixel_to_world_many
+    /// [`world_to_pixel_many`]: Self::world_to_pixel_many
+    /// [`footprint`]: Self::footprint
     /// [`pixel_scale_at`]: Self::pixel_scale_at
     pub fn pixel_to_world(&self, pix: &[f64]) -> Result<Vec<f64>> {
-        if pix.len() != self.naxis() {
+        self.check_linear_shape()?;
+        self.check_tab_resolved()?;
+        let mut scratch = Scratch::new(self.naxis());
+        self.pixel_to_world_into(pix, &mut scratch)?;
+        Ok(scratch.out)
+    }
+
+    /// Check that the linear stage covers the same axes the WCS does.
+    ///
+    /// [`Self::new`] enforces this at construction. The `linear` field
+    /// is public and has public constructors, so a caller can replace
+    /// it with a transform of a different rank.
+    ///
+    /// The per-point bodies below index `CRPIX` unchecked and zip the
+    /// matrix against `naxis` rows. A short transform then panics. A
+    /// long one leaves the previous point's intermediate values in
+    /// place and reports nothing. This check runs once per call rather
+    /// than once per point.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `linear` does not describe `naxis`
+    /// axes.
+    fn check_linear_shape(&self) -> Result<()> {
+        let n = self.naxis();
+        let (crpix, crval) = (self.linear.crpix().len(), self.linear.crval().len());
+        let m = self.linear.matrix_row_major().len();
+        let inv = self.linear.inverse_row_major().len();
+        if crpix == n && crval == n && m == n * n && inv == n * n {
+            return Ok(());
+        }
+        Err(FitsError::Wcs(format!(
+            "WCS describes {n} axes but its linear transform holds {crpix} CRPIX \
+             and {crval} CRVAL entries with a {m}-element matrix and a \
+             {inv}-element inverse; {n}, {n}, {} and {} are required",
+            n * n,
+            n * n,
+        )))
+    }
+
+    /// Forward transform of one point, writing into `s.out`.
+    ///
+    /// This holds the body of [`Self::pixel_to_world`]. It exists so a
+    /// batch loop can reuse one [`Scratch`] instead of allocating a
+    /// vector per point.
+    ///
+    /// The caller runs [`Self::check_linear_shape`] and
+    /// [`Self::check_tab_resolved`] first. This is the per-point work
+    /// alone.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::pixel_to_world`] that belong to the
+    /// point: a wrong length, a point outside the projection, and a
+    /// spectral or tabular axis that cannot evaluate it.
+    fn pixel_to_world_into(&self, pix: &[f64], s: &mut Scratch) -> Result<()> {
+        let n = self.naxis();
+        if pix.len() != n {
             return Err(FitsError::Wcs(format!(
-                "expected {} pixel coordinates, got {}",
-                self.naxis(),
+                "expected {n} pixel coordinates, got {}",
                 pix.len()
             )));
         }
-        // 0-based -> 1-based: see the doc comment above.
-        let pix: Vec<f64> = pix.iter().map(|p| p + 1.0).collect();
-        let pix = pix.as_slice();
-        // Step 1: pixel offset relative to CRPIX.
+        // Step 1: 0-based -> 1-based, then offset relative to CRPIX.
+        // See the doc comment on `pixel_to_world`.
         let crpix = self.linear.crpix();
-        let mut dp: Vec<f64> = (0..self.naxis()).map(|j| pix[j] - crpix[j]).collect();
+        for j in 0..n {
+            s.pix[j] = pix[j] + 1.0;
+            s.dp[j] = s.pix[j] - crpix[j];
+        }
         // Step 2: SIP pixel-space distortion (celestial pair only).
         if let Some(c) = self.celestial.as_ref()
             && let Some(sip) = c.sip.as_ref()
         {
-            let (u, v) = (dp[c.pair.lon], dp[c.pair.lat]);
+            let (u, v) = (s.dp[c.pair.lon], s.dp[c.pair.lat]);
             let (up, vp) = sip.forward(u, v);
-            dp[c.pair.lon] = up;
-            dp[c.pair.lat] = vp;
+            s.dp[c.pair.lon] = up;
+            s.dp[c.pair.lat] = vp;
         }
-        // Step 3: linear matrix.
-        let intermediate = self.linear.apply_matrix(&dp)?;
+        // Step 3: linear matrix, accumulated in place. `apply_matrix`
+        // would return a fresh vector on every point.
+        let m = self.linear.matrix_row_major();
+        // Guaranteed by `check_linear_shape`, which every entry point
+        // runs once before reaching here. Restated because the loop
+        // below would silently keep the previous point's values if a
+        // short matrix made `chunks_exact` yield too few rows.
+        debug_assert_eq!(m.len(), n * n, "linear matrix does not match NAXIS");
+        let dp = &s.dp;
+        for (out, row) in s.intermediate.iter_mut().zip(m.chunks_exact(n)) {
+            *out = row.iter().zip(dp).map(|(a, b)| a * b).sum();
+        }
         // Step 4: assemble world; celestial axes go through projection.
         // `crval` hoisted: one contiguous slice for the whole loop,
         // and the bounds check happens once instead of per axis.
         let crval = self.linear.crval();
-        let mut world: Vec<f64> = (0..self.naxis())
-            .map(|i| crval[i] + intermediate[i])
-            .collect();
+        for ((out, cv), inter) in s.out.iter_mut().zip(crval).zip(&s.intermediate) {
+            *out = cv + inter;
+        }
         // Spectral axes: replace the linear value with the algorithm's
         // forward transform (Paper III Sec.3.3).
         for sx in &self.spectral {
-            world[sx.axis] = sx.intermediate_to_world(intermediate[sx.axis])?;
+            s.out[sx.axis] = sx.intermediate_to_world(s.intermediate[sx.axis])?;
         }
         // Tabular axes (Paper III Sec.6): the lookup replaces the
         // linear pass output with an interpolated world value.
         // The lookup operates on the full intermediate world
         // coordinate (CRVAL + linear_intermediate), which is
-        // exactly `world[axis]` at this point.
-        self.check_tab_resolved()?;
+        // exactly `s.out[axis]` at this point.
+        //
+        // `check_tab_resolved` guards this loop, and every entry point
+        // runs it once before reaching here. It is hoisted for the same
+        // reason as `check_linear_shape`: an unresolved `-TAB` axis is
+        // a property of the WCS, not of the point, so a batch must fail
+        // the whole call rather than mark each point `NaN`.
         for group in &self.tab {
             // A separable axis takes the scalar path: no per-point
             // allocation, same numbers.
             if let [axis] = group.axes[..] {
-                world[axis] = group.forward_scalar(world[axis])?;
+                s.out[axis] = group.forward_scalar(s.out[axis])?;
             } else {
-                let psi: Vec<f64> = group.axes.iter().map(|&a| world[a]).collect();
-                for (&axis, value) in group.axes.iter().zip(group.forward(&psi)?) {
-                    world[axis] = value;
+                s.tab.clear();
+                s.tab.extend(group.axes.iter().map(|&a| s.out[a]));
+                for (&axis, value) in group.axes.iter().zip(group.forward(&s.tab)?) {
+                    s.out[axis] = value;
                 }
             }
         }
@@ -482,18 +883,18 @@ impl Wcs {
             // DSS plate solution: bypass the entire standard
             // celestial pipeline for the celestial axis pair.
             if let Some(dss) = self.dss.as_ref() {
-                let (ra, dec) = dss.pixel_to_world(pix[c.pair.lon], pix[c.pair.lat]);
-                world[c.pair.lon] = ra;
-                world[c.pair.lat] = dec;
-                return Ok(world);
+                let (ra, dec) = dss.pixel_to_world(s.pix[c.pair.lon], s.pix[c.pair.lat]);
+                s.out[c.pair.lon] = ra;
+                s.out[c.pair.lat] = dec;
+                return Ok(());
             }
             // Convert the celestial intermediate coords to degrees
             // before feeding the projection inverse, honoring any
             // non-degree CUNIT (Paper I Sec.3.1). Resolved at parse
             // time; see `CelestialBlock::cunit_to_deg`.
             let (fx, fy) = c.cunit_to_deg;
-            let mut x = intermediate[c.pair.lon] * fx;
-            let mut y = intermediate[c.pair.lat] * fy;
+            let mut x = s.intermediate[c.pair.lon] * fx;
+            let mut y = s.intermediate[c.pair.lat] * fy;
             // TPV polynomial sits between linear and projection.
             if let Some(tpv) = c.tpv.as_ref() {
                 let (xp, yp) = tpv.forward(x, y);
@@ -514,10 +915,10 @@ impl Wcs {
                 .projection
                 .x2s(x + c.fiducial_offset.0, y + c.fiducial_offset.1)?;
             let (alpha, delta) = c.rotation.native_to_celestial(phi, theta);
-            world[c.pair.lon] = alpha;
-            world[c.pair.lat] = delta;
+            s.out[c.pair.lon] = alpha;
+            s.out[c.pair.lat] = delta;
         }
-        Ok(world)
+        Ok(())
     }
 
     /// Transform world coordinates to pixel coordinates.
@@ -528,38 +929,65 @@ impl Wcs {
     ///
     /// # Errors
     ///
-    /// [`FitsError::Wcs`] in four cases:
+    /// [`FitsError::Wcs`] in five cases:
     ///
     /// - `world.len()` does not equal `NAXIS`.
+    /// - The `linear` field does not describe `NAXIS` axes.
     /// - A `-TAB` axis remains unresolved.
     /// - The point lies outside the domain of the projection.
     /// - An iterative inverse fails to converge.
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
-        if world.len() != self.naxis() {
+        self.check_linear_shape()?;
+        self.check_tab_resolved()?;
+        let mut scratch = Scratch::new(self.naxis());
+        self.world_to_pixel_into(world, &mut scratch)?;
+        Ok(scratch.out)
+    }
+
+    /// Inverse transform of one point, writing into `s.out`.
+    ///
+    /// This holds the body of [`Self::world_to_pixel`]. It exists so a
+    /// batch loop can reuse one [`Scratch`] instead of allocating a
+    /// vector per point.
+    ///
+    /// The caller runs [`Self::check_linear_shape`] and
+    /// [`Self::check_tab_resolved`] first, as in
+    /// [`Self::pixel_to_world_into`].
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::world_to_pixel`] that belong to the
+    /// point: a wrong length, a point the projection cannot represent,
+    /// and an iterative inverse that does not converge.
+    fn world_to_pixel_into(&self, world: &[f64], s: &mut Scratch) -> Result<()> {
+        let n = self.naxis();
+        if world.len() != n {
             return Err(FitsError::Wcs(format!(
-                "expected {} world coordinates, got {}",
-                self.naxis(),
+                "expected {n} world coordinates, got {}",
                 world.len()
             )));
         }
         let crval = self.linear.crval();
-        let mut intermediate: Vec<f64> = (0..self.naxis()).map(|i| world[i] - crval[i]).collect();
+        for i in 0..n {
+            s.intermediate[i] = world[i] - crval[i];
+        }
         // Spectral axes: invert the algorithm.
         for sx in &self.spectral {
-            intermediate[sx.axis] = sx.world_to_intermediate(world[sx.axis])?;
+            s.intermediate[sx.axis] = sx.world_to_intermediate(world[sx.axis])?;
         }
         // Tabular axes: invert the lookup. Same all-or-nothing
-        // rule as the forward pass. The lookup yields the full
-        // intermediate world coordinate; subtract CRVAL to get
-        // back to the linear-pipeline space.
-        self.check_tab_resolved()?;
+        // rule as the forward pass, and the same hoisted
+        // `check_tab_resolved` guarding it.
+        // The lookup yields the full intermediate world coordinate;
+        // subtract CRVAL to get back to the linear-pipeline space.
         for group in &self.tab {
             if let [axis] = group.axes[..] {
-                intermediate[axis] = group.inverse_scalar(world[axis])? - crval[axis];
+                s.intermediate[axis] = group.inverse_scalar(world[axis])? - crval[axis];
             } else {
-                let target: Vec<f64> = group.axes.iter().map(|&a| world[a]).collect();
-                for (&axis, psi) in group.axes.iter().zip(group.inverse(&target)?) {
-                    intermediate[axis] = psi - crval[axis];
+                s.tab.clear();
+                s.tab.extend(group.axes.iter().map(|&a| world[a]));
+                for (&axis, psi) in group.axes.iter().zip(group.inverse(&s.tab)?) {
+                    s.intermediate[axis] = psi - crval[axis];
                 }
             }
         }
@@ -577,8 +1005,8 @@ impl Wcs {
             // The celestial slots still hold `world - CRVAL`, which is
             // meaningless here. Zero them so the inverse matrix cannot
             // mix them into the axes it is still responsible for.
-            intermediate[pair.lon] = 0.0;
-            intermediate[pair.lat] = 0.0;
+            s.intermediate[pair.lon] = 0.0;
+            s.intermediate[pair.lat] = 0.0;
         }
         if let Some(c) = self.celestial.as_ref()
             && dss_pixel.is_none()
@@ -603,30 +1031,239 @@ impl Wcs {
             }
             // Convert degrees back to the header's CUNIT.
             let (fx, fy) = c.cunit_to_deg;
-            intermediate[c.pair.lon] = x / fx;
-            intermediate[c.pair.lat] = y / fy;
+            s.intermediate[c.pair.lon] = x / fx;
+            s.intermediate[c.pair.lat] = y / fy;
         }
-        // Inverse linear matrix.
-        let mut dp = self.linear.apply_inverse_matrix(&intermediate)?;
+        // Inverse linear matrix, accumulated in place.
+        // `apply_inverse_matrix` would return a fresh vector per point.
+        let inv = self.linear.inverse_row_major();
+        // See the matching assertion in `pixel_to_world_into`.
+        debug_assert_eq!(inv.len(), n * n, "inverse matrix does not match NAXIS");
+        let intermediate = &s.intermediate;
+        for (out, row) in s.dp.iter_mut().zip(inv.chunks_exact(n)) {
+            *out = row.iter().zip(intermediate).map(|(a, b)| a * b).sum();
+        }
         // Inverse SIP.
         if let Some(c) = self.celestial.as_ref()
             && dss_pixel.is_none()
             && let Some(sip) = c.sip.as_ref()
         {
-            let (u, v) = sip.inverse(dp[c.pair.lon], dp[c.pair.lat])?;
-            dp[c.pair.lon] = u;
-            dp[c.pair.lat] = v;
+            let (u, v) = sip.inverse(s.dp[c.pair.lon], s.dp[c.pair.lat])?;
+            s.dp[c.pair.lon] = u;
+            s.dp[c.pair.lat] = v;
         }
         let crpix = self.linear.crpix();
         // 1-based -> 0-based: see pixel_to_world doc.
-        let mut out: Vec<f64> = (0..self.naxis()).map(|i| crpix[i] + dp[i] - 1.0).collect();
+        for ((out, cr), d) in s.out.iter_mut().zip(crpix).zip(&s.dp) {
+            *out = cr + d - 1.0;
+        }
         if let Some((pair, (px, py))) = dss_pixel {
             // DSS works in 1-based coords internally; the public API
             // is 0-based.
-            out[pair.lon] = px - 1.0;
-            out[pair.lat] = py - 1.0;
+            s.out[pair.lon] = px - 1.0;
+            s.out[pair.lat] = py - 1.0;
+        }
+        Ok(())
+    }
+
+    /// Transform many pixel coordinates to world coordinates.
+    ///
+    /// `pix` holds the points end to end, `NAXIS` values per point, so
+    /// its length is a whole multiple of `NAXIS`. The result uses the
+    /// same layout and the same length. This flat form keeps the whole
+    /// batch in two allocations, one for the input and one for the
+    /// result.
+    ///
+    /// The transform matches [`Self::pixel_to_world`] value for value.
+    /// It reuses one set of working buffers across the batch, so the
+    /// per-point cost carries no allocation.
+    ///
+    /// # Out-of-domain points
+    ///
+    /// A point the WCS cannot transform fills its own `NAXIS` slots
+    /// with `f64::NAN` and does not fail the call. Most projections
+    /// cover part of the plane alone, so a wide field routinely mixes
+    /// valid and invalid pixels. Call [`Self::pixel_to_world`] on one
+    /// point to read the error message for that point.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the whole batch cannot transform:
+    ///
+    /// - `pix.len()` is not a multiple of `NAXIS`.
+    /// - `NAXIS` is zero.
+    /// - The `linear` field does not describe `NAXIS` axes.
+    /// - A `-TAB` axis remains unresolved.
+    pub fn pixel_to_world_many(&self, pix: &[f64]) -> Result<Vec<f64>> {
+        if let Some(fast) = self.fast_celestial() {
+            return fast.pixel_to_world_many(pix);
+        }
+        self.transform_many(pix, "pixel", Self::pixel_to_world_into)
+    }
+
+    /// Transform many world coordinates to pixel coordinates.
+    ///
+    /// This mirrors [`Self::pixel_to_world_many`], including the flat
+    /// layout and the `NaN` treatment of a point that does not
+    /// transform. The result is 0-based.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the whole batch cannot transform:
+    ///
+    /// - `world.len()` is not a multiple of `NAXIS`.
+    /// - `NAXIS` is zero.
+    /// - The `linear` field does not describe `NAXIS` axes.
+    /// - A `-TAB` axis remains unresolved.
+    pub fn world_to_pixel_many(&self, world: &[f64]) -> Result<Vec<f64>> {
+        if let Some(fast) = self.fast_celestial() {
+            return fast.world_to_pixel_many(world);
+        }
+        self.transform_many(world, "world", Self::world_to_pixel_into)
+    }
+
+    /// Shared body of [`Self::pixel_to_world_many`] and
+    /// [`Self::world_to_pixel_many`].
+    ///
+    /// `kind` names the input in an error message. `step` is the
+    /// single-point transform to run for each point.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::pixel_to_world_many`].
+    fn transform_many(
+        &self,
+        input: &[f64],
+        kind: &str,
+        step: fn(&Self, &[f64], &mut Scratch) -> Result<()>,
+    ) -> Result<Vec<f64>> {
+        let n = self.naxis();
+        if n == 0 {
+            return Err(FitsError::Wcs("WCS has no axes".into()));
+        }
+        if !input.len().is_multiple_of(n) {
+            return Err(FitsError::Wcs(format!(
+                "expected a whole multiple of {n} {kind} coordinates, got {}",
+                input.len()
+            )));
+        }
+        // Hoisted out of the loop so a per-point `Err` means "this
+        // point is outside the projection", never "this WCS cannot
+        // transform at all". The latter must fail the whole call.
+        self.check_linear_shape()?;
+        self.check_tab_resolved()?;
+        let mut scratch = Scratch::new(n);
+        let mut out = vec![0.0; input.len()];
+        for (src, dst) in input.chunks_exact(n).zip(out.chunks_exact_mut(n)) {
+            match step(self, src, &mut scratch) {
+                Ok(()) => dst.copy_from_slice(&scratch.out),
+                Err(_) => dst.fill(f64::NAN),
+            }
         }
         Ok(out)
+    }
+
+    /// Kind of coordinate axis `i` carries, or `None` when the WCS has
+    /// no axis `i`.
+    ///
+    /// Use this to find an axis by meaning rather than by position.
+    /// [`Self::pixel_to_world`] returns one value per axis in axis
+    /// order, and this says what each of those values is.
+    ///
+    /// The kind comes from the type half of `CTYPEia`, so an axis
+    /// driven by a `-TAB` lookup still reports its coordinate type.
+    /// [`Self::is_tabular`] reports the lookup itself.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use fitsy::{FitsWriter, ImageBuilder};
+    /// # let path = std::env::temp_dir().join("fitsy_doc_axis_kind.fits");
+    /// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![0.0_f32; 12])?
+    /// #     .primary(true)
+    /// #     .card("CTYPE1", "RA---TAN", None)
+    /// #     .card("CTYPE2", "DEC--TAN", None)
+    /// #     .card("CRPIX1", 1.0, None)
+    /// #     .card("CRPIX2", 1.0, None)
+    /// #     .card("CRVAL1", 10.0, None)
+    /// #     .card("CRVAL2", 20.0, None)
+    /// #     .card("CDELT1", -0.001, None)
+    /// #     .card("CDELT2", 0.001, None)
+    /// #     .build()?;
+    /// # let mut out = std::fs::File::create(&path)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+    /// use fitsy::{AxisKind, FitsFile};
+    ///
+    /// let file = FitsFile::open(&path)?;
+    /// let wcs = file.wcs(0, ' ')?.expect("HDU 0 declares a WCS");
+    ///
+    /// assert_eq!(wcs.axis_kind(0), Some(AxisKind::Longitude));
+    /// assert_eq!(wcs.axis_kind(1), Some(AxisKind::Latitude));
+    /// assert_eq!(wcs.axis_kind(2), None);
+    /// # std::fs::remove_file(&path)?;
+    /// # Ok::<(), fitsy::FitsError>(())
+    /// ```
+    #[must_use]
+    pub fn axis_kind(&self, i: usize) -> Option<AxisKind> {
+        if i >= self.naxis() {
+            return None;
+        }
+        if let Some(p) = self.celestial_pair {
+            if p.lon == i {
+                return Some(AxisKind::Longitude);
+            }
+            if p.lat == i {
+                return Some(AxisKind::Latitude);
+            }
+        }
+        let ctype = self.ctype(i).trim();
+        // Read the type code, not the parsed algorithm state. A
+        // `WAVE-TAB` axis is spectral, yet the parser files it under
+        // `tab_specs` alone, because the lookup rather than a spectral
+        // algorithm supplies its coordinates.
+        if SpectralKind::from_code(parse::first4(ctype)).is_some() {
+            return Some(AxisKind::Spectral);
+        }
+        if self.time.as_ref().is_some_and(|t| t.axis == i) {
+            return Some(AxisKind::Time);
+        }
+        if self.phase.iter().any(|p| p.axis == i) {
+            return Some(AxisKind::Phase);
+        }
+        if ctype.eq_ignore_ascii_case("STOKES") {
+            return Some(AxisKind::Stokes);
+        }
+        Some(AxisKind::Linear)
+    }
+
+    /// Kind of every axis, in axis order.
+    ///
+    /// The result has one entry per axis, so it lines up with the
+    /// vector [`Self::pixel_to_world`] returns. See
+    /// [`Self::axis_kind`].
+    #[must_use]
+    pub fn axis_kinds(&self) -> Vec<AxisKind> {
+        // `map`, not `filter_map`: `axis_kind` returns `None` only past
+        // the end, so every index below `naxis` yields a kind and the
+        // result is one entry per axis. A `filter_map` would let a
+        // future `None` shorten the vector out of step with the world
+        // vector it names.
+        (0..self.naxis())
+            .map(|i| self.axis_kind(i).unwrap_or(AxisKind::Linear))
+            .collect()
+    }
+
+    /// True when axis `i` takes its coordinate from a `-TAB` lookup
+    /// (Paper III Sec.6).
+    ///
+    /// This is a property of the algorithm, not of the coordinate, so
+    /// it is independent of [`Self::axis_kind`]. A tabular axis needs
+    /// its binary table loaded before it can transform; open the file
+    /// with [`crate::FitsFile::wcs`], or call
+    /// [`Self::resolve_tab`].
+    #[must_use]
+    pub fn is_tabular(&self, i: usize) -> bool {
+        self.tab_specs.iter().any(|s| s.axis == i)
     }
 
     /// Indices of the celestial longitude / latitude axes, if any.
@@ -643,24 +1280,67 @@ impl Wcs {
         self.celestial_pair.is_some()
     }
 
-    /// Sky positions of the image's four corner pixels, as
-    /// `(lon, lat)` in degrees.
+    /// World coordinates of the corner pixels of the image.
     ///
-    /// These are corner pixel centers: `(0, 0)`, `(nx-1, 0)`,
-    /// `(nx-1, ny-1)` and `(0, ny-1)`, counter-clockwise from the
-    /// origin. For the outer edge of the grid instead, call
-    /// [`Self::pixel_to_celestial`] with `-0.5` and `n - 0.5`.
+    /// The result holds `2^k` corners end to end, `NAXIS` values per
+    /// corner. This is the flat layout of
+    /// [`Self::pixel_to_world_many`]. `k` is the number of axes
+    /// [`Self::pixel_shape`] covers, which is `NAXIS` for a normal
+    /// image. Each corner is a pixel center, not the outer edge of the
+    /// grid. For the outer edge, call [`Self::pixel_to_world`] with
+    /// `-0.5` and `n - 0.5`.
+    ///
+    /// Corners come back in Gray-code order, so consecutive corners
+    /// differ on one axis alone. A two-axis image therefore yields
+    /// `(0, 0)`, `(nx-1, 0)`, `(nx-1, ny-1)`, `(0, ny-1)`, which walks
+    /// the image counter-clockwise in pixel space and closes the ring.
+    ///
+    /// This reports corners, not an axis-aligned bounding box. A
+    /// rotated image has corners outside the box its own minimum and
+    /// maximum describe, and a celestial axis that crosses zero makes
+    /// such a box meaningless.
+    ///
+    /// # Degenerate axes
+    ///
+    /// `WCSAXESa` may exceed `NAXIS` (Sec.8.2). A coordinate axis past
+    /// the end of the image shape then has no length to take a corner
+    /// from. That axis holds its reference pixel for every corner. The
+    /// corner count follows the image, and every corner still carries a
+    /// full world vector.
+    ///
+    /// # Out-of-domain corners
+    ///
+    /// This runs [`Self::pixel_to_world_many`]. A corner outside the
+    /// domain of the projection therefore fills its own `NAXIS` slots
+    /// with `f64::NAN` instead of failing the call. A wide-field `SIN`
+    /// or `AZP` image can put every corner outside that domain. Every
+    /// value then comes back `f64::NAN`. Call
+    /// [`Self::pixel_to_world`] on one corner to read the reason.
     ///
     /// # Errors
     ///
-    /// [`FitsError::Wcs`] if the WCS has no celestial pair, or if
-    /// [`Self::pixel_shape`] is absent or does not cover both
-    /// celestial axes. The shape is a parse-time snapshot, so a
-    /// cropped image yields the original corners.
-    pub fn footprint(&self) -> Result<[(f64, f64); 4]> {
-        let (lon, lat) = self
-            .celestial_axes()
-            .ok_or_else(|| FitsError::Wcs("footprint: WCS has no celestial axis pair".into()))?;
+    /// [`FitsError::Wcs`] when:
+    ///
+    /// - [`Self::pixel_shape`] is absent, which is the case for a
+    ///   fitted WCS and for a header without `NAXISn` cards. The
+    ///   shape is a parse-time snapshot, so a cropped image yields
+    ///   the original corners.
+    /// - Any axis the shape covers has length zero.
+    /// - `NAXIS` exceeds [`Self::MAX_FOOTPRINT_AXES`], since the
+    ///   corner count doubles with every axis.
+    /// - [`Self::pixel_to_world_many`] rejects the whole batch.
+    pub fn footprint(&self) -> Result<Vec<f64>> {
+        let n = self.naxis();
+        // Checked before anything else: this one bounds the allocation
+        // the rest of the function makes. The corner count doubles per
+        // covered axis. `covered` never exceeds `n`, so this bound
+        // holds for a degenerate axis too.
+        if n > Self::MAX_FOOTPRINT_AXES {
+            return Err(FitsError::Wcs(format!(
+                "footprint: {n} axes would need 2^{n} corners; the limit is {} axes",
+                Self::MAX_FOOTPRINT_AXES
+            )));
+        }
         let shape = self.pixel_shape.as_ref().ok_or_else(|| {
             FitsError::Wcs(
                 "footprint: this WCS carries no image shape (fitted, or a header \
@@ -668,201 +1348,40 @@ impl Wcs {
                     .into(),
             )
         })?;
-        let (Some(&nx), Some(&ny)) = (shape.get(lon), shape.get(lat)) else {
-            return Err(FitsError::Wcs(format!(
-                "footprint: image shape has {} axes, which does not cover the \
-                 celestial pair (axes {lon} and {lat})",
-                shape.len()
-            )));
-        };
-        if nx == 0 || ny == 0 {
-            return Err(FitsError::Wcs(
-                "footprint: image has a zero-length celestial axis".into(),
-            ));
-        }
-        let (x1, y1) = ((nx - 1) as f64, (ny - 1) as f64);
-        Ok([
-            self.pixel_to_celestial(0.0, 0.0)?,
-            self.pixel_to_celestial(x1, 0.0)?,
-            self.pixel_to_celestial(x1, y1)?,
-            self.pixel_to_celestial(0.0, y1)?,
-        ])
-    }
-
-    /// Check what applies to a whole batch, so the batch helpers can
-    /// tell "this WCS cannot transform at all" (an `Err`) from "this
-    /// point is outside the projection" (a `NaN` slot). These are the
-    /// only two: every other failure is per-point.
-    fn batch_precheck(&self) -> Result<()> {
-        if self.celestial_pair.is_none() {
-            return Err(FitsError::Wcs("WCS has no celestial axis pair".into()));
-        }
-        self.check_tab_resolved()
-    }
-
-    /// Transform many pixel pairs to (RA, Dec) pairs.
-    ///
-    /// This runs the transform of [`Self::pixel_to_celestial`] and
-    /// shares the per-call setup across every point.
-    ///
-    /// # Out-of-domain points
-    ///
-    /// A point outside the domain of the projection yields
-    /// `(f64::NAN, f64::NAN)`. It does not fail the call. Most
-    /// projections cover part of the plane alone, so a wide field
-    /// routinely mixes valid and invalid pixels. Call
-    /// [`Self::pixel_to_celestial`] on one point to read the error
-    /// message for that point.
-    ///
-    /// # Errors
-    ///
-    /// [`FitsError::Wcs`] when the whole WCS cannot transform, which
-    /// means it has no celestial axis pair, or it has a `-TAB` axis
-    /// that remains unresolved.
-    pub fn pixel_to_celestial_many(&self, pixels: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
-        self.batch_precheck()?;
-        Ok(pixels
-            .iter()
-            .map(|&(px, py)| {
-                self.pixel_to_celestial(px, py)
-                    .unwrap_or((f64::NAN, f64::NAN))
-            })
-            .collect())
-    }
-
-    /// Transform many (RA, Dec) pairs to pixel pairs.
-    ///
-    /// This mirrors [`Self::pixel_to_celestial_many`], including its
-    /// `NaN` treatment of an out-of-domain point.
-    ///
-    /// # Errors
-    ///
-    /// The same conditions as [`Self::pixel_to_celestial_many`].
-    pub fn celestial_to_pixel_many(&self, sky: &[(f64, f64)]) -> Result<Vec<(f64, f64)>> {
-        self.batch_precheck()?;
-        Ok(sky
-            .iter()
-            .map(|&(ra, dec)| {
-                self.celestial_to_pixel(ra, dec)
-                    .unwrap_or((f64::NAN, f64::NAN))
-            })
-            .collect())
-    }
-
-    /// Transform one celestial pixel pair to (RA, Dec) in degrees.
-    ///
-    /// This serves the common case of a two-axis image. Any further
-    /// axis evaluates at its reference pixel, which is the only
-    /// defined choice when the caller supplies no value for it.
-    ///
-    /// The `px` and `py` arguments are 0-based. See
-    /// [`pixel_to_world`](Self::pixel_to_world).
-    ///
-    /// # Errors
-    ///
-    /// [`FitsError::Wcs`] when the WCS has no celestial axis pair, or
-    /// when the conditions of
-    /// [`pixel_to_world`](Self::pixel_to_world) apply.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use fitsy::{FitsWriter, ImageBuilder};
-    /// # let path = std::env::temp_dir().join("fitsy_doc_p2c.fits");
-    /// # let px = vec![0.0_f32; 64 * 48];
-    /// # let (h, d) = ImageBuilder::new(vec![64_u64, 48], px)?
-    /// #     .primary(true)
-    /// #     .card("CTYPE1", "RA---TAN", None)
-    /// #     .card("CTYPE2", "DEC--TAN", None)
-    /// #     .card("CRPIX1", 32.0, None)
-    /// #     .card("CRPIX2", 24.0, None)
-    /// #     .card("CRVAL1", 202.469, None)
-    /// #     .card("CRVAL2", 47.195, None)
-    /// #     .card("CDELT1", -0.001, None)
-    /// #     .card("CDELT2", 0.001, None)
-    /// #     .build()?;
-    /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
-    /// use fitsy::FitsFile;
-    ///
-    /// let f = FitsFile::open(&path)?;
-    /// let wcs = f.wcs(0, ' ')?.expect("HDU 0 declares no WCS");
-    /// let (ra, dec) = wcs.pixel_to_celestial(31.0, 23.0)?;
-    ///
-    /// assert!((ra - 202.469).abs() < 1e-9);
-    /// assert!((dec - 47.195).abs() < 1e-9);
-    /// # std::fs::remove_file(&path)?;
-    /// # Ok::<(), fitsy::FitsError>(())
-    /// ```
-    pub fn pixel_to_celestial(&self, px: f64, py: f64) -> Result<(f64, f64)> {
-        let (lon, lat) = self
-            .celestial_axes()
-            .ok_or_else(|| FitsError::Wcs("WCS has no celestial axis pair".into()))?;
+        // A WCS axis past the end of the image shape is degenerate:
+        // `WCSAXESa > NAXIS`. It has no length to take a corner from,
+        // so it sits at its reference pixel instead. `CRPIX` is 1-based
+        // and this API is 0-based, hence the shift.
+        let covered = shape.len().min(n);
         let crpix = self.linear.crpix();
-        // CRPIX is 1-based per FITS; this API is 0-based, so the
-        // "sit at reference pixel" filler for the non-celestial axes
-        // is `crpix - 1`.
-        let mut pix: Vec<f64> = crpix.iter().map(|c| c - 1.0).collect();
-        pix[lon] = px;
-        pix[lat] = py;
-        let world = self.pixel_to_world(&pix)?;
-        Ok((world[lon], world[lat]))
-    }
-
-    /// Transform one (RA, Dec) pair in degrees to a celestial pixel
-    /// pair. This mirrors [`Self::pixel_to_celestial`].
-    ///
-    /// The returned `(px, py)` is 0-based. Any further axis is held at
-    /// its `CRVAL`.
-    ///
-    /// # Errors
-    ///
-    /// [`FitsError::Wcs`] when the WCS has no celestial axis pair, or
-    /// when the conditions of
-    /// [`world_to_pixel`](Self::world_to_pixel) apply.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use fitsy::{FitsWriter, ImageBuilder};
-    /// # let path = std::env::temp_dir().join("fitsy_doc_c2p.fits");
-    /// # let px = vec![0.0_f32; 64 * 48];
-    /// # let (h, d) = ImageBuilder::new(vec![64_u64, 48], px)?
-    /// #     .primary(true)
-    /// #     .card("CTYPE1", "RA---TAN", None)
-    /// #     .card("CTYPE2", "DEC--TAN", None)
-    /// #     .card("CRPIX1", 32.0, None)
-    /// #     .card("CRPIX2", 24.0, None)
-    /// #     .card("CRVAL1", 202.469, None)
-    /// #     .card("CRVAL2", 47.195, None)
-    /// #     .card("CDELT1", -0.001, None)
-    /// #     .card("CDELT2", 0.001, None)
-    /// #     .build()?;
-    /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
-    /// use fitsy::FitsFile;
-    ///
-    /// let f = FitsFile::open(&path)?;
-    /// let wcs = f.wcs(0, ' ')?.expect("HDU 0 declares no WCS");
-    /// let (px, py) = wcs.celestial_to_pixel(202.469, 47.195)?;
-    ///
-    /// assert!((px - 31.0).abs() < 1e-6);
-    /// assert!((py - 23.0).abs() < 1e-6);
-    /// # std::fs::remove_file(&path)?;
-    /// # Ok::<(), fitsy::FitsError>(())
-    /// ```
-    pub fn celestial_to_pixel(&self, ra: f64, dec: f64) -> Result<(f64, f64)> {
-        let (lon, lat) = self
-            .celestial_axes()
-            .ok_or_else(|| FitsError::Wcs("WCS has no celestial axis pair".into()))?;
-        // Build a world vector with the celestial pair set and the
-        // other axes at CRVAL (zero, since CRVAL is absorbed into the
-        // celestial rotation and the spectral algorithms).
-        let mut world = self.linear.crval().to_vec();
-        world[lon] = ra;
-        world[lat] = dec;
-        let pix = self.world_to_pixel(&world)?;
-        Ok((pix[lon], pix[lat]))
+        let mut point: Vec<f64> = crpix.iter().map(|c| c - 1.0).collect();
+        // The far corner on each covered axis. `NAXISn` counts pixels
+        // and the API is 0-based, hence the same shift.
+        let far: Vec<f64> = shape[..covered]
+            .iter()
+            .map(|&len| {
+                if len == 0 {
+                    Err(FitsError::Wcs(
+                        "footprint: image has a zero-length axis".into(),
+                    ))
+                } else {
+                    Ok((len - 1) as f64)
+                }
+            })
+            .collect::<Result<_>>()?;
+        let corners = 1_usize << covered;
+        let mut pixels = Vec::with_capacity(corners * n);
+        for k in 0..corners {
+            // Gray code: bit `j` of `k ^ (k >> 1)` selects the near or
+            // far end of axis `j`. Consecutive codes differ in one bit,
+            // which is what makes the two-axis case a closed ring.
+            let gray = k ^ (k >> 1);
+            for (j, &f) in far.iter().enumerate() {
+                point[j] = if gray & (1 << j) == 0 { 0.0 } else { f };
+            }
+            pixels.extend_from_slice(&point);
+        }
+        self.pixel_to_world_many(&pixels)
     }
 
     /// Local pixel scale at `(px, py)`, in arcseconds per pixel along
@@ -876,14 +1395,33 @@ impl Wcs {
     /// `CDELT`. An image with a flipped RA axis therefore reports a
     /// positive scale.
     ///
+    /// `px` and `py` index the longitude and latitude axes, whichever
+    /// positions those hold. See [`Self::axis_kinds`].
+    ///
     /// # Errors
     ///
-    /// The conditions of [`Self::pixel_to_celestial`], evaluated at
+    /// [`FitsError::Wcs`] when the WCS has no celestial axis pair, and
+    /// the conditions of [`Self::pixel_to_world`] evaluated at
     /// `(px, py)` and at the two neighboring pixels.
     pub fn pixel_scale_at(&self, px: f64, py: f64) -> Result<(f64, f64)> {
-        let (ra0, dec0) = self.pixel_to_celestial(px, py)?;
-        let (ra_x, dec_x) = self.pixel_to_celestial(px + 1.0, py)?;
-        let (ra_y, dec_y) = self.pixel_to_celestial(px, py + 1.0)?;
+        let (lon, lat) = self
+            .celestial_axes()
+            .ok_or_else(|| FitsError::Wcs("pixel_scale_at: WCS has no celestial pair".into()))?;
+        // Any axis outside the pair holds its reference pixel: the
+        // scale describes the celestial pair, measured where the rest
+        // of the WCS sits by default. `CRPIX` is 1-based and this API
+        // is 0-based, hence the shift. Built once and reused for all
+        // three points.
+        let mut point: Vec<f64> = self.linear.crpix().iter().map(|c| c - 1.0).collect();
+        let mut sky = |x: f64, y: f64| -> Result<(f64, f64)> {
+            point[lon] = x;
+            point[lat] = y;
+            let w = self.pixel_to_world(&point)?;
+            Ok((w[lon], w[lat]))
+        };
+        let (ra0, dec0) = sky(px, py)?;
+        let (ra_x, dec_x) = sky(px + 1.0, py)?;
+        let (ra_y, dec_y) = sky(px, py + 1.0)?;
         let dx_arcsec = great_circle_arcsec(ra0, dec0, ra_x, dec_x);
         let dy_arcsec = great_circle_arcsec(ra0, dec0, ra_y, dec_y);
         Ok((dx_arcsec, dy_arcsec))
@@ -899,8 +1437,17 @@ impl Wcs {
     /// Reject a WCS whose `-TAB` axes parsed but never loaded.
     ///
     /// Returning the linear approximation instead would be a wrong
-    /// answer that looks like a right one. Both transform directions
-    /// therefore check this before they reach the lookup.
+    /// answer that looks like a right one: the per-point bodies walk
+    /// `self.tab`, so an unresolved axis leaves the lookup out
+    /// silently.
+    ///
+    /// Every entry point runs this once per call, before the
+    /// per-point body, exactly as it runs
+    /// [`Self::check_linear_shape`]. Both describe the WCS rather
+    /// than the point, so a batch must fail the whole call rather
+    /// than mark each point `NaN`. The fast path has no check of its
+    /// own; [`Self::fast_celestial`] declines a WCS that carries any
+    /// `-TAB` spec.
     fn check_tab_resolved(&self) -> Result<()> {
         let resolved = self.resolved_tab_axes();
         if self.tab_specs.len() == resolved {

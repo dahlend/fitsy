@@ -121,8 +121,8 @@ STANDARD_PROJECTIONS: list[tuple[str, list[tuple[int, int, float]], str]] = [
     ("PCO", [], "Polyconic"),
     # -- Quad-cube (Sec.5.6) ------------------------------------------------------
     ("TSC", [], "Tangential spherical cube"),
-    ("CSC", [], "COBE quadrilateralised spherical cube"),
-    ("QSC", [], "Quadrilateralised spherical cube"),
+    ("CSC", [], "COBE quadrilateralized spherical cube"),
+    ("QSC", [], "Quadrilateralized spherical cube"),
     # -- HEALPix (Calabretta & Roukema 2007) -----------------------------------
     # HPX: PV2_1 = H (number of facets around equator),
     # PV2_2 = K (number of polar facets)

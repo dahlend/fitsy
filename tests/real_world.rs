@@ -1,6 +1,6 @@
 //! Smoke-test: walk every HDU of every FITS file in `data/` and
 //! report any failures. This exercises the *real-world* feature
-//! coverage rather than synthesised fixtures.
+//! coverage rather than synthesized fixtures.
 #![cfg(feature = "compression")]
 
 use std::path::PathBuf;

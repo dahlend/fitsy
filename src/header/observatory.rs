@@ -22,11 +22,11 @@ const ELLIPSOID_INV_F: f64 = 298.257_223_563; // inverse flattening
 /// Observatory location as ITRS Cartesian coordinates (m), geocentric.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ObsGeo {
-    /// `OBSGEO-X`, metres.
+    /// `OBSGEO-X`, meters.
     pub x: f64,
-    /// `OBSGEO-Y`, metres.
+    /// `OBSGEO-Y`, meters.
     pub y: f64,
-    /// `OBSGEO-Z`, metres.
+    /// `OBSGEO-Z`, meters.
     pub z: f64,
 }
 
@@ -76,7 +76,7 @@ fn geodetic_to_cartesian(g: &ObsGeodetic) -> ObsGeo {
 }
 
 /// Convert ITRS Cartesian to geodetic using the Bowring (1985) closed-form
-/// approximation, accurate to sub-millimetre for Earth-surface coordinates.
+/// approximation, accurate to sub-millimeter for Earth-surface coordinates.
 fn cartesian_to_geodetic(c: &ObsGeo) -> ObsGeodetic {
     let f = 1.0 / ELLIPSOID_INV_F;
     let e2 = 2.0 * f - f * f;
@@ -137,8 +137,8 @@ impl Header {
             .or_else(|| self.real_in_unit("SITELONG", "deg"))
             .or_else(|| self.real_in_unit("GEOLON", "deg"))?;
         // Altitude keywords may carry a [unit] annotation (e.g. [km], [m]);
-        // real_in_unit converts to metres when one is present, and with no
-        // annotation the raw value is metres already, per the standard.
+        // real_in_unit converts to meters when one is present, and with no
+        // annotation the raw value is meters already, per the standard.
         let alt = self
             .real_in_unit("OBSGEO-H", "m")
             .or_else(|| self.real_in_unit("OBS-ELEV", "m"))

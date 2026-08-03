@@ -100,7 +100,7 @@ pub struct PyImageHdu {
     /// ``NAXIS == 0``. Used to decide between "data not yet
     /// materialized" and "no data section to materialize".
     pub(crate) axes: Vec<u64>,
-    /// Whether this HDU was opened in read-only mode. Materialised
+    /// Whether this HDU was opened in read-only mode. Materialized
     /// numpy arrays are frozen (``WRITEABLE`` flag cleared) when set.
     pub(crate) read_only: bool,
     /// The pixel array. Shared with [`PyImageSection`] via `Arc`
@@ -646,7 +646,7 @@ impl PyImageHdu {
 
     /// Pixel data as a numpy array.
     ///
-    /// Materialises the array on first access by reading the data
+    /// Materializes the array on first access by reading the data
     /// section from disk, byteswapping into native order, and
     /// applying ``BSCALE``/``BZERO``/``BLANK`` scaling. Subsequent
     /// accesses return the same array, and in-place mutation
@@ -1000,7 +1000,7 @@ impl SwapBe for u8 {
 
 /// Every width swaps through its unsigned view: the signed spelling
 /// (`i16::from_be`) costs about a third of the throughput because it
-/// does not vectorise as well, and for floats it is the only way to
+/// does not vectorize as well, and for floats it is the only way to
 /// move the bits without going through a float value at all.
 macro_rules! swap_be {
     ($($t:ty => $u:ty),*) => {$(
@@ -1388,7 +1388,7 @@ impl PyImageSection {
         *g = Some(value);
     }
 
-    /// Materialise the full pixel array (same as `PyImageHdu::ensure_data`)
+    /// Materialize the full pixel array (same as `PyImageHdu::ensure_data`)
     /// and cache it in the shared `data` slot.
     ///
     /// # Errors

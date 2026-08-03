@@ -186,7 +186,7 @@ def _ones_complement_add(a: int, b: int) -> int:
 
 
 def _encode_checksum(value: int) -> bytes:
-    """ASCII-armour a 32-bit value into 16 printable bytes (Pence 1995).
+    """ASCII-armor a 32-bit value into 16 printable bytes (Pence 1995).
 
     Ports fitsy src/checksum.rs::encode_checksum exactly.
     Each byte of `value` is split into four chars summing to byte+3*OFFSET
@@ -730,8 +730,8 @@ def gen_wcs_dss() -> None:
 
     The test dss_plate_model_used_for_real_file (tests/wcs.rs) expects:
     - PLT* = RA 0h07m25.68s Dec +00d48m26s  (plate_ra=1.857deg, plate_dec=0.807deg)
-    - plate_centre_x = PPO3/XPIXELSZ - CNPIX1 + 0.5 - 1  (0-based Wcs pixel)
-    - pixel_to_world(plate_centre_x, plate_centre_y) ~= (plate_ra, plate_dec) +/-0.05deg
+    - plate_center_x = PPO3/XPIXELSZ - CNPIX1 + 0.5 - 1  (0-based Wcs pixel)
+    - pixel_to_world(plate_center_x, plate_center_y) ~= (plate_ra, plate_dec) +/-0.05deg
 
     We set geometry so the plate center falls at pixel (3.5, 3.5) 0-based
     of our 8x8 image, which is FITS pixel (4.5, 4.5).  Choose:
@@ -756,7 +756,7 @@ def gen_wcs_dss() -> None:
     xpix = 25.0
     ypix = 25.0
     # PPO3/PPO6: plate mm to center of subimage.
-    # We want plate_centre_x_0based = PPO3/xpix - CNPIX1 + 0.5 - 1 = 3.5
+    # We want plate_center_x_0based = PPO3/xpix - CNPIX1 + 0.5 - 1 = 3.5
     # => PPO3/xpix = 3.5 + CNPIX1 + 0.5 = 4 + CNPIX1
     # Choose CNPIX1=CNPIX2=1 for simplicity:
     cnpix = 1.0

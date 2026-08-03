@@ -6,7 +6,7 @@ later folded into the FITS Standard):
 
 * ``DATASUM`` -- ASCII-decimal 1's-complement sum of the padded data
   bytes for the HDU.
-* ``CHECKSUM`` -- 16-character ASCII-armoured 1's-complement sum of
+* ``CHECKSUM`` -- 16-character ASCII 1's-complement sum of
   the entire HDU (header + data) computed *with* the ``CHECKSUM``
   card present in the header. A correctly stamped HDU sums to all
   ones.

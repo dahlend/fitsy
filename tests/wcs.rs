@@ -131,7 +131,7 @@ fn tan_reference_pixel_maps_to_crval() {
 /// produces directly. Regression test: the parser used to zero this
 /// field out (the value lived only in `celestial.rotation`), which a
 /// downstream consumer reading `wcs.crval()` directly (rather than
-/// calling `pixel_to_celestial`) would silently see as `(0.0, 0.0)`.
+/// reading `crval()` directly) would silently see as `(0.0, 0.0)`.
 #[test]
 fn crval_field_matches_header_on_celestial_pair() {
     let cards: Vec<String> = vec![
@@ -496,7 +496,8 @@ fn axes_metadata_is_always_naxis_long() {
     assert_eq!(fitted.wcs.axes().len(), fitted.wcs.naxis());
 }
 
-/// No `RADESYS` keyword: default depends on `EQUINOX` per Paper II/// Sec.3.1 -- pre-1984 => FK4, post-1984 => FK5, missing => ICRS.
+/// No `RADESYS` keyword: the default depends on `EQUINOX` per Paper II
+/// Sec.3.1 -- pre-1984 => FK4, post-1984 => FK5, missing => ICRS.
 #[test]
 fn radesys_defaults() {
     let base: Vec<String> = vec![
@@ -657,7 +658,7 @@ fn celestial_pair_after_spectral_axis() {
 
 /// `wcs.crval()` must be usable as a "hold every other axis at its
 /// reference value" filler for `world_to_pixel` -- exactly the pattern
-/// `Wcs::celestial_to_pixel` uses internally (`let mut world =
+/// the celestial inverse uses internally (`let mut world =
 /// self.crval().clone(); world[lon] = ra; world[lat] = dec;`), and the
 /// natural thing for any external caller to do.
 ///
@@ -752,6 +753,24 @@ fn spectral_vopt_kms_round_trip() {
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Sky position of a pixel on a two-axis celestial WCS, as
+/// `(lon, lat)`.
+///
+/// The public API returns world values in axis order and
+/// `Wcs::axis_kinds` says which is which. Every WCS in this file puts
+/// longitude on axis 1, so this helper indexes directly and states
+/// that assumption once.
+fn sky(wcs: &fitsy::Wcs, px: f64, py: f64) -> (f64, f64) {
+    let w = wcs.pixel_to_world(&[px, py]).expect("pixel_to_world");
+    (w[0], w[1])
+}
+
+/// Inverse of [`sky`].
+fn pix(wcs: &fitsy::Wcs, lon: f64, lat: f64) -> (f64, f64) {
+    let p = wcs.world_to_pixel(&[lon, lat]).expect("world_to_pixel");
+    (p[0], p[1])
+}
 
 fn test_data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -1428,10 +1447,10 @@ fn dss_plate_model_used_for_real_file() {
     let dss = wcs.dss.as_ref().unwrap();
     // The +0.5 - cnpix formulas above produce a 1-based FITS pixel
     // coordinate; subtract 1 for the 0-based Wcs API.
-    let plate_centre_x = dss.ppo3 / dss.xpixelsz - dss.cnpix1 + 0.5 - 1.0;
-    let plate_centre_y = dss.ppo6 / dss.ypixelsz - dss.cnpix2 + 0.5 - 1.0;
+    let plate_center_x = dss.ppo3 / dss.xpixelsz - dss.cnpix1 + 0.5 - 1.0;
+    let plate_center_y = dss.ppo6 / dss.ypixelsz - dss.cnpix2 + 0.5 - 1.0;
     let world = wcs
-        .pixel_to_world(&[plate_centre_x, plate_centre_y])
+        .pixel_to_world(&[plate_center_x, plate_center_y])
         .unwrap();
     // Tolerance: AMDX3 ~= -131" and AMDY3 ~= +1.65", so up to ~0.04deg.
     assert!(
@@ -1516,7 +1535,7 @@ fn sip_partial_inverse_is_rejected() {
     );
 }
 
-/// `pixel_to_celestial` / `celestial_to_pixel` are the convenience pair
+/// `pixel_to_world` / `world_to_pixel` are the general pair
 /// real callers reach for: no Vec gymnastics, just (x, y) <-> (RA, Dec).
 #[test]
 fn celestial_convenience_round_trip() {
@@ -1533,13 +1552,13 @@ fn celestial_convenience_round_trip() {
     let wcs = open_image(&cards);
     assert_eq!(wcs.celestial_axes(), Some((0, 1)));
 
-    let (ra, dec) = wcs.pixel_to_celestial(49.5, 49.5).unwrap();
+    let (ra, dec) = sky(&wcs, 49.5, 49.5);
     assert!(near(ra, 83.6331, 1e-9));
     assert!(near(dec, 22.0145, 1e-9));
 
     for &(px, py) in &[(0.0, 0.0), (32.0, 74.0), (98.0, 98.0)] {
-        let (ra, dec) = wcs.pixel_to_celestial(px, py).unwrap();
-        let (px2, py2) = wcs.celestial_to_pixel(ra, dec).unwrap();
+        let (ra, dec) = sky(&wcs, px, py);
+        let (px2, py2) = pix(&wcs, ra, dec);
         assert!(
             near(px, px2, 1e-6) && near(py, py2, 1e-6),
             "round-trip failed at ({px},{py}): got ({px2},{py2})",
@@ -1571,10 +1590,11 @@ fn pixel_scale_matches_cdelt() {
     assert!((sy - 1.0008).abs() < 1e-3, "y scale = {sy}");
 }
 
-/// `pixel_to_celestial` errors cleanly on a header without a celestial
-/// pair (e.g., a pure spectral or linear WCS).
+/// The celestial-only entry points error cleanly on a header without a
+/// celestial pair (e.g., a pure spectral or linear WCS). The general
+/// transform still works there -- that is the point of it.
 #[test]
-fn pixel_to_celestial_errors_without_celestial_pair() {
+fn celestial_only_helpers_error_without_celestial_pair() {
     let cards: Vec<String> = vec![
         "CTYPE1  = 'FREQ'".into(),
         "CTYPE2  = 'LINEAR'".into(),
@@ -1588,18 +1608,20 @@ fn pixel_to_celestial_errors_without_celestial_pair() {
     ];
     let wcs = open_image(&cards);
     assert!(wcs.celestial_axes().is_none());
-    assert!(wcs.pixel_to_celestial(1.0, 1.0).is_err());
-    assert!(wcs.celestial_to_pixel(0.0, 0.0).is_err());
+    assert!(wcs.pixel_scale_at(1.0, 1.0).is_err());
+    // The general transform has no such requirement.
+    assert!(wcs.pixel_to_world(&[1.0, 1.0]).is_ok());
+    assert!(wcs.pixel_to_world_many(&[1.0, 1.0]).is_ok());
 }
 
-/// `-TAB` axis: single-axis 1-D wavelength lookup. Synthesises an
+/// `-TAB` axis: single-axis 1-D wavelength lookup. Synthesizes an
 /// image HDU whose third axis carries `WAVE-TAB`, plus a paired
 /// BINTABLE extension `WCS-TAB` with a 5-element wavelength column
 /// `WAVELEN`. Verifies that `FitsFile::wcs` resolves the lookup and
 /// that forward / inverse maps interpolate the table correctly.
 #[test]
 fn wave_tab_axis_resolved_from_bintable() {
-    use fitsy::{BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder, Value};
+    use fitsy::{AxisKind, BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder, Value};
 
     // Wavelength samples (Angstrom) for pixels 1..=5 along axis 3.
     let wavelens: [f64; 5] = [4000.0, 4500.0, 5500.0, 7000.0, 9000.0];
@@ -1674,6 +1696,17 @@ fn wave_tab_axis_resolved_from_bintable() {
     // Pixel 2.5 (1-based) = 1.5 (0-based) -> halfway between 4500 and 5500 -> 5000.
     let mid = wcs.pixel_to_world(&[0.0, 0.0, 1.5]).unwrap();
     assert!((mid[2] - 5000.0).abs() < 1e-9, "got {}", mid[2]);
+
+    // `-TAB` is an algorithm, not a coordinate type: axis 3 is
+    // spectral *and* tabular. The parser files a `WAVE-TAB` axis under
+    // `tab_specs` alone, so a kind read from parsed algorithm state
+    // rather than from CTYPE would call this axis linear.
+    assert_eq!(
+        wcs.axis_kinds(),
+        vec![AxisKind::Linear, AxisKind::Linear, AxisKind::Spectral]
+    );
+    assert!(wcs.is_tabular(2), "axis 3 carries -TAB");
+    assert!(!wcs.is_tabular(0));
 
     // Round-trip: world 6000 Angstrom -> some pixel -> back to 6000 Angstrom.
     let pix = wcs.world_to_pixel(&[0.0, 0.0, 6000.0]).unwrap();
@@ -1802,7 +1835,19 @@ fn unresolved_tab_axis_errors_on_use() {
     let wcs = img.wcs(' ').unwrap().expect("WCS parses");
     assert_eq!(wcs.tab_specs.len(), 1);
     assert!(wcs.tab.is_empty());
+
+    // Every entry point, not just the forward single-point one. The
+    // guard is hoisted out of the per-point body and run once per
+    // call, so each entry point carries its own copy. A batch in
+    // particular must fail the whole call: filling `NaN` would report
+    // an unresolved lookup as a set of out-of-domain points.
     let err = wcs.pixel_to_world(&[1.0]).unwrap_err();
+    assert!(format!("{err}").contains("unresolved -TAB"), "got: {err}");
+    let err = wcs.world_to_pixel(&[1.0]).unwrap_err();
+    assert!(format!("{err}").contains("unresolved -TAB"), "got: {err}");
+    let err = wcs.pixel_to_world_many(&[1.0, 2.0]).unwrap_err();
+    assert!(format!("{err}").contains("unresolved -TAB"), "got: {err}");
+    let err = wcs.world_to_pixel_many(&[1.0, 2.0]).unwrap_err();
     assert!(format!("{err}").contains("unresolved -TAB"), "got: {err}");
 }
 
@@ -1972,6 +2017,397 @@ fn ait_round_trip_across_dateline() {
 // pixel_shape / footprint
 // ---------------------------------------------------------------------
 
+/// The batch fast path must reproduce the general body exactly.
+///
+/// `pixel_to_world_many` routes a plain two-axis celestial WCS through
+/// a specialized loop that skips the per-point work such a WCS does not
+/// need. `pixel_to_world` always takes the general body, so comparing
+/// them checks the specialization against its own reference.
+///
+/// Bit-for-bit, not near: the fast path performs the same operations in
+/// the same order, so any difference at all means the two have drifted.
+#[test]
+fn fast_path_matches_general() {
+    // Every projection is reached through the same specialized loop.
+    // The set below therefore spans the shapes that loop has to
+    // handle: swapped axis order, a rotated matrix, a non-degree
+    // CUNIT, a moved fiducial point, and a bounded domain.
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        ("plain TAN", tan_cards()),
+        ("swapped axis order", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'DEC--TAN'".into();
+            c[1] = "CTYPE2  = 'RA---TAN'".into();
+            c
+        }),
+        ("rotated CD matrix", {
+            let mut c = tan_cards();
+            c.truncate(6);
+            c.push("CD1_1   =            -0.0008".into());
+            c.push("CD1_2   =             0.0003".into());
+            c.push("CD2_1   =             0.0003".into());
+            c.push("CD2_2   =             0.0008".into());
+            c
+        }),
+        ("arcsec CUNIT", {
+            let mut c = tan_cards();
+            c.push("CUNIT1  = 'arcsec'".into());
+            c.push("CUNIT2  = 'arcsec'".into());
+            c
+        }),
+        ("moved fiducial point", {
+            let mut c = tan_cards();
+            c.push("PV1_1   =                 30.0".into());
+            c.push("PV1_2   =                 70.0".into());
+            c
+        }),
+        ("SIN, bounded domain", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---SIN'".into();
+            c[1] = "CTYPE2  = 'DEC--SIN'".into();
+            c[6] = "CDELT1  =                 -1.0".into();
+            c[7] = "CDELT2  =                  1.0".into();
+            c
+        }),
+        ("AIT, non-zenithal", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'GLON-AIT'".into();
+            c[1] = "CTYPE2  = 'GLAT-AIT'".into();
+            c
+        }),
+        // The fast path carries SIP, so SIP has to agree here too. It
+        // applies the distortion to the celestial pair by index. The
+        // swapped case below is what pins that indexing down.
+        ("SIP", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---TAN-SIP'".into();
+            c[1] = "CTYPE2  = 'DEC--TAN-SIP'".into();
+            c.extend(sip_cards());
+            c
+        }),
+        ("SIP, swapped axis order", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'DEC--TAN-SIP'".into();
+            c[1] = "CTYPE2  = 'RA---TAN-SIP'".into();
+            c.extend(sip_cards());
+            c
+        }),
+        // The fast path carries TPV too. It applies between the linear
+        // stage and the projection, so these pin that slot, and the
+        // swapped case pins which intermediate coordinate is which.
+        ("TPV", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---TPV'".into();
+            c[1] = "CTYPE2  = 'DEC--TPV'".into();
+            c.extend(tpv_cards());
+            c
+        }),
+        ("TPV, swapped axis order", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'DEC--TPV'".into();
+            c[1] = "CTYPE2  = 'RA---TPV'".into();
+            c.extend(tpv_cards());
+            c
+        }),
+        ("TPV with a radial term", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---TPV'".into();
+            c[1] = "CTYPE2  = 'DEC--TPV'".into();
+            c.extend(tpv_cards());
+            // `PV_3` is the `r` term, whose gradient diverges at the
+            // origin. The fast path must reach the same guard.
+            c.push("PV1_3   =            2.0E-05".into());
+            c.push("PV2_3   =           -1.0E-05".into());
+            c
+        }),
+        ("SIP with a rotated CD matrix", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---TAN-SIP'".into();
+            c[1] = "CTYPE2  = 'DEC--TAN-SIP'".into();
+            c.truncate(6);
+            c.push("CD1_1   =            -0.0008".into());
+            c.push("CD1_2   =             0.0003".into());
+            c.push("CD2_1   =             0.0003".into());
+            c.push("CD2_2   =             0.0008".into());
+            c.extend(sip_cards());
+            c
+        }),
+    ];
+
+    for (name, cards) in cases {
+        let wcs = open_image(&cards);
+        let mut flat = Vec::new();
+        for i in 0..24 {
+            for j in 0..24 {
+                flat.push(f64::from(i) * 11.0 - 60.0);
+                flat.push(f64::from(j) * 11.0 - 60.0);
+            }
+        }
+        let batch = wcs.pixel_to_world_many(&flat).unwrap();
+        let mut compared = 0;
+        for (point, got) in flat.chunks_exact(2).zip(batch.chunks_exact(2)) {
+            match wcs.pixel_to_world(point) {
+                Ok(want) => {
+                    assert_eq!(
+                        got[0].to_bits(),
+                        want[0].to_bits(),
+                        "{name}: lon differs at {point:?}: {} vs {}",
+                        got[0],
+                        want[0]
+                    );
+                    assert_eq!(
+                        got[1].to_bits(),
+                        want[1].to_bits(),
+                        "{name}: lat differs at {point:?}: {} vs {}",
+                        got[1],
+                        want[1]
+                    );
+                    compared += 1;
+                }
+                // The general body reports the reason; the batch fills
+                // NaN. Both must agree that the point is unusable.
+                Err(_) => assert!(
+                    got[0].is_nan() && got[1].is_nan(),
+                    "{name}: expected NaN at {point:?}, got {got:?}"
+                ),
+            }
+        }
+        // Guards against a vacuous pass: `SIN` rejects most of this
+        // grid, so the bar is well below the 576 points offered, but
+        // above zero.
+        assert!(compared > 50, "{name}: only {compared} usable points");
+
+        // The inverse takes the same fast path, checked against the
+        // general body on the world values just produced.
+        let world: Vec<f64> = batch.iter().copied().filter(|v| !v.is_nan()).collect();
+        let world = &world[..world.len() - world.len() % 2];
+        let back = wcs.world_to_pixel_many(world).unwrap();
+        let mut inv_compared = 0;
+        for (point, got) in world.chunks_exact(2).zip(back.chunks_exact(2)) {
+            match wcs.world_to_pixel(point) {
+                Ok(want) => {
+                    assert_eq!(
+                        got[0].to_bits(),
+                        want[0].to_bits(),
+                        "{name}: inverse x differs at {point:?}"
+                    );
+                    assert_eq!(
+                        got[1].to_bits(),
+                        want[1].to_bits(),
+                        "{name}: inverse y differs at {point:?}"
+                    );
+                    inv_compared += 1;
+                }
+                Err(_) => assert!(
+                    got[0].is_nan() && got[1].is_nan(),
+                    "{name}: expected NaN from the inverse at {point:?}"
+                ),
+            }
+        }
+        assert!(
+            inv_compared > 50,
+            "{name}: only {inv_compared} usable inverse points"
+        );
+    }
+}
+
+/// Every feature the fast path cannot handle must send the WCS back to
+/// the general body, and the answer must not change either way.
+#[test]
+fn fast_path_declines_what_it_cannot_handle() {
+    let disqualifying: Vec<(&str, Vec<String>)> = vec![
+        // SIP and TPV are absent on purpose. The fast path carries
+        // both, and `fast_path_matches_general` checks them there.
+        ("TNX distortion", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---TNX'".into();
+            c[1] = "CTYPE2  = 'DEC--TNX'".into();
+            c.push("WAT1_001= 'wtype=tnx axtype=ra lngcor = \"3 1 1 1 -1 1 -1 1 5E-4\"'".into());
+            c
+        }),
+        ("no celestial pair", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'WAVE'".into();
+            c[1] = "CTYPE2  = 'TIME'".into();
+            c
+        }),
+    ];
+
+    for (name, cards) in disqualifying {
+        let wcs = open_image(&cards);
+        let flat = vec![0.0, 0.0, 31.0, 23.0, 63.0, 47.0, 10.5, 40.25];
+        let batch = wcs.pixel_to_world_many(&flat).unwrap();
+        for (point, got) in flat.chunks_exact(2).zip(batch.chunks_exact(2)) {
+            let want = wcs.pixel_to_world(point).unwrap();
+            assert_eq!(got[0].to_bits(), want[0].to_bits(), "{name} at {point:?}");
+            assert_eq!(got[1].to_bits(), want[1].to_bits(), "{name} at {point:?}");
+        }
+        let back = wcs.world_to_pixel_many(&batch).unwrap();
+        for (point, got) in batch.chunks_exact(2).zip(back.chunks_exact(2)) {
+            let want = wcs.world_to_pixel(point).unwrap();
+            assert_eq!(
+                got[0].to_bits(),
+                want[0].to_bits(),
+                "{name} inverse at {point:?}"
+            );
+            assert_eq!(
+                got[1].to_bits(),
+                want[1].to_bits(),
+                "{name} inverse at {point:?}"
+            );
+        }
+    }
+
+    // A cube keeps every axis, including the one the fast path has no
+    // slot for.
+    let cube: Vec<String> = [
+        "CTYPE1  = 'RA---TAN'",
+        "CTYPE2  = 'DEC--TAN'",
+        "CTYPE3  = 'FREQ'",
+        "CRPIX1  =                 32.0",
+        "CRPIX2  =                 24.0",
+        "CRPIX3  =                  5.0",
+        "CRVAL1  =              202.469",
+        "CRVAL2  =               47.195",
+        "CRVAL3  =              1.4E+09",
+        "CDELT1  =               -0.001",
+        "CDELT2  =                0.001",
+        "CDELT3  =              1.0E+06",
+        "CUNIT3  = 'Hz'",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image_3d(&cube);
+    let pts = vec![0.0, 0.0, 1.0, 31.0, 23.0, 4.0];
+    let batch = wcs.pixel_to_world_many(&pts).unwrap();
+    for (point, got) in pts.chunks_exact(3).zip(batch.chunks_exact(3)) {
+        let want = wcs.pixel_to_world(point).unwrap();
+        for k in 0..3 {
+            assert_eq!(got[k].to_bits(), want[k].to_bits(), "cube axis {k}");
+        }
+    }
+}
+
+/// A round trip must not lose accuracy near the reference pixel.
+///
+/// A zenithal projection puts the whole field near the native pole,
+/// where `theta` approaches 90 degrees. Recovering it with `asin` alone
+/// is ill-conditioned there, because `d(asin)/dz = 1 / cos(theta)`
+/// diverges. The error therefore grew as the point approached `CRPIX`,
+/// reaching 7.5e-8 pixels one pixel away. That is the opposite of what
+/// a caller expects: the worst accuracy at the field center.
+///
+/// The residual is now flat across the field, so this asserts a bound
+/// the old code missed by two orders of magnitude at short range.
+///
+/// The defect was in the shared native-to-celestial rotation, so this
+/// checks every projection rather than the `TAN` the fix was found on.
+/// The distances reach a thousandth of a pixel. The error grew as the
+/// point approached the reference, so a one-pixel floor saw only the
+/// tail of it.
+///
+/// `CAR`, `AIT` and `MOL` are the controls. Their fiducial point is not
+/// a pole, so the defect never reached them. They must not move.
+#[test]
+fn celestial_round_trip_holds_accuracy_near_the_reference_pixel() {
+    for proj in [
+        "TAN", "SIN", "ARC", "ZEA", "STG", "AZP", "SZP", "AIR", "CAR", "AIT", "MOL",
+    ] {
+        let mut cards = tan_cards();
+        cards[0] = format!("CTYPE1  = 'RA---{proj}'");
+        cards[1] = format!("CTYPE2  = 'DEC--{proj}'");
+        // A wide field, so "far from CRPIX" is genuinely far.
+        cards[2] = "CRPIX1  =               2000.0".into();
+        cards[3] = "CRPIX2  =               2000.0".into();
+        let wcs = open_image(&cards);
+
+        // CRPIX is 1-based, so the reference pixel is 1999 here.
+        for d in [1e-3_f64, 1e-2, 0.1, 1.0, 10.0, 100.0, 1000.0, 1999.0] {
+            for (px, py) in [
+                (1999.0 + d, 1999.0),
+                (1999.0, 1999.0 + d),
+                (1999.0 + d, 1999.0 + d),
+            ] {
+                let w = wcs.pixel_to_world(&[px, py]).unwrap();
+                let back = wcs.world_to_pixel(&w).unwrap();
+                let err = (back[0] - px).abs().max((back[1] - py).abs());
+                assert!(
+                    err < 1e-9,
+                    "{proj}: round trip lost {err:e} pixels at ({px}, {py}), \
+                     {d} from the reference"
+                );
+            }
+        }
+    }
+}
+
+/// A third-order SIP distortion, forward and inverse.
+///
+/// Each coefficient is large enough to matter. Dropping any one of them
+/// moves a corner pixel well past the bit-level tolerance the
+/// fast-path comparison holds to.
+/// A cubic TPV solution, the shape a mosaic camera actually carries.
+///
+/// `PV*_1` is the identity scaling. The quadratic and cubic terms are
+/// large enough that dropping any one of them moves a corner pixel well
+/// past the bit-level tolerance the fast-path comparison holds to.
+fn tpv_cards() -> Vec<String> {
+    [
+        "PV1_1   =                  1.0",
+        "PV1_4   =            2.0000E-04",
+        "PV1_5   =            1.0000E-04",
+        "PV1_6   =           -1.5000E-04",
+        "PV1_7   =            3.0000E-03",
+        "PV1_8   =            1.0000E-03",
+        "PV1_9   =           -2.0000E-03",
+        "PV1_10  =            5.0000E-04",
+        "PV2_1   =                  1.0",
+        "PV2_4   =           -1.0000E-04",
+        "PV2_5   =            2.0000E-04",
+        "PV2_6   =            1.0000E-04",
+        "PV2_7   =           -2.0000E-03",
+        "PV2_8   =            4.0000E-03",
+        "PV2_9   =            1.0000E-03",
+        "PV2_10  =           -3.0000E-03",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+fn sip_cards() -> Vec<String> {
+    [
+        "A_ORDER =                    3",
+        "B_ORDER =                    3",
+        "A_2_0   =           1.2000E-05",
+        "A_1_1   =          -3.1000E-06",
+        "A_0_2   =           8.0000E-06",
+        "A_3_0   =           2.0000E-09",
+        "A_2_1   =          -1.0000E-09",
+        "A_1_2   =           3.0000E-09",
+        "A_0_3   =           1.0000E-09",
+        "B_2_0   =          -9.0000E-06",
+        "B_1_1   =           2.2000E-05",
+        "B_0_2   =          -4.0000E-06",
+        "B_3_0   =           1.0000E-09",
+        "B_2_1   =           2.0000E-09",
+        "B_1_2   =          -1.0000E-09",
+        "B_0_3   =           4.0000E-09",
+        "AP_ORDER=                    3",
+        "BP_ORDER=                    3",
+        "AP_2_0  =          -1.2000E-05",
+        "AP_1_1  =           3.1000E-06",
+        "AP_0_2  =          -8.0000E-06",
+        "BP_2_0  =           9.0000E-06",
+        "BP_1_1  =          -2.2000E-05",
+        "BP_0_2  =           4.0000E-06",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
 fn tan_cards() -> Vec<String> {
     [
         "CTYPE1  = 'RA---TAN'",
@@ -2008,18 +2444,22 @@ fn pixel_shape_is_absent_for_a_fitted_wcs() {
 fn footprint_returns_corner_pixel_centers() {
     let wcs = open_image(&tan_cards());
     let fp = wcs.footprint().unwrap();
-    // Counter-clockwise from the origin: (0,0), (99,0), (99,99), (0,99).
-    for (got, (px, py)) in fp
-        .iter()
-        .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
+    // Gray-code order walks a two-axis image counter-clockwise from
+    // the origin: (0,0), (99,0), (99,99), (0,99).
+    assert_eq!(fp.len(), 4 * 2);
+    for (got, (px, py)) in
+        fp.chunks_exact(2)
+            .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
     {
-        let want = wcs.pixel_to_celestial(px, py).unwrap();
-        assert!(near(got.0, want.0, 1e-12) && near(got.1, want.1, 1e-12));
+        let want = wcs.pixel_to_world(&[px, py]).unwrap();
+        assert!(near(got[0], want[0], 1e-12) && near(got[1], want[1], 1e-12));
     }
 }
 
+/// A footprint no longer needs a celestial pair. A spectral / time
+/// image has corners in its own world units.
 #[test]
-fn footprint_needs_a_celestial_pair() {
+fn footprint_works_without_a_celestial_pair() {
     let cards: Vec<String> = [
         "CTYPE1  = 'WAVE'",
         "CTYPE2  = 'TIME'",
@@ -2035,7 +2475,137 @@ fn footprint_needs_a_celestial_pair() {
     .collect();
     let wcs = open_image(&cards);
     assert!(!wcs.is_celestial());
-    assert!(wcs.footprint().is_err());
+    let fp = wcs.footprint().unwrap();
+    assert_eq!(fp.len(), 4 * 2);
+    for (got, (px, py)) in
+        fp.chunks_exact(2)
+            .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
+    {
+        let want = wcs.pixel_to_world(&[px, py]).unwrap();
+        assert!(near(got[0], want[0], 1e-12) && near(got[1], want[1], 1e-12));
+    }
+}
+
+/// A three-axis WCS yields 2^3 corners, still one axis apart between
+/// consecutive entries.
+#[test]
+fn footprint_covers_every_axis_of_a_cube() {
+    let cards: Vec<String> = [
+        "CTYPE1  = 'RA---TAN'",
+        "CTYPE2  = 'DEC--TAN'",
+        "CTYPE3  = 'FREQ'",
+        "CRPIX1  =                 32.0",
+        "CRPIX2  =                 24.0",
+        "CRPIX3  =                  5.0",
+        "CRVAL1  =              202.469",
+        "CRVAL2  =               47.195",
+        "CRVAL3  =              1.4E+09",
+        "CDELT1  =               -0.001",
+        "CDELT2  =                0.001",
+        "CDELT3  =              1.0E+06",
+        "CUNIT3  = 'Hz'",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image_3d(&cards);
+    let fp = wcs.footprint().unwrap();
+    assert_eq!(fp.len(), 8 * 3, "2^3 corners of 3 values each");
+    // The spectral axis must actually vary: a celestial-only footprint
+    // would hold it at the reference plane for every corner.
+    let freqs: Vec<f64> = fp.chunks_exact(3).map(|c| c[2]).collect();
+    let lo = freqs.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = freqs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert!(hi - lo > 0.0, "spectral axis is constant across corners");
+}
+
+/// The corner count doubles per axis, and `WCSAXES` comes from the
+/// header, so a file claiming many axes must be refused rather than
+/// allowed to drive an unbounded allocation.
+#[test]
+fn footprint_refuses_an_absurd_axis_count() {
+    let over = fitsy::Wcs::MAX_FOOTPRINT_AXES + 1;
+    let mut cards = tan_cards();
+    cards.push(format!("WCSAXES = {over:20}"));
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.naxis(), over, "header should describe {over} axes");
+    let err = wcs.footprint().unwrap_err().to_string();
+    assert!(err.contains("corners"), "unexpected message: {err}");
+
+    // One axis below the limit still works, so the guard is not simply
+    // rejecting every wide WCS. The image is 2-D, so the other 14 axes
+    // are degenerate. The corner count follows the image rather than
+    // `WCSAXES`: 4 corners, each a full 16-value world vector.
+    let mut ok_cards = tan_cards();
+    ok_cards.push(format!("WCSAXES = {:20}", fitsy::Wcs::MAX_FOOTPRINT_AXES));
+    let wide = open_image(&ok_cards);
+    let fp = wide.footprint().unwrap();
+    assert_eq!(fp.len(), 4 * fitsy::Wcs::MAX_FOOTPRINT_AXES);
+}
+
+/// `WCSAXESa` may exceed `NAXIS` (Sec.8.2). A coordinate axis past the
+/// end of the image shape then has no length. `footprint` holds that
+/// axis at its reference pixel instead of returning an error.
+#[test]
+fn footprint_holds_a_degenerate_axis_at_its_reference_pixel() {
+    let mut cards = tan_cards();
+    cards.push("WCSAXES =                    3".into());
+    cards.push("CTYPE3  = 'FREQ'".into());
+    cards.push("CRPIX3  =                  5.0".into());
+    cards.push("CRVAL3  =              1.4E+09".into());
+    cards.push("CDELT3  =              1.0E+06".into());
+    cards.push("CUNIT3  = 'Hz'".into());
+    // A 2-D image describing 3 WCS axes. NAXIS3 is absent, so the
+    // spectral axis has no length.
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.naxis(), 3);
+    assert_eq!(wcs.pixel_shape.as_deref(), Some([100_u64, 100].as_slice()));
+
+    let fp = wcs.footprint().unwrap();
+    // 2^2 corners -- the image, not `WCSAXES` -- of 3 values each.
+    assert_eq!(fp.len(), 4 * 3);
+    // The degenerate axis sits at CRVAL3 for every corner, which is
+    // where its reference pixel lands.
+    for corner in fp.chunks_exact(3) {
+        assert!(
+            near(corner[2], 1.4e9, 1e-6),
+            "degenerate axis moved: {}",
+            corner[2]
+        );
+    }
+    // And the two covered axes still walk the image corners.
+    for (got, (px, py)) in
+        fp.chunks_exact(3)
+            .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
+    {
+        let want = wcs.pixel_to_world(&[px, py, 4.0]).unwrap();
+        assert!(near(got[0], want[0], 1e-12) && near(got[1], want[1], 1e-12));
+    }
+}
+
+/// A corner outside the domain of the projection comes back `NaN`.
+/// `footprint` runs the batch transform, so it follows the batch rule.
+#[test]
+fn footprint_marks_out_of_domain_corners_nan() {
+    // 100 px at 1 deg/px puts every corner outside the SIN domain.
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---SIN'".into(),
+        "CTYPE2  = 'DEC--SIN'".into(),
+        "CRPIX1  =                 50.0".into(),
+        "CRPIX2  =                 50.0".into(),
+        "CRVAL1  =                  0.0".into(),
+        "CRVAL2  =                  0.0".into(),
+        "CDELT1  =                 -1.0".into(),
+        "CDELT2  =                  1.0".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert!(
+        wcs.pixel_to_world(&[0.0, 0.0]).is_err(),
+        "test needs a corner outside the SIN domain"
+    );
+    let fp = wcs.footprint().unwrap();
+    assert_eq!(fp.len(), 4 * 2);
+    assert!(fp.iter().all(|v| v.is_nan()), "expected all NaN: {fp:?}");
 }
 
 #[test]
@@ -2045,8 +2615,8 @@ fn wcs_is_cloneable_and_the_clone_is_independent() {
     // costs a refcount bump rather than a re-parse.
     let wcs = open_image(&tan_cards());
     let mut copy = wcs.clone();
-    let a = wcs.pixel_to_celestial(10.0, 20.0).unwrap();
-    let b = copy.pixel_to_celestial(10.0, 20.0).unwrap();
+    let a = sky(&wcs, 10.0, 20.0);
+    let b = sky(&copy, 10.0, 20.0);
     assert!(near(a.0, b.0, 1e-12) && near(a.1, b.1, 1e-12));
 
     // Mutating the clone must not disturb the original.
@@ -2054,7 +2624,8 @@ fn wcs_is_cloneable_and_the_clone_is_independent() {
     copy.wcsname = Some("copy".into());
     assert_eq!(wcs.pixel_shape.as_deref(), Some([100_u64, 100].as_slice()));
     assert!(wcs.wcsname.is_none());
-    assert_eq!(copy.footprint().unwrap().len(), 4);
+    // Flat layout: 2^2 corners of 2 values each.
+    assert_eq!(copy.footprint().unwrap().len(), 4 * 2);
 }
 
 #[test]
@@ -2073,8 +2644,8 @@ fn cloning_a_sip_wcs_preserves_distortion() {
     let wcs = open_image(&cards);
     assert!(wcs.celestial.as_ref().unwrap().sip.is_some());
     let copy = wcs.clone();
-    let a = wcs.pixel_to_celestial(80.0, 15.0).unwrap();
-    let b = copy.pixel_to_celestial(80.0, 15.0).unwrap();
+    let a = sky(&wcs, 80.0, 15.0);
+    let b = sky(&copy, 80.0, 15.0);
     assert!(near(a.0, b.0, 1e-12) && near(a.1, b.1, 1e-12));
 }
 
@@ -2103,36 +2674,37 @@ fn batch_transforms_nan_fill_out_of_domain_points() {
     let wcs = open_image(&cards);
 
     // Reference pixel is valid; (0,0) is far outside the domain.
-    assert!(wcs.pixel_to_celestial(49.0, 49.0).is_ok());
+    assert!(wcs.pixel_to_world(&[49.0, 49.0]).is_ok());
     assert!(
-        wcs.pixel_to_celestial(0.0, 0.0).is_err(),
+        wcs.pixel_to_world(&[0.0, 0.0]).is_err(),
         "single-point calls keep reporting the diagnostic"
     );
 
-    let pts = [(49.0, 49.0), (0.0, 0.0), (50.0, 49.0)];
+    let pts = [49.0, 49.0, 0.0, 0.0, 50.0, 49.0];
     let out = wcs
-        .pixel_to_celestial_many(&pts)
+        .pixel_to_world_many(&pts)
         .expect("one bad point must not fail the batch");
-    assert_eq!(out.len(), 3);
-    assert!(out[0].0.is_finite() && out[0].1.is_finite());
-    assert!(out[1].0.is_nan() && out[1].1.is_nan());
-    assert!(out[2].0.is_finite() && out[2].1.is_finite());
+    assert_eq!(out.len(), 6);
+    assert!(out[0].is_finite() && out[1].is_finite());
+    assert!(out[2].is_nan() && out[3].is_nan());
+    assert!(out[4].is_finite() && out[5].is_finite());
 
     // Same on the inverse: a sky position in the far hemisphere.
-    let sky = [(45.0, 30.0), (225.0, -30.0), (45.5, 30.0)];
+    let far = [45.0, 30.0, 225.0, -30.0, 45.5, 30.0];
     let back = wcs
-        .celestial_to_pixel_many(&sky)
+        .world_to_pixel_many(&far)
         .expect("one bad point must not fail the batch");
-    assert_eq!(back.len(), 3);
-    assert!(back[0].0.is_finite() && back[0].1.is_finite());
-    assert!(back[1].0.is_nan() && back[1].1.is_nan());
-    assert!(back[2].0.is_finite() && back[2].1.is_finite());
+    assert_eq!(back.len(), 6);
+    assert!(back[0].is_finite() && back[1].is_finite());
+    assert!(back[2].is_nan() && back[3].is_nan());
+    assert!(back[4].is_finite() && back[5].is_finite());
 }
 
-/// A WCS with no celestial pair is a whole-batch failure, not a
-/// row of NaNs -- the batch helpers must still return `Err` there.
+/// A WCS with no celestial pair transforms fine: the general batch
+/// path has no celestial requirement. Only `pixel_scale_at`, which
+/// measures on the sphere, still needs the pair.
 #[test]
-fn batch_transforms_still_error_without_a_celestial_pair() {
+fn batch_transforms_do_not_require_a_celestial_pair() {
     let cards: Vec<String> = vec![
         "CTYPE1  = 'WAVE'".into(),
         "CTYPE2  = 'TIME'".into(),
@@ -2144,8 +2716,9 @@ fn batch_transforms_still_error_without_a_celestial_pair() {
         "CDELT2  =                  1.0".into(),
     ];
     let wcs = open_image(&cards);
-    assert!(wcs.pixel_to_celestial_many(&[(0.0, 0.0)]).is_err());
-    assert!(wcs.celestial_to_pixel_many(&[(0.0, 0.0)]).is_err());
+    assert!(wcs.pixel_to_world_many(&[0.0, 0.0]).is_ok());
+    assert!(wcs.world_to_pixel_many(&[0.0, 0.0]).is_ok());
+    assert!(wcs.pixel_scale_at(0.0, 0.0).is_err());
 }
 
 /// The descriptive keywords fitsy retains must survive `to_header` ->
@@ -2288,7 +2861,7 @@ fn pixel_list_carries_the_source_frame_keywords() {
 ///
 /// Regression: `to_header` used to drop the projection's `PVi_m`
 /// table and LONPOLE/LATPOLE entirely. Parameterless projections
-/// looked fine, which is why it went unnoticed; the parameterised
+/// looked fine, which is why it went unnoticed; the parameterized
 /// ones either drifted by degrees or failed to re-parse at all.
 #[test]
 fn to_header_round_trips_every_projection() {
@@ -2388,18 +2961,19 @@ fn to_header_round_trips_every_projection() {
 
             let mut compared = 0;
             for (px, py) in probes {
-                let (Ok((ra1, de1)), Ok((ra2, de2))) = (
-                    truth.pixel_to_celestial(px, py),
-                    round.pixel_to_celestial(px, py),
+                let (Ok(w1), Ok(w2)) = (
+                    truth.pixel_to_world(&[px, py]),
+                    round.pixel_to_world(&[px, py]),
                 ) else {
                     // Both must agree on being out of domain.
                     assert_eq!(
-                        truth.pixel_to_celestial(px, py).is_ok(),
-                        round.pixel_to_celestial(px, py).is_ok(),
+                        truth.pixel_to_world(&[px, py]).is_ok(),
+                        round.pixel_to_world(&[px, py]).is_ok(),
                         "{code} lonpole={lonpole:?} latpole={latpole:?}: domain differs at ({px},{py})"
                     );
                     continue;
                 };
+                let ((ra1, de1), (ra2, de2)) = ((w1[0], w1[1]), (w2[0], w2[1]));
                 assert!(
                     (ra1 - ra2).abs() < 1e-11 && (de1 - de2).abs() < 1e-11,
                     "{code} lonpole={lonpole:?} latpole={latpole:?} drifted at ({px},{py}): \
@@ -2628,7 +3202,7 @@ fn to_header_round_trips_spectral_axes() {
 /// serialized header carries both a placeholder TAN *and* the
 /// `PLT*`/`AMD*` family; re-parsing has to pick the plate model back
 /// up, and the sexagesimal `PLTRAH/M/S` round trip has to be exact
-/// enough not to move the plate centre.
+/// enough not to move the plate center.
 #[test]
 fn to_header_round_trips_dss_plate_solution() {
     let path = test_data_dir().join("dss_plate.fits");
@@ -2827,7 +3401,7 @@ fn velocity_algorithm_without_rest_quantity_is_rejected() {
 /// linear pipeline, so the axis silently reported a coordinate that
 /// was wrong by orders of magnitude instead of failing.
 #[test]
-fn unregistered_spectral_algorithm_is_rejected_not_linearised() {
+fn unregistered_spectral_algorithm_is_rejected_not_linearized() {
     for ctype in ["FREQ-XYZ", "WAVE-ABC", "AWAV-Q2Q"] {
         let cards = spectral_cube_cards(ctype, &["CUNIT3  = 'm'"]);
         let err = wcs_3d_result(&cards)
@@ -2992,8 +3566,8 @@ fn zpn_uses_its_full_pv2_20_polynomial() {
         "PV2_20 missing from the parsed projection: {pv:?}"
     );
     // And it must actually move the sky, not just be stored.
-    let a = with.pixel_to_celestial(0.0, 0.0).unwrap();
-    let b = without.pixel_to_celestial(0.0, 0.0).unwrap();
+    let a = sky(&with, 0.0, 0.0);
+    let b = sky(&without, 0.0, 0.0);
     assert!(
         (a.1 - b.1).abs() > 1e-6,
         "PV2_20 = 500 changed nothing: {a:?} vs {b:?}"
@@ -3007,7 +3581,7 @@ fn zpn_uses_its_full_pv2_20_polynomial() {
 /// description could not carry its own rest quantity -- and the writer
 /// emitted an unsuffixed card that wcslib reads as the primary's.
 #[test]
-fn rest_quantity_honours_the_alternate_code() {
+fn rest_quantity_honors_the_alternate_code() {
     let cards = vec![
         "CTYPE1  = 'RA---TAN'".to_string(),
         "CTYPE2  = 'DEC--TAN'".to_string(),
@@ -3178,7 +3752,7 @@ fn compound_cunit_spellings_agree() {
 }
 
 /// A `CUNIT` of the wrong dimension is a broken header, not something
-/// to rescale. `FREQ`, `ENER` and `WAVN` all linearise through
+/// to rescale. `FREQ`, `ENER` and `WAVN` all linearize through
 /// frequency but are `s^-1`, `J` and `m^-1`, and used to share one
 /// lookup table.
 #[test]
@@ -3215,7 +3789,7 @@ fn cunit_of_the_wrong_dimension_is_rejected() {
     }
 }
 
-/// A celestial axis in arcsec must be honoured, and one declaring a
+/// A celestial axis in arcsec must be honored, and one declaring a
 /// non-angle must be refused rather than silently treated as degrees.
 #[test]
 fn celestial_cunit_is_checked_and_applied() {
@@ -3236,8 +3810,8 @@ fn celestial_cunit_is_checked_and_applied() {
     // 1 arcsec/px against 1 deg/px: the same pixel must land 3600x closer.
     let deg = open_image(&cards("deg"));
     let asec = open_image(&cards("arcsec"));
-    let (_, d_deg) = deg.pixel_to_celestial(0.0, 10.0).unwrap();
-    let (_, d_asec) = asec.pixel_to_celestial(0.0, 10.0).unwrap();
+    let (_, d_deg) = sky(&deg, 0.0, 10.0);
+    let (_, d_asec) = sky(&asec, 0.0, 10.0);
     let off_deg = d_deg - 20.0;
     let off_asec = d_asec - 20.0;
     // 10 px at 1 arcsec/px is 10/3600 deg from the reference. Compared
@@ -3402,7 +3976,7 @@ fn multi_dimensional_tab_matches_wcslib() {
             wlat[i],
         );
         // The celestial convenience wrappers go through the same path.
-        let (ra, dec) = wcs.pixel_to_celestial(px[i], py[i]).unwrap();
+        let (ra, dec) = sky(&wcs, px[i], py[i]);
         assert!((ra - wlon[i]).abs() < 1e-10 && (dec - wlat[i]).abs() < 1e-10);
     }
 }
@@ -3609,7 +4183,7 @@ fn phase_axis_carries_czphs_and_cperi() {
 /// Which `CTYPE` values count as a time axis, checked against wcslib.
 ///
 /// The expectations below are wcslib's own (`WCS.wcs.axis_types[0] ==
-/// 4000`), sampled across Table 29 plus the neighbouring axis types.
+/// 4000`), sampled across Table 29 plus the neighboring axis types.
 /// Two entries deliberately disagree, both places where Sec.9.2.1 is
 /// more permissive than wcslib -- see the second half of the test.
 #[test]
@@ -3661,7 +4235,7 @@ fn time_axis_classification_matches_wcslib() {
 }
 
 /// The per-axis fields of a `Wcs` used to be public parallel vectors,
-/// and truncating any of them desynchronised the description: four of
+/// and truncating any of them desynchronized the description: four of
 /// five mutations panicked the transform or the serializer, and `naxis`
 /// was a second source of truth alongside `linear.naxis()`.
 ///
@@ -3735,4 +4309,327 @@ fn out_of_range_axis_indices_are_refused() {
             );
         }
     }
+}
+
+/// The batch transform must agree with the single-point transform on
+/// every point, including a `-SIN` field where part of the plane lies
+/// outside the projection.
+#[test]
+fn batch_matches_single_point_transform() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---SIN'".into(),
+        "CTYPE2  = 'DEC--SIN'".into(),
+        "CRPIX1  =                 50.0".into(),
+        "CRPIX2  =                 50.0".into(),
+        "CRVAL1  =                  0.0".into(),
+        "CRVAL2  =                  0.0".into(),
+        "CDELT1  =                 -1.0".into(),
+        "CDELT2  =                  1.0".into(),
+    ];
+    let wcs = open_image(&cards);
+    let mut flat = Vec::new();
+    for i in 0..40 {
+        for j in 0..40 {
+            flat.push(f64::from(i) * 5.0 - 20.0);
+            flat.push(f64::from(j) * 5.0 - 20.0);
+        }
+    }
+    let batch = wcs.pixel_to_world_many(&flat).unwrap();
+    assert_eq!(batch.len(), flat.len());
+    let mut outside = 0;
+    for (point, got) in flat.chunks_exact(2).zip(batch.chunks_exact(2)) {
+        if let Ok(want) = wcs.pixel_to_world(point) {
+            assert!(near(got[0], want[0], 1e-12), "lon {} {}", got[0], want[0]);
+            assert!(near(got[1], want[1], 1e-12), "lat {} {}", got[1], want[1]);
+        } else {
+            // A point the single call rejects becomes NaN in the batch.
+            outside += 1;
+            assert!(
+                got[0].is_nan() && got[1].is_nan(),
+                "expected NaN, got {got:?}"
+            );
+        }
+    }
+    assert!(outside > 0, "test needs points outside the SIN domain");
+}
+
+/// A batch round trip must land back on the pixel it started from.
+#[test]
+fn batch_round_trip_returns_original_pixels() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CRPIX1  =                 32.0".into(),
+        "CRPIX2  =                 24.0".into(),
+        "CRVAL1  =              202.469".into(),
+        "CRVAL2  =               47.195".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+    ];
+    let wcs = open_image(&cards);
+    let pixels: Vec<f64> = vec![0.0, 0.0, 31.0, 23.0, 63.0, 47.0, 10.5, 40.25];
+    let world = wcs.pixel_to_world_many(&pixels).unwrap();
+    let back = wcs.world_to_pixel_many(&world).unwrap();
+    // The TAN inverse leaves a residual of a few times 1e-9 pixels.
+    // The scalar path leaves the same one, bit for bit.
+    for (want, got) in pixels.iter().zip(&back) {
+        assert!(near(*want, *got, 1e-6), "want {want}, got {got}");
+    }
+}
+
+/// A length that is not a whole number of points is a whole-batch
+/// error, not a per-point NaN.
+#[test]
+fn batch_rejects_a_partial_point() {
+    let cards: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CRPIX1  =                 32.0".into(),
+        "CRPIX2  =                 24.0".into(),
+        "CRVAL1  =              202.469".into(),
+        "CRVAL2  =               47.195".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+    ];
+    let wcs = open_image(&cards);
+    assert!(wcs.pixel_to_world_many(&[1.0, 2.0, 3.0]).is_err());
+    assert!(wcs.world_to_pixel_many(&[1.0, 2.0, 3.0]).is_err());
+    // An empty batch is a valid batch of zero points.
+    assert_eq!(wcs.pixel_to_world_many(&[]).unwrap().len(), 0);
+}
+
+/// `pixel_scale_at` on a cube: the non-celestial axes evaluate at their
+/// reference pixel, so the scale matches the same WCS with the third
+/// axis dropped. This is the surviving public user of that fill.
+#[test]
+fn pixel_scale_at_fills_non_celestial_axes_on_a_cube() {
+    let mut cube: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CTYPE3  = 'FREQ'".into(),
+        "CRPIX1  =                 32.0".into(),
+        "CRPIX2  =                 24.0".into(),
+        "CRPIX3  =                  5.0".into(),
+        "CRVAL1  =              202.469".into(),
+        "CRVAL2  =               47.195".into(),
+        "CRVAL3  =              1.4E+09".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+        "CDELT3  =              1.0E+06".into(),
+        "CUNIT3  = 'Hz'".into(),
+    ];
+    let wcs3 = open_image_3d(&cube);
+    cube.truncate(2);
+    let flat: Vec<String> = vec![
+        "CTYPE1  = 'RA---TAN'".into(),
+        "CTYPE2  = 'DEC--TAN'".into(),
+        "CRPIX1  =                 32.0".into(),
+        "CRPIX2  =                 24.0".into(),
+        "CRVAL1  =              202.469".into(),
+        "CRVAL2  =               47.195".into(),
+        "CDELT1  =               -0.001".into(),
+        "CDELT2  =                0.001".into(),
+    ];
+    let wcs2 = open_image(&flat);
+    for (px, py) in [(0.0, 0.0), (31.0, 23.0), (63.0, 47.0)] {
+        let (ax, ay) = wcs3.pixel_scale_at(px, py).unwrap();
+        let (bx, by) = wcs2.pixel_scale_at(px, py).unwrap();
+        assert!(near(ax, bx, 1e-9), "x scale {ax} vs {bx}");
+        assert!(near(ay, by, 1e-9), "y scale {ay} vs {by}");
+    }
+}
+
+/// Every axis reports a kind, so a caller can find an axis by meaning
+/// rather than by position.
+#[test]
+fn axis_kinds_name_every_axis_of_a_cube() {
+    use fitsy::AxisKind;
+    let cards: Vec<String> = [
+        "CTYPE1  = 'RA---TAN'",
+        "CTYPE2  = 'DEC--TAN'",
+        "CTYPE3  = 'FREQ'",
+        "CRPIX1  =                 32.0",
+        "CRPIX2  =                 24.0",
+        "CRPIX3  =                  5.0",
+        "CRVAL1  =              202.469",
+        "CRVAL2  =               47.195",
+        "CRVAL3  =              1.4E+09",
+        "CDELT1  =               -0.001",
+        "CDELT2  =                0.001",
+        "CDELT3  =              1.0E+06",
+        "CUNIT3  = 'Hz'",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image_3d(&cards);
+    assert_eq!(
+        wcs.axis_kinds(),
+        vec![AxisKind::Longitude, AxisKind::Latitude, AxisKind::Spectral]
+    );
+    assert_eq!(wcs.axis_kind(0), Some(AxisKind::Longitude));
+    assert_eq!(wcs.axis_kind(3), None, "past the last axis");
+    // The kinds line up with the values `pixel_to_world` returns.
+    let world = wcs.pixel_to_world(&[31.0, 23.0, 4.0]).unwrap();
+    assert_eq!(world.len(), wcs.axis_kinds().len());
+    let spectral = wcs
+        .axis_kinds()
+        .iter()
+        .position(|k| *k == AxisKind::Spectral)
+        .unwrap();
+    assert!((world[spectral] - 1.4e9).abs() < 1.0);
+}
+
+/// A swapped `CTYPE` order must be reported honestly: the kind follows
+/// the axis, not its position.
+#[test]
+fn axis_kinds_follow_a_swapped_ctype_order() {
+    use fitsy::AxisKind;
+    let cards: Vec<String> = [
+        "CTYPE1  = 'DEC--TAN'",
+        "CTYPE2  = 'RA---TAN'",
+        "CRPIX1  =                 32.0",
+        "CRPIX2  =                 24.0",
+        "CRVAL1  =               47.195",
+        "CRVAL2  =              202.469",
+        "CDELT1  =                0.001",
+        "CDELT2  =               -0.001",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image(&cards);
+    assert_eq!(
+        wcs.axis_kinds(),
+        vec![AxisKind::Latitude, AxisKind::Longitude]
+    );
+}
+
+/// A non-celestial, non-spectral axis falls back to `Linear`, and
+/// `STOKES` is named rather than lumped in with it.
+#[test]
+fn axis_kinds_cover_stokes_and_plain_linear() {
+    use fitsy::AxisKind;
+    let cards: Vec<String> = [
+        "CTYPE1  = 'STOKES'",
+        "CTYPE2  = 'DETX'",
+        "CRPIX1  =                  1.0",
+        "CRPIX2  =                  1.0",
+        "CRVAL1  =                  1.0",
+        "CRVAL2  =                  0.0",
+        "CDELT1  =                  1.0",
+        "CDELT2  =                  1.0",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image(&cards);
+    assert_eq!(wcs.axis_kinds(), vec![AxisKind::Stokes, AxisKind::Linear]);
+    assert!(!wcs.is_tabular(0));
+    assert!(!wcs.is_tabular(99), "an absent axis is not tabular");
+}
+
+/// A `linear` field of the wrong rank is an error, not a panic and not
+/// a wrong answer.
+///
+/// `Wcs::new` enforces the match at construction. The `linear` field is
+/// public and `LinearTransform` has public constructors, so the two can
+/// be put out of step afterwards.
+///
+/// The per-point bodies index `CRPIX` unchecked and zip the matrix
+/// against `naxis` rows. Without a guard, a short transform panics and
+/// a long one reuses the previous point's intermediate values.
+#[test]
+fn a_mismatched_linear_transform_is_rejected() {
+    use fitsy::wcs::LinearTransform;
+    for rank in [1_usize, 3] {
+        let mut wcs = open_image(&tan_cards());
+        assert_eq!(wcs.naxis(), 2);
+        wcs.linear = LinearTransform::from_cd(
+            vec![1.0; rank],
+            vec![0.0; rank],
+            (0..rank * rank)
+                .map(|i| if i % (rank + 1) == 0 { 1.0 } else { 0.0 })
+                .collect(),
+        )
+        .expect("a well-formed transform of the wrong rank");
+
+        let point = vec![0.0; 2];
+        for err in [
+            wcs.pixel_to_world(&point).unwrap_err(),
+            wcs.world_to_pixel(&point).unwrap_err(),
+            wcs.pixel_to_world_many(&point).unwrap_err(),
+            wcs.world_to_pixel_many(&point).unwrap_err(),
+        ] {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("linear transform"),
+                "rank {rank}: expected a shape complaint, got {msg}"
+            );
+        }
+    }
+}
+
+/// `Time` and `Phase`, the two kinds that come from a parsed side
+/// table rather than from the `CTYPE` text.
+///
+/// `axis_kind` probes both after the spectral check, which reads the
+/// first four characters of `CTYPE`. This test therefore also pins that
+/// no time or phase spelling collides with a spectral type code.
+#[test]
+fn axis_kinds_name_time_and_phase() {
+    use fitsy::AxisKind;
+    // Sec.9.5.3 lets the time axis carry the scale as its `CTYPE`,
+    // so the kind cannot be keyed off a single literal.
+    for ctype in ["TIME", "UTC", "TAI", "TT"] {
+        let cards: Vec<String> = [
+            "CTYPE1  = 'RA---TAN'".to_string(),
+            "CTYPE2  = 'DEC--TAN'".to_string(),
+            format!("CTYPE3  = '{ctype}'"),
+            "CRPIX1  =                  1.0".into(),
+            "CRPIX2  =                  1.0".into(),
+            "CRPIX3  =                  1.0".into(),
+            "CRVAL1  =                 10.0".into(),
+            "CRVAL2  =                 -5.0".into(),
+            "CRVAL3  =                  0.0".into(),
+            "CDELT1  =              -0.0010".into(),
+            "CDELT2  =               0.0010".into(),
+            "CDELT3  =                  1.0".into(),
+        ]
+        .into_iter()
+        .collect();
+        let wcs = open_image_3d(&cards);
+        assert_eq!(
+            wcs.axis_kind(2),
+            Some(AxisKind::Time),
+            "CTYPE3 = '{ctype}' should name a time axis"
+        );
+    }
+
+    // Sec.9.6: a phase axis is recognized by `CTYPE` plus its
+    // `CPERIia` period.
+    let cards: Vec<String> = [
+        "CTYPE1  = 'RA---TAN'",
+        "CTYPE2  = 'DEC--TAN'",
+        "CTYPE3  = 'PHASE'",
+        "CRPIX1  =                  1.0",
+        "CRPIX2  =                  1.0",
+        "CRPIX3  =                  1.0",
+        "CRVAL1  =                 10.0",
+        "CRVAL2  =                 -5.0",
+        "CRVAL3  =                  0.0",
+        "CDELT1  =              -0.0010",
+        "CDELT2  =               0.0010",
+        "CDELT3  =                  0.1",
+        "CPERI3  =                  1.5",
+        "CZPHS3  =                  0.0",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let wcs = open_image_3d(&cards);
+    assert_eq!(
+        wcs.axis_kinds(),
+        vec![AxisKind::Longitude, AxisKind::Latitude, AxisKind::Phase]
+    );
 }

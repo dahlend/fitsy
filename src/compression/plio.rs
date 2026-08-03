@@ -334,7 +334,7 @@ mod tests {
     fn run_extending_past_tile_end_is_clipped() {
         // Per cfitsio's pl_l2pi, runs that overshoot the requested
         // window are silently clipped \u2014 only the portion within
-        // [xs..=xe] is materialised.
+        // [xs..=xe] is materialized.
         // Pack a single opcode claiming 100 pixels into a 1-pixel tile.
         let payload = pack(&[0x4064]);
         let mut dst = vec![0_u8; 2];

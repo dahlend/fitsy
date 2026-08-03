@@ -355,7 +355,7 @@ fn inherited_cards(header: &Header) -> BTreeMap<String, Value> {
     out
 }
 
-/// True for an image-form keyword parameterised by axis number, e.g.
+/// True for an image-form keyword parameterized by axis number, e.g.
 /// `CTYPE2`, `PC1_2A`, `NAXIS3`. `CD` is matched only in its `CDi_j`
 /// form so `CDELT`-like names are not caught by the `CD` prefix.
 fn is_image_axis_keyword(kw: &str) -> bool {
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn image_axis_keywords_are_recognised_for_stripping() {
+    fn image_axis_keywords_are_recognized_for_stripping() {
         for kw in [
             "CTYPE1", "CRVAL2A", "PC1_2", "CD2_1B", "PV2_1", "NAXIS3", "WCSAXES", "WCSAXESA",
         ] {

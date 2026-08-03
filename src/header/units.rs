@@ -35,7 +35,7 @@ impl Header {
     /// - The keyword is absent, or its value is not numeric.
     /// - Either unit string fails to parse.
     /// - The two units carry different dimensions. A value annotated
-    ///   `[s]` cannot be reported in metres.
+    ///   `[s]` cannot be reported in meters.
     #[must_use]
     pub fn real_in_unit(&self, key: &str, target_unit: &str) -> Option<f64> {
         let v = self.optional_real(key)?;
@@ -49,7 +49,7 @@ impl Header {
     }
 
     /// Value of `key` converted to the canonical unit for its dimension
-    /// (metre, kilogram, second, degree, ...).
+    /// (meter, kilogram, second, degree, ...).
     ///
     /// The source unit comes from the `[unit]` comment annotation,
     /// read leniently.
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn real_in_unit_converts_annotation_to_target() {
-        // Annotated [AU], asked for metres -> convert AU -> m.
+        // Annotated [AU], asked for meters -> convert AU -> m.
         let mut h = Header::empty();
         h.push("DIST", 1.0_f64, Some("[AU] Distance")).unwrap();
         let m = h.real_in_unit("DIST", "m").unwrap();
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn real_in_unit_refuses_a_dimension_mismatch() {
         let mut h = Header::empty();
-        h.push("DIST", 1.0_f64, Some("[s] mislabelled")).unwrap();
+        h.push("DIST", 1.0_f64, Some("[s] mislabeled")).unwrap();
         assert!(h.real_in_unit("DIST", "m").is_none());
         // ... and an unparseable unit on either side.
         let mut h = Header::empty();

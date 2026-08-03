@@ -8,7 +8,7 @@
 //! * `DATASUM` -- decimal-string ASCII representation of the
 //!   1's-complement sum of the *data* unit only (zero-padded out to
 //!   the next 2880-byte block boundary).
-//! * `CHECKSUM` -- ASCII-armoured (16-character) encoding of the
+//! * `CHECKSUM` -- ASCII-armored (16-character) encoding of the
 //!   1's complement of the running sum over the *header + data* units,
 //!   computed with the `CHECKSUM` card itself present in the header
 //!   (its value field full of ASCII zeroes during construction). For a
@@ -103,7 +103,7 @@ pub fn datasum_string(data_bytes_padded: &[u8]) -> String {
     checksum_bytes(data_bytes_padded).to_string()
 }
 
-/// ASCII-armoured encoding of a 32-bit checksum (Pence & Seaman 1995,
+/// ASCII-armored encoding of a 32-bit checksum (Pence & Seaman 1995,
 /// Sec.4.4.2.7 / Appendix K).
 ///
 /// The 16 bytes are printable ASCII excluding `0x3a..=0x40` and

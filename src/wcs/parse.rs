@@ -470,7 +470,7 @@ fn build_celestial_block(
             "celestial CTYPE pair has mismatched projection codes: `{lon_ctype}` vs `{lat_ctype}`"
         )));
     }
-    // TPV is signalled by projection code; underlying maths is TAN
+    // TPV is signaled by projection code; underlying maths is TAN
     // with polynomial pre-warp on intermediate coords. TNX uses the
     // same slot on TAN; ZPX uses it on ZPN.
     let (kind, is_tpv, is_tnx, is_zpx) = if proj_code.eq_ignore_ascii_case("TPV") {
@@ -878,7 +878,7 @@ fn identify_celestial_pair(ctype: &[String]) -> Option<CelestialPair> {
 /// non-ASCII out of a value read from a file, but a `Header` built
 /// programmatically can hold anything, and a parser should refuse
 /// input rather than abort on it.
-fn first4(s: &str) -> &str {
+pub(crate) fn first4(s: &str) -> &str {
     if s.len() < 4 {
         s
     } else {

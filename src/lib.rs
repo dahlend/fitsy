@@ -134,7 +134,8 @@
 //!
 //! let file = FitsFile::open(&path)?;
 //! let wcs = file.wcs(0, ' ')?.expect("HDU 0 declares no WCS");
-//! let (ra, dec) = wcs.pixel_to_celestial(31.0, 23.0)?;
+//! let world = wcs.pixel_to_world(&[31.0, 23.0])?;
+//! let (ra, dec) = (world[0], world[1]);
 //!
 //! assert!((ra - 150.0).abs() < 1e-9);
 //! assert!((dec - 2.5).abs() < 1e-9);
@@ -242,7 +243,7 @@ pub use io::FitsAppender;
 #[cfg(not(target_arch = "wasm32"))]
 pub use io::FitsUpdater;
 pub use io::{FitsWriter, write};
-pub use wcs::Wcs;
+pub use wcs::{AxisKind, Wcs};
 
 #[cfg(feature = "compression")]
 pub use compression::{CompressedImageHdu, OwnedImage, TileOpts, compress_image_to_hdu};

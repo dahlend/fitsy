@@ -17,7 +17,7 @@ use crate::error::{FitsError, Result};
 /// ```
 /// use fitsy::units::{Quantity, Unit, constants, dimensions, parse_unit};
 ///
-/// // A wavelength, in nanometres.
+/// // A wavelength, in nanometers.
 /// let lambda = Quantity::new(500.0, parse_unit("nm")?);
 /// assert!((lambda.to_canonical()? - 500e-9).abs() < 1e-20);
 ///
@@ -43,7 +43,7 @@ impl Quantity {
         Self { value, unit }
     }
 
-    /// A value in the canonical unit for `dimension` -- metre, kilogram,
+    /// A value in the canonical unit for `dimension` -- meter, kilogram,
     /// second, degree, kelvin, ampere, mole, candela.
     #[must_use]
     pub const fn canonical(value: f64, dimension: Dimension) -> Self {

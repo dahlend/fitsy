@@ -172,7 +172,7 @@ impl<'a> ImageHdu<'a> {
         }
         let bsize = self.bitpix.byte_size();
         // `collect` from the `ExactSizeIterator` rather than pushing in a
-        // loop: the per-push capacity check blocks vectorisation and costs
+        // loop: the per-push capacity check blocks vectorization and costs
         // roughly half the decode throughput.
         let out: Vec<T> = self
             .data
@@ -278,7 +278,7 @@ impl<'a> ImageHdu<'a> {
     /// each through `cast` on the way out.
     ///
     /// The `BITPIX` match is hoisted out of the loop so each arm is a
-    /// single monomorphic pass that can vectorise, and `cast` is applied
+    /// single monomorphic pass that can vectorize, and `cast` is applied
     /// during the collect so a narrower output never has to be staged
     /// through a full-size `f64` buffer first.
     fn scaled_pixels<T>(&self, scaling: &Scaling, cast: impl Fn(f64) -> T) -> Vec<T> {

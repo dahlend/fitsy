@@ -84,7 +84,7 @@ def test_tab_axis_interpolates_between_samples(tmp_path):
         assert wcs.pixel_to_world([0.0, 0.0, 1.5])[2] == pytest.approx(5000.0)
 
 
-def test_tab_axis_honours_index_column(tmp_path):
+def test_tab_axis_honors_index_column(tmp_path):
     path = _write_tab_file(tmp_path / "tab.fits", index=[1.0, 2.0, 4.0, 8.0, 16.0])
     with fitsy.open(path) as f:
         wcs = f.wcs(0)

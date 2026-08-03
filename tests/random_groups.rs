@@ -73,7 +73,7 @@ fn random_groups_round_trip() {
 
 /// Standard Sec.6.1.2: `physical = PZEROn + PSCALn x stored`, and
 /// repeated `PTYPEn` names name one parameter whose value is the sum of
-/// the slots. Modelled on the UVFITS pattern where a Julian date is
+/// the slots. Modeled on the UVFITS pattern where a Julian date is
 /// split into a coarse and a fine `DATE` slot so the parameter carries
 /// more precision than `BITPIX` alone allows.
 #[test]

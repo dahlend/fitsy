@@ -17,7 +17,7 @@ type-checks and then raises.
 from __future__ import annotations
 
 from os import PathLike
-from typing import Any, Iterator, Mapping, Optional, Sequence, Union
+from typing import Any, Iterator, Mapping, Optional, Sequence, Union, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -268,26 +268,36 @@ class Wcs:
     @property
     def pixel_shape(self) -> Optional[tuple[int, ...]]: ...
     def celestial_axes(self) -> Optional[tuple[int, int]]: ...
+    def axis_kinds(self) -> list[str]: ...
+    def is_tabular(self, axis: int) -> bool: ...
     def footprint(self) -> np.ndarray: ...
+    # These return a list for one point and an array for a batch. That
+    # is a difference of rank, not of type. A 1-D and a 2-D `ndarray`
+    # share one static type. The overloads therefore promise a concrete
+    # return only for the sequence forms, where nesting makes the rank
+    # visible. Every other `ArrayLike`, `ndarray` included, falls back
+    # to `Any`.
+    @overload
     def pixel_to_world(self, pix: Sequence[float], origin: int = 0) -> list[float]: ...
+    @overload
+    def pixel_to_world(
+        self, pix: Sequence[Sequence[float]], origin: int = 0
+    ) -> np.ndarray: ...
+    @overload
+    def pixel_to_world(self, pix: npt.ArrayLike, origin: int = 0) -> Any: ...
+    @overload
     def world_to_pixel(
         self, world: Sequence[float], origin: int = 0
     ) -> list[float]: ...
-    def pixel_to_celestial(
-        self, px: float, py: float, origin: int = 0
-    ) -> tuple[float, float]: ...
-    def celestial_to_pixel(
-        self, ra: float, dec: float, origin: int = 0
-    ) -> tuple[float, float]: ...
+    @overload
+    def world_to_pixel(
+        self, world: Sequence[Sequence[float]], origin: int = 0
+    ) -> np.ndarray: ...
+    @overload
+    def world_to_pixel(self, world: npt.ArrayLike, origin: int = 0) -> Any: ...
     def pixel_scale_at(
         self, px: float, py: float, origin: int = 0
     ) -> tuple[float, float]: ...
-    def pixel_to_celestial_many(
-        self, pixels: npt.ArrayLike, origin: int = 0
-    ) -> np.ndarray: ...
-    def celestial_to_pixel_many(
-        self, sky: npt.ArrayLike, origin: int = 0
-    ) -> np.ndarray: ...
     def to_header(self, alt: str = " ") -> Header: ...
 
 class WcsFit:

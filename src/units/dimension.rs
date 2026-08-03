@@ -136,7 +136,7 @@ impl std::fmt::Display for Dimension {
                 continue;
             }
             // Sec.4.3 permits a bare integer exponent but requires a
-            // fractional one to be parenthesised, so `m1.5` is not a
+            // fractional one to be parenthesized, so `m1.5` is not a
             // spelling of three-halves and cannot be emitted as one.
             if (e - e.round()).abs() < 1e-9 {
                 write!(f, "^{}", e.round())?;

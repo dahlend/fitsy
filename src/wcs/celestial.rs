@@ -195,7 +195,13 @@ pub struct CelestialRotation {
     /// A header's `LATPOLE` is only a hint: it picks between the two
     /// roots of Paper II eq. (9) when both are valid. This holds the
     /// root chosen, so writing it back re-selects the same one.
-    pub theta_p: f64,
+    ///
+    /// Private because [`Self::sin_theta_p`] and [`Self::cos_theta_p`]
+    /// derive from it. The transforms read that derived pair. A caller
+    /// who could assign to this field would leave the three
+    /// disagreeing. Read it with [`Self::theta_p`]. To change it, build
+    /// a new `CelestialRotation`.
+    theta_p: f64,
     /// Native longitude of the fiducial point, degrees (`PVi_1` on the
     /// longitude axis). Zero unless the header moves it.
     pub phi0: f64,
@@ -204,6 +210,75 @@ pub struct CelestialRotation {
     pub theta0: f64,
     /// Celestial longitude of the native pole.
     alpha_p: f64,
+    /// `sin(theta_p)` and `cos(theta_p)`, resolved once.
+    ///
+    /// Both transforms need this pair per point, and it depends on
+    /// `theta_p` alone. Deriving it here keeps four `sin`/`cos` calls
+    /// out of the per-point path.
+    ///
+    /// Private for the same reason as [`Self::alpha_p`] and the
+    /// `theta_p` they derive from: only [`Self::new`] can establish
+    /// the three as consistent.
+    sin_theta_p: f64,
+    cos_theta_p: f64,
+}
+
+/// Latitude, in radians, from the rotated unit vector `(x, y, z)`.
+///
+/// `z` is the sine of the angle. `(x, y)` is its cosine resolved into
+/// components. Either one recovers the angle.
+///
+/// Paper II Sec.2.4 writes `asin(z)` alone. That loses precision as the
+/// point nears a pole, where `d(asin)/dz = 1 / cos(lat)` diverges. A
+/// one-ulp error in `z` then becomes an unbounded error in the angle. A
+/// zenithal projection puts every point of the field near the native
+/// pole, which is where its inverse loses that accuracy.
+///
+/// Near the pole the cosine is the well-conditioned quantity. This
+/// takes the angle from `hypot(x, y)` there and restores the sign from
+/// `z`. Away from the pole `asin` is the better conditioned of the two.
+fn lat_from(x: f64, y: f64, z: f64) -> f64 {
+    if z.abs() > 0.99 {
+        // `(x, y, z)` is a unit vector, so this is `cos(lat)`. No
+        // `hypot`: neither component can overflow, and this stays on
+        // the per-point path.
+        (x * x + y * y).sqrt().acos().copysign(z)
+    } else {
+        z.clamp(-1.0, 1.0).asin()
+    }
+}
+
+/// `x.rem_euclid(360.0)`, taking the usual range without the `fmod`.
+///
+/// `atan2` is bounded by `pi`. On the non-zenithal branch,
+/// [`CelestialRotation::new`] normalizes `alpha_p` to `[0, 360)`, and
+/// the rotation then produces values in `(-180, 540)`, which the
+/// conditional steps cover.
+///
+/// A zenithal `alpha_p` is `CRVAL1` verbatim, and nothing requires a
+/// header to write that in `[0, 360)`. `rem_euclid` therefore stays as
+/// the fallback, which is what makes this total rather than merely
+/// correct over the common range.
+///
+/// The shortcut returns the value `rem_euclid` returns: `fmod` gives
+/// back its argument unchanged for `|x| < 360`, and `x - 360.0` is
+/// exact on `[360, 720)` by Sterbenz's lemma.
+fn wrap_360(x: f64) -> f64 {
+    if x >= 0.0 {
+        if x < 360.0 {
+            x
+        } else if x < 720.0 {
+            x - 360.0
+        } else {
+            x.rem_euclid(360.0)
+        }
+    } else if x >= -360.0 {
+        x + 360.0
+    } else {
+        // Also the NaN path: every comparison above is false for NaN,
+        // and `rem_euclid` propagates it.
+        x.rem_euclid(360.0)
+    }
 }
 
 impl CelestialRotation {
@@ -251,6 +326,10 @@ impl CelestialRotation {
             compute_native_pole(alpha0, delta0, phi_p, latpole, phi0_deg, theta0_deg)?
         };
 
+        let (sin_theta_p, cos_theta_p) = {
+            let dp = delta_p * D2R;
+            (dp.sin(), dp.cos())
+        };
         Ok(Self {
             alpha0,
             delta0,
@@ -259,6 +338,8 @@ impl CelestialRotation {
             phi0: phi0_deg,
             theta0: theta0_deg,
             alpha_p,
+            sin_theta_p,
+            cos_theta_p,
         })
     }
 
@@ -268,28 +349,36 @@ impl CelestialRotation {
         self.alpha_p
     }
 
+    /// `LATPOLE` with the Sec.8.2 branch resolved, degrees.
+    ///
+    /// This is the value to write back when serializing. It names the
+    /// root of Paper II eq. (9) this rotation was built on. A header
+    /// carrying it re-selects the same root.
+    #[must_use]
+    pub fn theta_p(&self) -> f64 {
+        self.theta_p
+    }
+
     /// Native (phi, theta) -> celestial (alpha, delta). All in degrees.
     #[must_use]
     pub fn native_to_celestial(&self, phi_deg: f64, theta_deg: f64) -> (f64, f64) {
         let phi = phi_deg * D2R;
         let theta = theta_deg * D2R;
         let phi_p = self.phi_p * D2R;
-        let dp = self.theta_p * D2R;
+        let (sin_dp, cos_dp) = (self.sin_theta_p, self.cos_theta_p);
 
         let dphi = phi - phi_p;
         let cos_theta = theta.cos();
         let sin_theta = theta.sin();
 
-        let sin_delta = sin_theta * dp.sin() + cos_theta * dp.cos() * dphi.cos();
-        let delta = sin_delta.clamp(-1.0, 1.0).asin();
-
+        let sin_delta = sin_theta * sin_dp + cos_theta * cos_dp * dphi.cos();
         let y = -cos_theta * dphi.sin();
-        let x = sin_theta * dp.cos() - cos_theta * dp.sin() * dphi.cos();
+        let x = sin_theta * cos_dp - cos_theta * sin_dp * dphi.cos();
+        let delta = lat_from(x, y, sin_delta);
         let alpha = self.alpha_p * D2R + y.atan2(x);
 
-        let mut alpha_deg = alpha * R2D;
-        // Normalize to [0, 360).
-        alpha_deg = alpha_deg.rem_euclid(360.0);
+        // Normalize to [0, 360). See `wrap_360`.
+        let alpha_deg = wrap_360(alpha * R2D);
         (alpha_deg, delta * R2D)
     }
 
@@ -300,17 +389,16 @@ impl CelestialRotation {
         let delta = delta_deg * D2R;
         let phi_p = self.phi_p * D2R;
         let ap = self.alpha_p * D2R;
-        let dp = self.theta_p * D2R;
+        let (sin_dp, cos_dp) = (self.sin_theta_p, self.cos_theta_p);
 
         let dalpha = alpha - ap;
         let cos_delta = delta.cos();
         let sin_delta = delta.sin();
 
-        let sin_theta = sin_delta * dp.sin() + cos_delta * dp.cos() * dalpha.cos();
-        let theta = sin_theta.clamp(-1.0, 1.0).asin();
-
+        let sin_theta = sin_delta * sin_dp + cos_delta * cos_dp * dalpha.cos();
         let y = -cos_delta * dalpha.sin();
-        let x = sin_delta * dp.cos() - cos_delta * dp.sin() * dalpha.cos();
+        let x = sin_delta * cos_dp - cos_delta * sin_dp * dalpha.cos();
+        let theta = lat_from(x, y, sin_theta);
         let phi = phi_p + y.atan2(x);
 
         // Paper II Sec.2.1 computes phi with `arg`, whose range is

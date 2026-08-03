@@ -398,7 +398,7 @@ mod tests {
     /// `phi = +180` is the closed end of Paper II's `arg` range
     /// `(-180, 180]`: the facet index `floor((phi + 180) H / 360)`
     /// evaluates to `H` there and walked off the ring before the
-    /// facet-centre clamp -- at `H = 4`, `theta = 88` the projected
+    /// facet-center clamp -- at `H = 4`, `theta = 88` the projected
     /// `x` came out 223.08 instead of 136.92 (the CHANGELOG's worked
     /// example).
     #[test]
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn tsc_face_centres_round_trip() {
+    fn tsc_face_centers_round_trip() {
         let p = Tsc;
         for &(phi, theta) in &[
             (0.0_f64, 0.0_f64),
@@ -531,7 +531,7 @@ mod tests {
         use crate::wcs::D2R;
         use crate::wcs::projection::{ProjectionKind, build};
 
-        // Representative parameters for the parameterised codes.
+        // Representative parameters for the parameterized codes.
         // One arm per code, mirroring Paper II's parameter tables, even
         // where two codes happen to take the same numbers.
         #[allow(

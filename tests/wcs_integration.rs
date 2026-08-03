@@ -530,6 +530,24 @@ fn spectral_vopt_kms_round_trip() {
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Sky position of a pixel on a two-axis celestial WCS, as
+/// `(lon, lat)`.
+///
+/// The public API returns world values in axis order and
+/// `Wcs::axis_kinds` says which is which. Every WCS in this file puts
+/// longitude on axis 1, so this helper indexes directly and states
+/// that assumption once.
+fn sky(wcs: &fitsy::Wcs, px: f64, py: f64) -> (f64, f64) {
+    let w = wcs.pixel_to_world(&[px, py]).expect("pixel_to_world");
+    (w[0], w[1])
+}
+
+/// Inverse of [`sky`].
+fn pix(wcs: &fitsy::Wcs, lon: f64, lat: f64) -> (f64, f64) {
+    let p = wcs.world_to_pixel(&[lon, lat]).expect("world_to_pixel");
+    (p[0], p[1])
+}
+
 fn test_data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
 }
@@ -1196,10 +1214,10 @@ fn dss_plate_model_used_for_real_file() {
     let dss = wcs.dss.as_ref().unwrap();
     // The +0.5 - cnpix formulas above produce a 1-based FITS pixel
     // coordinate; subtract 1 for the 0-based Wcs API.
-    let plate_centre_x = dss.ppo3 / dss.xpixelsz - dss.cnpix1 + 0.5 - 1.0;
-    let plate_centre_y = dss.ppo6 / dss.ypixelsz - dss.cnpix2 + 0.5 - 1.0;
+    let plate_center_x = dss.ppo3 / dss.xpixelsz - dss.cnpix1 + 0.5 - 1.0;
+    let plate_center_y = dss.ppo6 / dss.ypixelsz - dss.cnpix2 + 0.5 - 1.0;
     let world = wcs
-        .pixel_to_world(&[plate_centre_x, plate_centre_y])
+        .pixel_to_world(&[plate_center_x, plate_center_y])
         .unwrap();
     // Tolerance: AMDX3 ~= -131" and AMDY3 ~= +1.65", so up to ~0.04deg.
     assert!(
@@ -1284,7 +1302,7 @@ fn sip_partial_inverse_is_rejected() {
     );
 }
 
-/// `pixel_to_celestial` / `celestial_to_pixel` are the convenience pair
+/// `pixel_to_world` / `world_to_pixel` are the general pair
 /// real callers reach for: no Vec gymnastics, just (x, y) <-> (RA, Dec).
 #[test]
 fn celestial_convenience_round_trip() {
@@ -1301,13 +1319,13 @@ fn celestial_convenience_round_trip() {
     let wcs = open_image(&cards);
     assert_eq!(wcs.celestial_axes(), Some((0, 1)));
 
-    let (ra, dec) = wcs.pixel_to_celestial(49.5, 49.5).unwrap();
+    let (ra, dec) = sky(&wcs, 49.5, 49.5);
     assert!(near(ra, 83.6331, 1e-9));
     assert!(near(dec, 22.0145, 1e-9));
 
     for &(px, py) in &[(0.0, 0.0), (32.0, 74.0), (98.0, 98.0)] {
-        let (ra, dec) = wcs.pixel_to_celestial(px, py).unwrap();
-        let (px2, py2) = wcs.celestial_to_pixel(ra, dec).unwrap();
+        let (ra, dec) = sky(&wcs, px, py);
+        let (px2, py2) = pix(&wcs, ra, dec);
         assert!(
             near(px, px2, 1e-6) && near(py, py2, 1e-6),
             "round-trip failed at ({px},{py}): got ({px2},{py2})",
@@ -1339,10 +1357,10 @@ fn pixel_scale_matches_cdelt() {
     assert!((sy - 1.0008).abs() < 1e-3, "y scale = {sy}");
 }
 
-/// `pixel_to_celestial` errors cleanly on a header without a celestial
-/// pair (e.g., a pure spectral or linear WCS).
+/// The celestial-only entry points error cleanly on a header without a
+/// celestial pair. The general transform works there regardless.
 #[test]
-fn pixel_to_celestial_errors_without_celestial_pair() {
+fn celestial_only_helpers_error_without_celestial_pair() {
     let cards: Vec<String> = vec![
         "CTYPE1  = 'FREQ'".into(),
         "CTYPE2  = 'LINEAR'".into(),
@@ -1356,11 +1374,11 @@ fn pixel_to_celestial_errors_without_celestial_pair() {
     ];
     let wcs = open_image(&cards);
     assert!(wcs.celestial_axes().is_none());
-    assert!(wcs.pixel_to_celestial(1.0, 1.0).is_err());
-    assert!(wcs.celestial_to_pixel(0.0, 0.0).is_err());
+    assert!(wcs.pixel_scale_at(1.0, 1.0).is_err());
+    assert!(wcs.pixel_to_world(&[1.0, 1.0]).is_ok());
 }
 
-/// `-TAB` axis: single-axis 1-D wavelength lookup. Synthesises an
+/// `-TAB` axis: single-axis 1-D wavelength lookup. Synthesizes an
 /// image HDU whose third axis carries `WAVE-TAB`, plus a paired
 /// BINTABLE extension `WCS-TAB` with a 5-element wavelength column
 /// `WAVELEN`. Verifies that `FitsFile::wcs` resolves the lookup and

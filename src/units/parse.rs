@@ -59,7 +59,7 @@ impl<'a> Parser<'a> {
     /// associate left to right.
     fn parse_unit(&mut self) -> Result<Unit> {
         // A leading `/` means an implicit 1: Sec.4.3 gives `/m3` as a
-        // spelling of "per metre cubed".
+        // spelling of "per meter cubed".
         self.skip_spaces();
         let mut acc = if self.rest().starts_with('/') {
             Unit::new(1.0, Dimension::NONE)
@@ -106,7 +106,7 @@ impl<'a> Parser<'a> {
     /// `power := atom (('**' | '^') expr | bare_expr)? operand?`
     ///
     /// Every recursion in the grammar passes through here -- glued
-    /// juxtaposition directly, parenthesised groups via `parse_atom`
+    /// juxtaposition directly, parenthesized groups via `parse_atom`
     /// -- so this is where the [`MAX_DEPTH`] cap turns runaway input
     /// into an error instead of a stack overflow.
     fn parse_power(&mut self) -> Result<Unit> {
@@ -141,7 +141,7 @@ impl<'a> Parser<'a> {
         //
         // A letter here is unambiguous. `parse_atom` consumes every
         // letter of a symbol, so a symbol is never followed by one; only
-        // a numeric factor or a parenthesised group can be, and neither
+        // a numeric factor or a parenthesized group can be, and neither
         // can continue into a letter.
         if self.rest().starts_with(|c: char| c.is_ascii_alphabetic()) {
             return raised.mul(self.parse_power()?);
@@ -149,7 +149,7 @@ impl<'a> Parser<'a> {
         Ok(raised)
     }
 
-    /// An exponent: a signed integer, or a parenthesised decimal or
+    /// An exponent: a signed integer, or a parenthesized decimal or
     /// integer ratio.
     fn parse_exponent(&mut self) -> Result<f64> {
         if self.eat("(") {
@@ -176,7 +176,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         let text = &self.src[start..self.pos];
-        // Bare (unparenthesised) exponents must be integers: Sec.4.3
+        // Bare (unparenthesized) exponents must be integers: Sec.4.3
         // states that three-halves may *not* be written `m1.5`. Without
         // this the trailing `.5` would be swallowed as a `.`
         // multiplication by the numeric factor 5. `m2.s` stays legal --
@@ -185,7 +185,7 @@ impl<'a> Parser<'a> {
             && self.src[self.pos + 1..].starts_with(|c: char| c.is_ascii_digit())
         {
             return Err(self
-                .err("a fractional exponent must be parenthesised, as in `m(1.5)` or `m**(3/2)`"));
+                .err("a fractional exponent must be parenthesized, as in `m(1.5)` or `m**(3/2)`"));
         }
         text.parse::<i32>()
             .ok()

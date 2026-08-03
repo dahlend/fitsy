@@ -178,7 +178,7 @@ impl Wcs {
             )?;
             h.push(
                 format!("LATPOLE{suffix}"),
-                Value::Real(cb.rotation.theta_p),
+                Value::Real(cb.rotation.theta_p()),
                 Some("[deg] Celestial latitude of native pole"),
             )?;
             // Projection parameters ride on the latitude axis
@@ -690,9 +690,9 @@ fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
     let rah = ra_hours.trunc();
     let ram = ((ra_hours - rah) * 60.0).trunc();
     let ras = (ra_hours - rah - ram / 60.0) * 3600.0;
-    h.push("PLTRAH", Value::Real(rah), Some("[h] Plate centre RA"))?;
-    h.push("PLTRAM", Value::Real(ram), Some("[min] Plate centre RA"))?;
-    h.push("PLTRAS", Value::Real(ras), Some("[s] Plate centre RA"))?;
+    h.push("PLTRAH", Value::Real(rah), Some("[h] Plate center RA"))?;
+    h.push("PLTRAM", Value::Real(ram), Some("[min] Plate center RA"))?;
+    h.push("PLTRAS", Value::Real(ras), Some("[s] Plate center RA"))?;
 
     let sign = if dss.plate_dec < 0.0 { "-" } else { "+" };
     let ad = dss.plate_dec.abs();
@@ -702,22 +702,22 @@ fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
     h.push(
         "PLTDECSN",
         Value::String(sign.into()),
-        Some("Plate centre Dec sign"),
+        Some("Plate center Dec sign"),
     )?;
-    h.push("PLTDECD", Value::Real(dd), Some("[deg] Plate centre Dec"))?;
+    h.push("PLTDECD", Value::Real(dd), Some("[deg] Plate center Dec"))?;
     h.push(
         "PLTDECM",
         Value::Real(dm),
-        Some("[arcmin] Plate centre Dec"),
+        Some("[arcmin] Plate center Dec"),
     )?;
     h.push(
         "PLTDECS",
         Value::Real(ds),
-        Some("[arcsec] Plate centre Dec"),
+        Some("[arcsec] Plate center Dec"),
     )?;
 
-    h.push("PPO3", Value::Real(dss.ppo3), Some("[um] Plate centre x"))?;
-    h.push("PPO6", Value::Real(dss.ppo6), Some("[um] Plate centre y"))?;
+    h.push("PPO3", Value::Real(dss.ppo3), Some("[um] Plate center x"))?;
+    h.push("PPO6", Value::Real(dss.ppo6), Some("[um] Plate center y"))?;
     h.push(
         "XPIXELSZ",
         Value::Real(dss.xpixelsz),
@@ -851,6 +851,22 @@ mod tests {
     use crate::wcs::WcsFitOptions;
     use crate::wcs::fit_celestial_wcs;
 
+    /// Sky position of a celestial pixel, as `(lon, lat)`.
+    ///
+    /// The public API takes one pixel value per axis and returns one
+    /// world value per axis, both in axis order. This supplies the
+    /// celestial pair and holds every other axis at its reference
+    /// pixel, which is what these round-trip comparisons assume.
+    fn sky_at(wcs: &Wcs, px: f64, py: f64) -> (f64, f64) {
+        let (lon, lat) = wcs.celestial_axes().expect("celestial pair");
+        // `CRPIX` is 1-based and the API is 0-based, hence the shift.
+        let mut point: Vec<f64> = wcs.linear.crpix().iter().map(|c| c - 1.0).collect();
+        point[lon] = px;
+        point[lat] = py;
+        let w = wcs.pixel_to_world(&point).expect("pixel_to_world");
+        (w[lon], w[lat])
+    }
+
     fn build_truth(crpix: (f64, f64), crval: (f64, f64), cd: [f64; 4]) -> Wcs {
         // Round-trip through the fitter to obtain a Wcs we know
         // serializes cleanly. Use a tight grid so the fit is
@@ -893,8 +909,8 @@ mod tests {
         let header = truth.to_header(' ').unwrap();
         let round = Wcs::from_header(&header, ' ').unwrap().unwrap();
         for (a, b) in [(50.0, 50.0), (200.0, 100.0), (300.0, 600.0)] {
-            let (ra1, de1) = truth.pixel_to_celestial(a, b).unwrap();
-            let (ra2, de2) = round.pixel_to_celestial(a, b).unwrap();
+            let (ra1, de1) = sky_at(&truth, a, b);
+            let (ra2, de2) = sky_at(&round, a, b);
             assert!(
                 (ra1 - ra2).abs() < 1e-12,
                 "RA differs at ({a},{b}): {ra1} vs {ra2}"
@@ -1101,8 +1117,8 @@ mod tests {
             if ctype == "TNX" {
                 // Without WAT records a TNX CTYPE is just a TAN.
                 let undistorted = Wcs::from_header(&plain, ' ').unwrap().unwrap();
-                let (ra0, de0) = truth.pixel_to_celestial(100.0, 100.0).unwrap();
-                let (ra1, de1) = undistorted.pixel_to_celestial(100.0, 100.0).unwrap();
+                let (ra0, de0) = sky_at(&truth, 100.0, 100.0);
+                let (ra1, de1) = sky_at(&undistorted, 100.0, 100.0);
                 assert!(
                     (ra0 - ra1).abs() > 1e-6 || (de0 - de1).abs() > 1e-6,
                     "{ctype} fixture has no measurable distortion; the test cannot fail"
@@ -1118,8 +1134,8 @@ mod tests {
                 (900.0, 300.0),
                 (1000.0, 1000.0),
             ] {
-                let (ra1, de1) = truth.pixel_to_celestial(px, py).unwrap();
-                let (ra2, de2) = round.pixel_to_celestial(px, py).unwrap();
+                let (ra1, de1) = sky_at(&truth, px, py);
+                let (ra2, de2) = sky_at(&round, px, py);
                 assert!(
                     (ra1 - ra2).abs() < 1e-11 && (de1 - de2).abs() < 1e-11,
                     "{ctype} round-trip drifted at ({px},{py}): \
@@ -1145,7 +1161,7 @@ mod tests {
             for j in 0..8 {
                 let px = 10.0 + 22.0 * f64::from(i);
                 let py = 10.0 + 22.0 * f64::from(j);
-                let (ra, dec) = truth.pixel_to_celestial(px, py).unwrap();
+                let (ra, dec) = sky_at(&truth, px, py);
                 pixels.push((px, py));
                 sky.push((ra, dec));
             }
@@ -1159,8 +1175,8 @@ mod tests {
         let round = Wcs::from_header(&header, ' ').unwrap().unwrap();
         // Compare round-tripped vs fitted at every input pixel.
         for &(px, py) in &pixels {
-            let (ra1, de1) = fit.wcs.pixel_to_celestial(px, py).unwrap();
-            let (ra2, de2) = round.pixel_to_celestial(px, py).unwrap();
+            let (ra1, de1) = sky_at(&fit.wcs, px, py);
+            let (ra2, de2) = sky_at(&round, px, py);
             assert!((ra1 - ra2).abs() < 1e-10);
             assert!((de1 - de2).abs() < 1e-10);
         }

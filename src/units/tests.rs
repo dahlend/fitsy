@@ -45,7 +45,7 @@ fn exact_spellings_beat_prefix_splits() {
     );
 }
 
-/// The forms Sec.4.3 spells out for "per second" and "metres
+/// The forms Sec.4.3 spells out for "per second" and "meters
 /// squared" must all agree.
 #[test]
 fn every_spelling_of_a_power_agrees() {
@@ -57,7 +57,7 @@ fn every_spelling_of_a_power_agrees() {
     for s in ["m**-3", "m^(-3)", "/m3"] {
         assert!((scale(s) - per).abs() < 1e-12, "{s}");
     }
-    // Three-halves: parenthesised forms only.
+    // Three-halves: parenthesized forms only.
     for s in ["m(1.5)", "m^(1.5)", "m**(1.5)", "m(3/2)", "m**(3/2)"] {
         assert!(parse_unit(s).is_ok(), "{s} should parse");
     }
@@ -483,7 +483,7 @@ fn prefixes_and_multipliers_scale_a_levels_value() {
     assert_eq!(parse_unit("0.001mag").unwrap().to_string(), "mmag");
 }
 
-/// Regression: a multi-byte character inside a parenthesised exponent
+/// Regression: a multi-byte character inside a parenthesized exponent
 /// panicked on a char-boundary slice. Malformed input -- non-ASCII
 /// included -- is an error, never a panic.
 #[test]
