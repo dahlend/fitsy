@@ -1138,6 +1138,115 @@ fn tpv_matches_reference() {
     );
 }
 
+// -- Reference edge cases ---------------------------------------------------
+//
+// Moved here when `tests/wcs_integration.rs` was retired: that file had
+// drifted into a stale copy of this one, and this was the only coverage
+// it still held alone.
+
+/// Build a `Wcs` for one row of `wcs_edgecases.csv` (per-row CRVAL/CDELT,
+/// optional `PV2_1`/`PV2_2` and `LONPOLE`).
+fn wcs_for_edge_row(row: &HashMap<String, String>) -> fitsy::Wcs {
+    let code = &row["code"];
+    let mut cards = base_cards(
+        &format!("RA---{code}"),
+        &format!("DEC--{code}"),
+        f(row, "crpix1"),
+        f(row, "crpix2"),
+        f(row, "crval1"),
+        f(row, "crval2"),
+        f(row, "cdelt1"),
+        f(row, "cdelt2"),
+    );
+    for (col, kw) in [
+        ("pv2_1", "PV2_1"),
+        ("pv2_2", "PV2_2"),
+        ("lonpole", "LONPOLE"),
+    ] {
+        if let Some(v) = opt_f(row, col) {
+            cards.push(format!("{kw:<8}= {v:>20e}"));
+        }
+    }
+    open_image(&cards)
+}
+
+/// Reference values (see `gen_wcs_test_data.py`) in regions the standard grid never
+/// reaches: HPX polar zone (incl. defaulted H/K), XPH away from the pole,
+/// quad-cube faces 2-4, slant SIN (`PV2_1`/`PV2_2` != 0), and nonstandard
+/// `LONPOLE` (incl. the degenerate `delta_p` = +/-90 branch). Both directions
+/// are checked; forward/inverse bugs that cancel in round-trips fail here.
+#[test]
+fn edge_case_projections_match_reference() {
+    let path = test_data_dir().join("wcs_edgecases.csv");
+    let rows = parse_csv(&path);
+    assert!(!rows.is_empty(), "CSV is empty");
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut wcs_cache: HashMap<String, fitsy::Wcs> = HashMap::new();
+
+    for row in &rows {
+        let label = &row["label"];
+        let wcs = wcs_cache
+            .entry(label.clone())
+            .or_insert_with(|| wcs_for_edge_row(row));
+
+        let ra = f(row, "ra");
+        let dec = f(row, "dec");
+        // CSV pixels are 1-based FITS; the Wcs API is 0-based.
+        let x_expected = f(row, "x_fits") - 1.0;
+        let y_expected = f(row, "y_fits") - 1.0;
+        let tol_px = f(row, "tol_px").max(1e-7);
+        // Pixel-space tolerance converted to degrees on the sky.
+        let tol_deg = (tol_px * f(row, "cdelt2").abs()).max(1e-8);
+
+        match wcs.pixel_to_world(&[x_expected, y_expected]) {
+            Ok(w) => {
+                let dra =
+                    ((w[0] - ra + 540.0).rem_euclid(360.0) - 180.0).abs() * dec.to_radians().cos();
+                let ddec = (w[1] - dec).abs();
+                if dra > tol_deg || ddec > tol_deg {
+                    failures.push(format!(
+                        "{label}: pixel_to_world({x_expected},{y_expected}) = \
+                         ({:.10},{:.10}) expected ({ra:.10},{dec:.10})",
+                        w[0], w[1]
+                    ));
+                }
+            }
+            Err(e) => {
+                failures.push(format!(
+                    "{label}: pixel_to_world({x_expected},{y_expected}) failed: {e}"
+                ));
+            }
+        }
+
+        match wcs.world_to_pixel(&[ra, dec]) {
+            Ok(pix) => {
+                let ex = (pix[0] - x_expected).abs();
+                let ey = (pix[1] - y_expected).abs();
+                if ex > tol_px || ey > tol_px {
+                    failures.push(format!(
+                        "{label}: world_to_pixel({ra:.6},{dec:.6}) = ({:.10},{:.10}) \
+                         expected ({x_expected},{y_expected})",
+                        pix[0], pix[1]
+                    ));
+                }
+            }
+            Err(e) => {
+                failures.push(format!(
+                    "{label}: world_to_pixel({ra:.6},{dec:.6}) failed: {e}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} failure(s) in edge_case_projections_match_reference:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Non-standard convention tests
 // ---------------------------------------------------------------------------

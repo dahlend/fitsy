@@ -286,8 +286,8 @@ impl FitsUpdater {
             .clone();
         if T::BITPIX != meta.bitpix {
             return Err(FitsError::HduMismatch {
-                expected: bitpix_name(T::BITPIX),
-                found: bitpix_name(meta.bitpix).into(),
+                expected: T::BITPIX.rust_type_name(),
+                found: meta.bitpix.rust_type_name().into(),
             });
         }
         validate_subarray_shape(&meta.axes, start, shape)?;
@@ -433,15 +433,4 @@ fn pwrite_all(file: &File, mut off: u64, mut buf: &[u8]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn bitpix_name(b: Bitpix) -> &'static str {
-    match b {
-        Bitpix::U8 => "u8",
-        Bitpix::I16 => "i16",
-        Bitpix::I32 => "i32",
-        Bitpix::I64 => "i64",
-        Bitpix::F32 => "f32",
-        Bitpix::F64 => "f64",
-    }
 }

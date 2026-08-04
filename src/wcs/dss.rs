@@ -25,7 +25,7 @@
 //!
 //! 2. Plate position -> standard coordinates `(xi, eta)` in arcseconds
 //!    via the 13 positional terms of the plate polynomial
-//!    (see `amd_xi` / `amd_eta`).
+//!    (see `amd_triangle`).
 //!
 //! 3. Standard coordinates -> celestial coordinates by inverse
 //!    gnomonic projection from the plate center
@@ -45,15 +45,24 @@
 //! ## Validation
 //!
 //! No reference implementation of the plate model was available to
-//! compare against. The unit tests cover two things instead. First,
-//! they round-trip pixel to world and back to sub-millipixel
-//! precision. Second, they check that the plate center projects to the
-//! plate-center RA and Dec recovered from the `PLT` sexagesimal
-//! fields.
+//! compare against. The unit tests cover four things instead:
+//!
+//! - A round trip from pixel to world and back, to sub-millipixel
+//!   precision.
+//! - The plate center, which must project to the plate-center RA and
+//!   Dec recovered from the `PLT` sexagesimal fields.
+//! - The folded coefficient triangle, against the plate model written
+//!   out term by term. A round trip alone cannot catch an error here.
+//!   It closes on the wrong polynomial as readily as on the right
+//!   one.
+//! - A solve that does not converge, which must report an error
+//!   rather than return a point.
 
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
+use crate::wcs::newton;
+use crate::wcs::poly;
 
 /// Arcseconds per radian.
 const ARCSEC_PER_RAD: f64 = 180.0 * 3600.0 / std::f64::consts::PI;
@@ -160,8 +169,12 @@ impl Dss {
     #[must_use]
     pub fn pixel_to_world(&self, pix_x: f64, pix_y: f64) -> (f64, f64) {
         let (xmm, ymm) = self.pixel_to_plate(pix_x, pix_y);
-        let xi_arcsec = amd_xi(&self.amdx, xmm, ymm);
-        let eta_arcsec = amd_eta(&self.amdy, xmm, ymm);
+        // The eta solution is the xi solution with x and y exchanged
+        // (`AMDY` multiplies `y` where `AMDX` multiplies `x`), so one
+        // folded table serves both -- evaluated with its arguments
+        // swapped for eta. This is the same device `TpvAxis::xy` uses.
+        let xi_arcsec = amd_eval(&amd_triangle(&self.amdx), xmm, ymm);
+        let eta_arcsec = amd_eval(&amd_triangle(&self.amdy), ymm, xmm);
         let xi = xi_arcsec / ARCSEC_PER_RAD;
         let eta = eta_arcsec / ARCSEC_PER_RAD;
         let dec0 = self.plate_dec * RAD_PER_DEG;
@@ -220,85 +233,109 @@ impl Dss {
                 "DSS: linear plate matrix is singular".into(),
             ));
         }
-        let mut xmm = (e * (xi_target_arcsec - c) - b * (eta_target_arcsec - f)) / det;
-        let mut ymm = (a * (eta_target_arcsec - f) - d * (xi_target_arcsec - c)) / det;
-        // Newton iteration on the plate polynomial.
-        for _ in 0..32 {
-            let fx = amd_xi(&self.amdx, xmm, ymm) - xi_target_arcsec;
-            let fy = amd_eta(&self.amdy, xmm, ymm) - eta_target_arcsec;
-            if fx.abs() < 1e-9 && fy.abs() < 1e-9 {
-                break;
-            }
-            // Numerical Jacobian (the analytic version is messy).
-            let h = 1e-4_f64.max(1e-9 * (xmm.abs() + ymm.abs() + 1.0));
-            let jxx =
-                (amd_xi(&self.amdx, xmm + h, ymm) - amd_xi(&self.amdx, xmm - h, ymm)) / (2.0 * h);
-            let jxy =
-                (amd_xi(&self.amdx, xmm, ymm + h) - amd_xi(&self.amdx, xmm, ymm - h)) / (2.0 * h);
-            let jyx =
-                (amd_eta(&self.amdy, xmm + h, ymm) - amd_eta(&self.amdy, xmm - h, ymm)) / (2.0 * h);
-            let jyy =
-                (amd_eta(&self.amdy, xmm, ymm + h) - amd_eta(&self.amdy, xmm, ymm - h)) / (2.0 * h);
-            let jdet = jxx * jyy - jxy * jyx;
-            if jdet.abs() < 1e-30 {
-                return Err(FitsError::Wcs(
-                    "DSS: Jacobian singular during inverse iteration".into(),
-                ));
-            }
-            let dx = (jyy * fx - jxy * fy) / jdet;
-            let dy = (-jyx * fx + jxx * fy) / jdet;
-            xmm -= dx;
-            ymm -= dy;
-            if dx.abs() < 1e-12 && dy.abs() < 1e-12 {
-                break;
-            }
-        }
+        let guess = (
+            (e * (xi_target_arcsec - c) - b * (eta_target_arcsec - f)) / det,
+            (a * (eta_target_arcsec - f) - d * (xi_target_arcsec - c)) / det,
+        );
+        // Newton on the plate polynomial, with an exact Jacobian: the
+        // AMD terms fold into a triangle (see `amd_triangle`), so the
+        // derivatives come out of the same Horner pass as the value.
+        // Hoisted out of the loop -- the tables depend on the header,
+        // not on the iterate.
+        let tx = amd_triangle(&self.amdx);
+        let ty = amd_triangle(&self.amdy);
+        let (xmm, ymm) = newton::solve(
+            "DSS",
+            guess,
+            newton::residual_scale(xi_target_arcsec, eta_target_arcsec),
+            |xmm, ymm| {
+                let (fx, dxi_dx, dxi_dy) =
+                    poly::triangle_with_derivatives(AMD_DIM, |p, q| tx[p * AMD_DIM + q], xmm, ymm);
+                // eta reads its arguments swapped, so the derivatives
+                // come back swapped: the first is d/d(ymm).
+                let (fy, deta_dy, deta_dx) =
+                    poly::triangle_with_derivatives(AMD_DIM, |p, q| ty[p * AMD_DIM + q], ymm, xmm);
+                newton::Residual2 {
+                    rx: fx - xi_target_arcsec,
+                    ry: fy - eta_target_arcsec,
+                    j11: dxi_dx,
+                    j12: dxi_dy,
+                    j21: deta_dx,
+                    j22: deta_dy,
+                }
+            },
+        )?;
         let (px, py) = self.plate_to_pixel(xmm, ymm);
         Ok((px, py))
     }
 }
 
-/// DSS plate polynomial for xi (arcsec). `x`, `y` are plate position in
-/// mm relative to the plate center. Only the 13 positional terms are
-/// evaluated: AMDX14-AMDX20 are magnitude/color terms of the GSC
-/// astrometric solution (mag, mag^2, mag^3, mag*x, mag*(x^2+y^2),
-/// mag*x*(x^2+y^2), color) which are taken as zero for image astrometry,
-/// matching wcstools `dsspos.c` and the `STScI` getimage code.
-fn amd_xi(c: &[f64; 20], x: f64, y: f64) -> f64 {
-    let r2 = x * x + y * y;
-    c[0] * x
-        + c[1] * y
-        + c[2]
-        + c[3] * x * x
-        + c[4] * x * y
-        + c[5] * y * y
-        + c[6] * r2
-        + c[7] * x * x * x
-        + c[8] * x * x * y
-        + c[9] * x * y * y
-        + c[10] * y * y * y
-        + c[11] * x * r2
-        + c[12] * x * r2 * r2
+/// Number of degree levels in the plate polynomial, one more than the
+/// highest total degree.
+///
+/// The `AMDX13 * x * r^4` term reaches degree 5.
+const AMD_DIM: usize = 6;
+
+/// Fold the plate polynomial into a triangular coefficient table.
+///
+/// The table is indexed `[p * AMD_DIM + q]` for the term `x^p y^q`.
+/// The `c` argument holds the 20 `AMDX` or `AMDY` values.
+///
+/// The `r^2` factors in the 13 positional terms are even powers of
+/// `r`. Each one therefore expands into ordinary monomials:
+///
+/// ```text
+/// c6  * r^2     = c6 x^2 + c6 y^2
+/// c11 * x r^2   = c11 (x^3 + x y^2)
+/// c12 * x r^4   = c12 (x^5 + 2 x^3 y^2 + x y^4)
+/// ```
+///
+/// The plate model is therefore a bivariate polynomial of degree 5.
+/// [`poly::triangle`] evaluates it by Horner, and
+/// [`poly::triangle_with_derivatives`] differentiates it exactly.
+/// [`Dss::world_to_pixel`] can then use the shared Newton solver with
+/// an exact Jacobian.
+///
+/// The radial terms of [`Tpv`](crate::wcs::tpv::Tpv) are odd powers of
+/// `r`. Those are not polynomial, and that module carries them apart
+/// from its triangle.
+///
+/// This folds in the 13 positional terms alone. `AMDX14` to `AMDX20`
+/// hold the magnitude and color terms of the GSC astrometric solution:
+/// mag, mag^2, mag^3, mag*x, mag*(x^2+y^2), mag*x*(x^2+y^2) and color.
+/// Image astrometry takes them as zero.
+///
+/// This builds the table on each call rather than caching it, because
+/// [`Dss::amdx`] is a public field. A table resolved at construction
+/// would go stale when a caller assigns to that field. Callers hoist
+/// the call out of their loops.
+fn amd_triangle(c: &[f64; 20]) -> [f64; AMD_DIM * AMD_DIM] {
+    let mut t = [0.0_f64; AMD_DIM * AMD_DIM];
+    let mut add = |p: usize, q: usize, v: f64| t[p * AMD_DIM + q] += v;
+    // Constant and linear.
+    add(0, 0, c[2]);
+    add(1, 0, c[0]);
+    add(0, 1, c[1]);
+    // Quadratic, with `c6 r^2` split across x^2 and y^2.
+    add(2, 0, c[3] + c[6]);
+    add(1, 1, c[4]);
+    add(0, 2, c[5] + c[6]);
+    // Cubic, with `c11 x r^2` split across x^3 and x y^2.
+    add(3, 0, c[7] + c[11]);
+    add(2, 1, c[8]);
+    add(1, 2, c[9] + c[11]);
+    add(0, 3, c[10]);
+    // Quintic: `c12 x r^4 = c12 (x^5 + 2 x^3 y^2 + x y^4)`.
+    add(5, 0, c[12]);
+    add(3, 2, 2.0 * c[12]);
+    add(1, 4, c[12]);
+    t
 }
 
-/// DSS plate polynomial for eta (arcsec). Same 13 positional terms as
-/// [`amd_xi`] but with x and y swapped; AMDY14-AMDY20 are likewise
-/// magnitude/color terms and are not evaluated.
-fn amd_eta(c: &[f64; 20], x: f64, y: f64) -> f64 {
-    let r2 = x * x + y * y;
-    c[0] * y
-        + c[1] * x
-        + c[2]
-        + c[3] * y * y
-        + c[4] * y * x
-        + c[5] * x * x
-        + c[6] * r2
-        + c[7] * y * y * y
-        + c[8] * y * y * x
-        + c[9] * y * x * x
-        + c[10] * x * x * x
-        + c[11] * y * r2
-        + c[12] * y * r2 * r2
+/// Evaluate a folded plate polynomial at `(x, y)`, in arcsec.
+#[inline]
+fn amd_eval(t: &[f64; AMD_DIM * AMD_DIM], x: f64, y: f64) -> f64 {
+    poly::triangle(AMD_DIM, |p, q| t[p * AMD_DIM + q], x, y)
 }
 
 fn read_real(header: &Header, key: &str) -> Result<f64> {
@@ -345,6 +382,231 @@ fn read_plate_dec(header: &Header) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plate polynomial term by term, as the DSS documentation
+    /// writes it, with the `r^2` factors left unexpanded.
+    ///
+    /// This is the form [`amd_triangle`] replaced. It stays here as
+    /// the ground truth for that algebraic fold. A wrong expansion of
+    /// `c6 r^2`, `c11 x r^2` or `c12 x r^4` passes every other test in
+    /// the suite. A round trip closes on the wrong polynomial as
+    /// readily as on the right one.
+    fn amd_longhand(c: &[f64; 20], x: f64, y: f64) -> f64 {
+        let r2 = x * x + y * y;
+        c[0] * x
+            + c[1] * y
+            + c[2]
+            + c[3] * x * x
+            + c[4] * x * y
+            + c[5] * y * y
+            + c[6] * r2
+            + c[7] * x * x * x
+            + c[8] * x * x * y
+            + c[9] * x * y * y
+            + c[10] * y * y * y
+            + c[11] * x * r2
+            + c[12] * x * r2 * r2
+    }
+
+    /// The folded triangle must reproduce the term-by-term formula.
+    ///
+    /// The eta form must equal the xi form with its arguments
+    /// exchanged.
+    #[test]
+    fn amd_triangle_matches_longhand_formula() {
+        // Coefficients spanning several orders of magnitude, all 13
+        // positional terms non-zero so every fold is exercised.
+        let mut c = [0.0_f64; 20];
+        for (i, v) in [
+            67.0, 0.02, -0.3, 1e-5, -2e-6, 3e-6, 1e-6, 2e-8, -1e-8, 3e-9, 1e-9, -5e-9, 1e-11,
+        ]
+        .iter()
+        .enumerate()
+        {
+            c[i] = *v;
+        }
+        let t = amd_triangle(&c);
+        let mut worst = 0.0_f64;
+        let mut x = -80.0_f64;
+        while x <= 80.0 {
+            let mut y = -80.0_f64;
+            while y <= 80.0 {
+                let want = amd_longhand(&c, x, y);
+                let got = amd_eval(&t, x, y);
+                // Relative: the value runs to thousands of arcsec, so
+                // the rounding floor scales with it.
+                worst = worst.max((got - want).abs() / want.abs().max(1.0));
+                // The eta solution is the xi solution with x and y
+                // exchanged; `pixel_to_world` relies on this.
+                let want_eta = amd_longhand(&c, y, x);
+                let got_eta = amd_eval(&t, y, x);
+                worst = worst.max((got_eta - want_eta).abs() / want_eta.abs().max(1.0));
+                y += 7.0;
+            }
+            x += 7.0;
+        }
+        assert!(worst < 1e-13, "folded triangle diverged by {worst:.3e}");
+    }
+
+    /// A successful [`Dss::world_to_pixel`] must have converged.
+    ///
+    /// The hand-written Newton loop this replaced left its iteration
+    /// limit through a `break` and then returned `Ok` in every case. A
+    /// point that did not converge therefore came back as a wrong
+    /// answer with no error. The documentation named an error that the
+    /// code never constructed.
+    #[test]
+    fn world_to_pixel_never_returns_an_unconverged_point() {
+        let d = dss_fixture();
+        let mut checked = 0_usize;
+        // Includes points far off the plate, where the iteration is
+        // least likely to behave.
+        for px in [-5000.0_f64, -400.0, 0.0, 250.0, 4000.0, 50000.0] {
+            for py in [-5000.0_f64, -400.0, 0.0, 250.0, 4000.0, 50000.0] {
+                let (ra, dec) = d.pixel_to_world(px, py);
+                let Ok((bx, by)) = d.world_to_pixel(ra, dec) else {
+                    continue;
+                };
+                // The residual, not `|pixel - pixel|`: the plate
+                // polynomial is a quintic, so far off the plate it is
+                // not injective and a *different* preimage is still a
+                // correct answer. What an `Ok` must mean is that the
+                // point it returns maps back to the target.
+                let (gra, gdec) = d.pixel_to_world(bx, by);
+                let sep = {
+                    let dd = (gdec - dec) * RAD_PER_DEG;
+                    // RA wraps at 360 and converges near the poles.
+                    let dr = (gra - ra).rem_euclid(360.0);
+                    let dr = if dr > 180.0 { dr - 360.0 } else { dr };
+                    let dr = dr * RAD_PER_DEG * (dec * RAD_PER_DEG).cos();
+                    (dd * dd + dr * dr).sqrt() * ARCSEC_PER_RAD
+                };
+                assert!(
+                    sep < 1e-6,
+                    "world_to_pixel returned Ok at ({px}, {py}) but its \
+                     result maps back {sep:.3e} arcsec away -- \
+                     non-convergence must be reported as an error"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 20,
+            "only {checked} points solved; test is vacuous"
+        );
+    }
+
+    /// On the plate, the inverse recovers the same pixel.
+    ///
+    /// It must not return some other valid preimage.
+    #[test]
+    fn world_to_pixel_round_trips_on_plate() {
+        let d = dss_fixture();
+        let mut worst = 0.0_f64;
+        for px in [-400.0_f64, 0.0, 250.0, 1000.0, 4000.0] {
+            for py in [-400.0_f64, 0.0, 250.0, 1000.0, 4000.0] {
+                let (ra, dec) = d.pixel_to_world(px, py);
+                let (bx, by) = d.world_to_pixel(ra, dec).expect("on-plate point inverts");
+                worst = worst.max((bx - px).abs().max((by - py).abs()));
+            }
+        }
+        assert!(
+            worst < 1e-6,
+            "on-plate round trip off by {worst:.3e} pixels"
+        );
+    }
+
+    /// A plate solution with POSS-II style values.
+    fn dss_fixture() -> Dss {
+        let mut cards: Vec<String> = vec![
+            "PLTRAH  =                   12".into(),
+            "PLTRAM  =                   30".into(),
+            "PLTRAS  =                  0.0".into(),
+            "PLTDECSN= '+'".into(),
+            "PLTDECD =                   30".into(),
+            "PLTDECM =                    0".into(),
+            "PLTDECS =                  0.0".into(),
+            "PPO3    =         177500.0".into(),
+            "PPO6    =         177500.0".into(),
+            "XPIXELSZ=            25.284".into(),
+            "YPIXELSZ=            25.284".into(),
+            "CNPIX1  =              1000".into(),
+            "CNPIX2  =              1000".into(),
+        ];
+        let amdx = [
+            67.0, 0.02, -0.3, 1e-5, -2e-6, 3e-6, 1e-6, 2e-8, -1e-8, 3e-9, 1e-9, -5e-9, 1e-11,
+        ];
+        let amdy = [
+            67.0, -0.03, 0.25, -2e-5, 1e-6, -3e-6, 2e-6, -1e-8, 2e-8, -3e-9, 2e-9, 4e-9, -2e-11,
+        ];
+        for (i, v) in amdx.iter().enumerate() {
+            cards.push(format!("AMDX{:<4}= {v:>20.12e}", i + 1));
+        }
+        for (i, v) in amdy.iter().enumerate() {
+            cards.push(format!("AMDY{:<4}= {v:>20.12e}", i + 1));
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        for c in &cards {
+            buf.extend_from_slice(&pad_card(c));
+        }
+        buf.extend_from_slice(&pad_card("END"));
+        while !buf.len().is_multiple_of(2880) {
+            buf.push(b' ');
+        }
+        let (h, _) = Header::parse(&buf, 0).expect("header parses");
+        Dss::from_header(&h)
+            .expect("dss parses")
+            .expect("dss present")
+    }
+
+    /// A solve that does not converge must report an error.
+    ///
+    /// This pins the fix for the defect that
+    /// `world_to_pixel_never_returns_an_unconverged_point` describes.
+    ///
+    /// A plate whose quintic term dominates its linear term exposes
+    /// the case. The linear initial guess lands far from any root, and
+    /// the iteration does not recover within its step limit.
+    #[test]
+    fn non_convergence_is_reported() {
+        let mut d = dss_fixture();
+        d.amdx = [0.0; 20];
+        d.amdy = [0.0; 20];
+        // Linear term, then the degree-5 `x r^4` term.
+        d.amdx[0] = 1e-3;
+        d.amdy[0] = 1e-3;
+        d.amdx[12] = 1e-6;
+        d.amdy[12] = 1e-6;
+        let mut errs = 0_usize;
+        for px in [-5000.0_f64, -400.0, 0.0, 250.0, 4000.0] {
+            for py in [-5000.0_f64, -400.0, 0.0, 250.0, 4000.0] {
+                let (ra, dec) = d.pixel_to_world(px, py);
+                match d.world_to_pixel(ra, dec) {
+                    Err(FitsError::Wcs(msg)) => {
+                        assert!(
+                            msg.starts_with("DSS:"),
+                            "error should name the convention: {msg}"
+                        );
+                        errs += 1;
+                    }
+                    Err(e) => panic!("unexpected error kind at ({px}, {py}): {e}"),
+                    // Converging here is allowed; returning a point
+                    // that does not solve the system is not.
+                    Ok((bx, by)) => {
+                        let (gra, gdec) = d.pixel_to_world(bx, by);
+                        assert!(
+                            (gra - ra).abs() < 1e-6 && (gdec - dec).abs() < 1e-6,
+                            "Ok at ({px}, {py}) does not map back"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            errs > 0,
+            "fixture no longer diverges, so this no longer tests anything"
+        );
+    }
 
     fn pad_card(s: &str) -> [u8; 80] {
         let mut b = [b' '; 80];

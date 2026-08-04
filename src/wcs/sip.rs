@@ -39,6 +39,8 @@
 //! `p + q <= order` and adds it to the polynomial.
 
 use crate::error::{FitsError, Result};
+use crate::wcs::newton;
+use crate::wcs::poly;
 
 /// Highest polynomial order that this module accepts.
 pub const SIP_MAX_ORDER: u32 = 9;
@@ -102,67 +104,31 @@ impl SipPoly {
     /// Evaluate `Sigma c_{p,q} * u^p * v^q`.
     ///
     /// This uses Horner's scheme in both variables. Each row `p`
-    /// collapses over `v`, and the rows then collapse over `u`. The
-    /// cost is one multiply-add per coefficient. No power of `u` or `v`
-    /// is formed.
-    ///
-    /// The alternative is to tabulate the powers once and multiply out.
-    /// That table has to be sized for the largest order the convention
-    /// allows, so an order-2 polynomial pays for an order-9 one.
-    /// Skipping zero coefficients does not recover the difference. The
-    /// work tracks the declared order either way, and the branch costs
-    /// more than the multiply-add it avoids.
+    /// collapses over `v`, then the rows collapse over `u`. The cost
+    /// is one multiply-add per coefficient. No power of `u` or `v` is
+    /// formed.
     #[must_use]
     pub fn eval(&self, u: f64, v: f64) -> f64 {
         let n = self.dim();
-        let mut s = 0.0_f64;
-        // Rows from the top, so each step multiplies the accumulated
-        // higher-order rows by `u` before adding this one.
-        for p in (0..n).rev() {
-            let row = p * n;
-            // Row `p` runs to degree `order - p`: the triangle bound.
-            let qmax = n - 1 - p;
-            let mut r = self.coeffs[row + qmax];
-            for q in (0..qmax).rev() {
-                r = r * v + self.coeffs[row + q];
-            }
-            s = s * u + r;
-        }
-        s
+        poly::triangle(n, |p, q| self.coeffs[p * n + q], u, v)
     }
 
     /// Evaluate the polynomial and both partial derivatives, as
     /// `(value, d/du, d/dv)`.
     ///
-    /// Differentiating term by term is exact and costs one pass,
-    /// where a central difference costs four extra evaluations and
-    /// carries a step-size error.
+    /// The derivatives follow the Horner recurrence of
+    /// [`Self::eval`]. For a step `s <- s * z + c`, the derivative
+    /// satisfies `d <- d * z + s`, with `s` taken from before the
+    /// step.
     ///
-    /// This uses the Horner recurrence of [`Self::eval`] and carries
-    /// the derivative alongside it. For a Horner step `s <- s * x + c`,
-    /// the derivative satisfies `d <- d * x + s`, where `s` holds its
-    /// value from before the step. Applying that in `v` gives the
-    /// `d/dv` of each row. Applying it in `u` gives `d/du` over the
-    /// collapsed rows.
+    /// Differentiating term by term is exact and costs one pass. A
+    /// central difference costs four extra evaluations and carries a
+    /// step-size error. [`Sip::inverse`] needs the Jacobian once per
+    /// Newton step.
     #[must_use]
     pub fn eval_with_derivatives(&self, u: f64, v: f64) -> (f64, f64, f64) {
         let n = self.dim();
-        let (mut s, mut du, mut dv) = (0.0_f64, 0.0_f64, 0.0_f64);
-        for p in (0..n).rev() {
-            let row = p * n;
-            let qmax = n - 1 - p;
-            let mut r = self.coeffs[row + qmax];
-            let mut rd = 0.0_f64;
-            for q in (0..qmax).rev() {
-                rd = rd * v + r;
-                r = r * v + self.coeffs[row + q];
-            }
-            // `du` consumes the previous `s`, so it updates first.
-            du = du * u + s;
-            s = s * u + r;
-            dv = dv * u + rd;
-        }
-        (s, du, dv)
+        poly::triangle_with_derivatives(n, |p, q| self.coeffs[p * n + q], u, v)
     }
 }
 
@@ -286,57 +252,25 @@ impl Sip {
     /// iteration does not converge within its step limit.
     pub fn inverse(&self, up: f64, vp: f64) -> Result<(f64, f64)> {
         // Initial guess: AP/BP if available, else identity.
-        let (mut u, mut v) = if let (Some(ap), Some(bp)) = (&self.ap, &self.bp) {
+        let guess = if let (Some(ap), Some(bp)) = (&self.ap, &self.bp) {
             (up + ap.eval(up, vp), vp + bp.eval(up, vp))
         } else {
             (up, vp)
         };
-        // Newton iteration on F(u, v) = (u + A(u,v), v + B(u,v)) - (u', v') = 0.
-        //
-        // Tolerances scale with the coordinate magnitude. The residual
-        // `r = F(u,v) - (u',v')` is formed by subtracting two numbers of
-        // size ~|u'|,|v'|, so its smallest representable magnitude is the
-        // rounding floor ~eps*|coord|. A fixed absolute tolerance (the old
-        // 1e-13) is therefore unreachable once |coord| exceeds a few
-        // hundred pixels -- e.g. WISE frames evaluated past the array edge,
-        // where |u'|,|v'| ~ thousands give a floor ~5e-13. Newton finds the
-        // correct root but then spends all 32 iterations bouncing on
-        // rounding noise and spuriously reports non-convergence. A relative
-        // tolerance tracks that floor while staying far below any
-        // sub-pixel accuracy that matters (~1e-8 px even out at |coord|~1e3).
-        let scale = 1.0 + up.abs() + vp.abs();
-        let tol = 1e-11 * scale;
-        for _ in 0..32 {
-            // Residual and exact Jacobian of
-            // F(u,v) = (u + A(u,v), v + B(u,v)) in one pass; the
-            // identity part contributes the 1 on each diagonal.
+        // Newton on F(u, v) = (u + A(u,v), v + B(u,v)) - (u', v') = 0.
+        newton::solve("SIP", guess, newton::residual_scale(up, vp), |u, v| {
+            // Residual and exact Jacobian in one pass; the identity
+            // part of F contributes the 1 on each diagonal.
             let ((a, a_du, a_dv), (b, b_du, b_dv)) = self.eval_both_with_derivatives(u, v);
-            let rx = (u + a) - up;
-            let ry = (v + b) - vp;
-            if rx.abs() < tol && ry.abs() < tol {
-                return Ok((u, v));
+            newton::Residual2 {
+                rx: (u + a) - up,
+                ry: (v + b) - vp,
+                j11: 1.0 + a_du,
+                j12: a_dv,
+                j21: b_du,
+                j22: 1.0 + b_dv,
             }
-            let j11 = 1.0 + a_du;
-            let j12 = a_dv;
-            let j21 = b_du;
-            let j22 = 1.0 + b_dv;
-            let det = j11 * j22 - j12 * j21;
-            if det.abs() < 1e-15 {
-                return Err(FitsError::Wcs(
-                    "SIP: Jacobian singular during inverse iteration".into(),
-                ));
-            }
-            let du = (j22 * rx - j12 * ry) / det;
-            let dv = (-j21 * rx + j11 * ry) / det;
-            u -= du;
-            v -= dv;
-            if du.abs() < tol && dv.abs() < tol {
-                return Ok((u, v));
-            }
-        }
-        Err(FitsError::Wcs(
-            "SIP: inverse iteration did not converge".into(),
-        ))
+        })
     }
 }
 

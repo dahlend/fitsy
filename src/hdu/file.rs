@@ -759,7 +759,7 @@ impl FitsFile {
         if i == 0 {
             // Random Groups primary HDU (Standard Sec.6): NAXIS1 = 0,
             // NAXIS >= 2, GROUPS = T.
-            if is_random_groups(&header) {
+            if header.is_random_groups() {
                 return Ok(Hdu::RandomGroups(
                     crate::hdu::random_groups::RandomGroupsHdu::new(header, data)?,
                 ));
@@ -1308,7 +1308,7 @@ enum HduKind {
 
 fn hdu_kind(header: &Header, index: usize) -> HduKind {
     if index == 0 {
-        return if is_random_groups(header) {
+        return if header.is_random_groups() {
             HduKind::Other("RANDOM-GROUPS".into())
         } else {
             HduKind::Image
@@ -1354,20 +1354,6 @@ fn require_xtension(h: &Header) -> Result<()> {
             keyword: "XTENSION".into(),
         }),
     }
-}
-
-/// Detect a Random Groups primary HDU per Standard Sec.6:
-/// `NAXIS1 = 0`, `NAXIS >= 2`, and `GROUPS = T`.
-fn is_random_groups(h: &Header) -> bool {
-    let Ok(naxis) = h.naxis() else { return false };
-    if naxis < 2 {
-        return false;
-    }
-    let Ok(n1) = h.naxisn(1) else { return false };
-    if n1 != 0 {
-        return false;
-    }
-    matches!(h.first("GROUPS"), Some(Value::Logical(true)))
 }
 
 /// Read 2880-byte blocks from `cursor` until an `END` card appears,
@@ -1521,7 +1507,7 @@ pub(crate) fn data_section_size(h: &Header) -> Result<u64> {
         return Ok(0);
     }
 
-    let rg = is_random_groups(h);
+    let rg = h.is_random_groups();
     let start_axis = if rg { 2 } else { 1 };
     let mut prod: u64 = 1;
     for i in start_axis..=naxis {

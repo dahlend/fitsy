@@ -136,30 +136,6 @@ impl PyBinTable {
         self.header.lock().clone()
     }
 
-    /// Resolve a caller row index to an in-range `usize`.
-    ///
-    /// A negative `r` counts back from the end, as `table[-1]` does.
-    /// Every row accessor goes through this function, because
-    /// indexing a column `Vec` directly with an out-of-range value
-    /// panics, and a panic crosses into Python as a
-    /// `pyo3_runtime.PanicException` rather than an `IndexError`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PyIndexError`] if `r` is outside
-    /// `-n_rows .. n_rows`.
-    fn resolve_row(&self, r: isize) -> PyResult<usize> {
-        let n = self.n_rows as isize;
-        let idx = if r < 0 { r + n } else { r };
-        if idx < 0 || idx >= n {
-            return Err(PyIndexError::new_err(format!(
-                "row {r} out of range (n_rows = {})",
-                self.n_rows
-            )));
-        }
-        Ok(idx as usize)
-    }
-
     /// Reconstruct a `PyBinTable` from a builder snapshot. Columns
     /// are not re-decoded -- the table behaves as a raw byte blob
     /// (column accessors return KeyError).
@@ -172,6 +148,29 @@ impl PyBinTable {
             raw: bytes,
         }
     }
+}
+
+/// Resolve a caller row index to an in-range `usize`.
+///
+/// A negative `r` counts back from the end, as `table[-1]` does.
+///
+/// Every row accessor of both table types calls this. Indexing a
+/// column `Vec` with an out-of-range value panics, and a panic reaches
+/// Python as a `pyo3_runtime.PanicException` rather than an
+/// `IndexError`.
+///
+/// # Errors
+///
+/// [`PyIndexError`] when `r` falls outside `-n_rows .. n_rows`.
+fn resolve_row(n_rows: usize, r: isize) -> PyResult<usize> {
+    let n = n_rows as isize;
+    let idx = if r < 0 { r + n } else { r };
+    if idx < 0 || idx >= n {
+        return Err(PyIndexError::new_err(format!(
+            "row {r} out of range (n_rows = {n_rows})"
+        )));
+    }
+    Ok(idx as usize)
 }
 
 /// Mark a numpy array as read-only by clearing its `WRITEABLE` flag.
@@ -566,7 +565,7 @@ impl PyBinTable {
     /// A negative `r` counts back from the last row, as ``table[r]``
     /// does. ``table[r]`` and this method accept the same indices.
     fn row(&self, py: Python<'_>, r: isize) -> PyResult<Py<PyAny>> {
-        let r = self.resolve_row(r)?;
+        let r = resolve_row(self.n_rows, r)?;
         let dict = PyDict::new(py);
         for (i, name) in self.column_names.iter().enumerate() {
             let val: Py<PyAny> = match &self.columns[i] {
@@ -1060,30 +1059,6 @@ enum AsciiPyColumn {
 }
 
 impl PyAsciiTable {
-    /// Resolve a caller row index to an in-range `usize`.
-    ///
-    /// A negative `r` counts back from the end, as `table[-1]` does.
-    /// Every row accessor goes through this function, because
-    /// indexing a column `Vec` directly with an out-of-range value
-    /// panics, and a panic crosses into Python as a
-    /// `pyo3_runtime.PanicException` rather than an `IndexError`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PyIndexError`] if `r` is outside
-    /// `-n_rows .. n_rows`.
-    fn resolve_row(&self, r: isize) -> PyResult<usize> {
-        let n = self.n_rows as isize;
-        let idx = if r < 0 { r + n } else { r };
-        if idx < 0 || idx >= n {
-            return Err(PyIndexError::new_err(format!(
-                "row {r} out of range (n_rows = {})",
-                self.n_rows
-            )));
-        }
-        Ok(idx as usize)
-    }
-
     /// Decode every column of `t` eagerly into owned Python-ready
     /// data.
     ///
@@ -1097,40 +1072,39 @@ impl PyAsciiTable {
         let mut columns = Vec::with_capacity(t.columns().len());
         for col in t.columns() {
             column_names.push(col.name.clone());
-            // Probe: if all rows are Int/Float, use F64; else Str.
-            let mut all_numeric = true;
-            let mut numeric: Vec<f64> = Vec::with_capacity(n_rows);
-            let mut strings: Vec<String> = Vec::with_capacity(n_rows);
-            for r in 0..n_rows {
-                let cell = t.cell_value(r, col).into_py_result()?;
-                match cell {
-                    Some(AsciiCell::Int(i)) => numeric.push(i as f64),
-                    Some(AsciiCell::Float(f)) => numeric.push(f),
-                    Some(AsciiCell::Str(s)) => {
-                        all_numeric = false;
-                        strings.push(s);
-                    }
-                    None => numeric.push(f64::NAN),
-                }
-            }
-            if all_numeric {
-                columns.push(AsciiPyColumn::F64(numeric));
-            } else {
-                // We may not have collected strings for every row;
-                // re-walk to get a uniform list.
-                let mut all = Vec::with_capacity(n_rows);
-                for r in 0..n_rows {
-                    let cell = t.cell_value(r, col).into_py_result()?;
-                    all.push(match cell {
-                        Some(AsciiCell::Str(s)) => s,
-                        Some(AsciiCell::Int(i)) => i.to_string(),
-                        Some(AsciiCell::Float(f)) => f.to_string(),
-                        None => String::new(),
-                    });
-                }
-                columns.push(AsciiPyColumn::Str(all));
-            }
-            let _ = strings;
+            // Decode the column once. The variant depends on every
+            // row, because one `A`-format cell moves the whole column
+            // to `Str`. Keeping the decoded cells therefore costs less
+            // than a second walk to convert them.
+            let cells: Vec<Option<AsciiCell>> = (0..n_rows)
+                .map(|r| t.cell_value(r, col).into_py_result())
+                .collect::<PyResult<_>>()?;
+            // `Option<Vec<_>>` collects to `None` at the first `Str`,
+            // which is exactly the "not all numeric" test.
+            let numeric: Option<Vec<f64>> = cells
+                .iter()
+                .map(|cell| match cell {
+                    Some(AsciiCell::Int(i)) => Some(*i as f64),
+                    Some(AsciiCell::Float(f)) => Some(*f),
+                    // Sec.7.2.5: a TNULLn-matching cell is undefined.
+                    None => Some(f64::NAN),
+                    Some(AsciiCell::Str(_)) => None,
+                })
+                .collect();
+            columns.push(match numeric {
+                Some(v) => AsciiPyColumn::F64(v),
+                None => AsciiPyColumn::Str(
+                    cells
+                        .into_iter()
+                        .map(|cell| match cell {
+                            Some(AsciiCell::Str(s)) => s,
+                            Some(AsciiCell::Int(i)) => i.to_string(),
+                            Some(AsciiCell::Float(f)) => f.to_string(),
+                            None => String::new(),
+                        })
+                        .collect(),
+                ),
+            });
         }
         Ok(Self {
             header,
@@ -1256,7 +1230,7 @@ impl PyAsciiTable {
     /// A negative `r` counts back from the last row, as ``table[r]``
     /// does. ``table[r]`` and this method accept the same indices.
     fn row(&self, py: Python<'_>, r: isize) -> PyResult<Py<PyAny>> {
-        let r = self.resolve_row(r)?;
+        let r = resolve_row(self.n_rows, r)?;
         let dict = PyDict::new(py);
         for (i, name) in self.column_names.iter().enumerate() {
             let val: Py<PyAny> = match &self.columns[i] {

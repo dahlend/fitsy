@@ -49,6 +49,35 @@ impl Header {
         Ok(v as usize)
     }
 
+    /// Whether this header describes a Random Groups primary HDU
+    /// (Standard Sec.6).
+    ///
+    /// The standard requires all three of `NAXIS1 = 0`, `NAXIS >= 2`
+    /// and `GROUPS = T`. `GROUPS = T` alone is not sufficient. An
+    /// ordinary image that carries a stray `GROUPS` card would
+    /// otherwise read as Random Groups.
+    ///
+    /// This returns `false` rather than an error in two cases. The
+    /// first is a header that omits `NAXIS` or `NAXIS1`. The second is
+    /// a value that [`Header::naxis`] or [`Header::naxisn`] rejects. A
+    /// header that malformed does not describe Random Groups.
+    #[must_use]
+    pub fn is_random_groups(&self) -> bool {
+        let Ok(naxis) = self.naxis() else {
+            return false;
+        };
+        if naxis < 2 {
+            return false;
+        }
+        let Ok(n1) = self.naxisn(1) else {
+            return false;
+        };
+        if n1 != 0 {
+            return false;
+        }
+        matches!(self.first("GROUPS"), Some(Value::Logical(true)))
+    }
+
     /// `NAXISn` for `n` in the range 1 to `NAXIS`.
     ///
     /// # Errors

@@ -71,7 +71,9 @@ pub mod projections;
 pub(crate) mod wat;
 
 mod fit;
+mod newton;
 mod parse;
+mod poly;
 mod serialize;
 
 pub use celestial::{CelestialFrame, RadeSys};

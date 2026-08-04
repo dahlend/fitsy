@@ -88,6 +88,24 @@ impl Bitpix {
         }
     }
 
+    /// The Rust type this `BITPIX` decodes to, spelled as in the
+    /// source: `u8`, `i16`, `i32`, `i64`, `f32` or `f64`.
+    ///
+    /// A typed read or write uses this to name the expected type and
+    /// the found type in a
+    /// [`FitsError::TypeMismatch`](crate::FitsError::TypeMismatch).
+    #[must_use]
+    pub(crate) const fn rust_type_name(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+
     /// The value as it appears on the `BITPIX` card.
     #[must_use]
     pub const fn as_i64(self) -> i64 {

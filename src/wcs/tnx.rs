@@ -36,12 +36,18 @@
 //! ## Validation
 //!
 //! This module follows the IRAF specification. No reference
-//! implementation was available to compare against, so the unit tests
-//! cover two things: the polynomial, Chebyshev and Legendre
-//! evaluators against analytic ground truth, and end-to-end round
-//! trips from pixel to world and back.
+//! implementation was available to compare against. The unit tests
+//! cover three things instead:
+//!
+//! - The polynomial, Chebyshev and Legendre evaluators, against
+//!   analytic ground truth.
+//! - The derivatives of those evaluators, against the closed forms of
+//!   the same polynomials. A finite-difference check cannot separate a
+//!   wrong derivative from a shared error in the basis. This can.
+//! - End-to-end round trips from pixel to world and back.
 
 use crate::error::{FitsError, Result};
+use crate::wcs::newton;
 
 /// Surface basis function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +210,55 @@ impl TnxSurface {
         }
         sum
     }
+
+    /// Evaluate the surface and both partials, as
+    /// `(value, d/dxi, d/deta)`.
+    ///
+    /// The expansion is separable, `S = sum_k c_k B_i(xn) B_j(yn)`.
+    /// Each partial therefore differentiates one factor and leaves the
+    /// other unchanged. The normalization is affine and contributes a
+    /// constant factor `dxn/dxi = 2 / (xi_max - xi_min)`. The ordinary
+    /// polynomial basis reads raw coordinates, as [`Self::eval`]
+    /// describes, and so contributes a factor of 1.
+    ///
+    /// Differentiating term by term is exact and costs one pass. The
+    /// central difference this replaced cost four extra surface
+    /// evaluations per axis. It also carried a step-size error, which
+    /// bounded how closely the Newton inverse could converge.
+    #[must_use]
+    pub fn eval_with_derivatives(&self, xi: f64, eta: f64) -> (f64, f64, f64) {
+        let (xn, yn, dxn_dxi, dyn_deta) = if matches!(self.function, TnxFunction::Polynomial) {
+            (xi, eta, 1.0, 1.0)
+        } else {
+            (
+                (2.0 * xi - (self.xi_max + self.xi_min)) / (self.xi_max - self.xi_min),
+                (2.0 * eta - (self.eta_max + self.eta_min)) / (self.eta_max - self.eta_min),
+                2.0 / (self.xi_max - self.xi_min),
+                2.0 / (self.eta_max - self.eta_min),
+            )
+        };
+        let (bx, dbx) = basis_with_derivative(self.function, xn, self.ni as usize);
+        let (by, dby) = basis_with_derivative(self.function, yn, self.nj as usize);
+        let (mut sum, mut d_xi, mut d_eta) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut k = 0_usize;
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "nested (j, i) indices mirror the mathematical basis expansion"
+        )]
+        for j in 0..self.nj as usize {
+            for i in 0..self.ni as usize {
+                if !cross_includes(self.cross, i, j, self.ni as usize, self.nj as usize) {
+                    continue;
+                }
+                let c = self.coeffs[k];
+                sum += c * bx[i] * by[j];
+                d_xi += c * dbx[i] * by[j];
+                d_eta += c * bx[i] * dby[j];
+                k += 1;
+            }
+        }
+        (sum, d_xi * dxn_dxi, d_eta * dyn_deta)
+    }
 }
 
 fn expected_coeff_count(ni: u32, nj: u32, cross: TnxCrossTerm) -> usize {
@@ -226,6 +281,65 @@ fn cross_includes(cross: TnxCrossTerm, i: usize, j: usize, ni: usize, nj: usize)
         TnxCrossTerm::None => i == 0 || j == 0,
         TnxCrossTerm::Half => i + j < ni.max(nj),
     }
+}
+
+/// Basis vector and its derivative, `([B_k(x)], [dB_k/dx])`.
+///
+/// Each derivative comes from differentiating the three-term
+/// recurrence [`basis`] runs. It therefore reuses the values already
+/// computed, at one multiply-add per term:
+///
+/// ```text
+/// monomial:  b'[k]   = k * b[k-1]
+/// Chebyshev: b'[k+1] = 2 b[k] + 2x b'[k] - b'[k-1]
+/// Legendre:  b'[k+1] = ((2k+1)(b[k] + x b'[k]) - k b'[k-1]) / (k+1)
+/// ```
+///
+/// This uses the differentiated recurrence rather than a closed form.
+/// The closed forms carry removable singularities inside the range
+/// these surfaces cover. The Legendre form
+/// `(1 - x^2) P'_n = n (P_{n-1} - x P_n)` divides by zero at
+/// `x = +-1`, which is the edge of the normalization interval. The
+/// recurrence holds at every point of that interval.
+fn basis_with_derivative(f: TnxFunction, x: f64, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut b = vec![0.0; n];
+    let mut d = vec![0.0; n];
+    if n == 0 {
+        return (b, d);
+    }
+    // B_0 = 1 for every basis, so its derivative is 0.
+    b[0] = 1.0;
+    if n == 1 {
+        return (b, d);
+    }
+    match f {
+        TnxFunction::Polynomial => {
+            for k in 1..n {
+                // Both read the finished b[k-1]; d must use the value
+                // before this step overwrites nothing it depends on.
+                d[k] = (k as f64) * b[k - 1];
+                b[k] = b[k - 1] * x;
+            }
+        }
+        TnxFunction::Chebyshev => {
+            b[1] = x;
+            d[1] = 1.0;
+            for k in 2..n {
+                b[k] = 2.0 * x * b[k - 1] - b[k - 2];
+                d[k] = 2.0 * b[k - 1] + 2.0 * x * d[k - 1] - d[k - 2];
+            }
+        }
+        TnxFunction::Legendre => {
+            b[1] = x;
+            d[1] = 1.0;
+            for k in 1..n - 1 {
+                let kf = k as f64;
+                d[k + 1] = ((2.0 * kf + 1.0) * (b[k] + x * d[k]) - kf * d[k - 1]) / (kf + 1.0);
+                b[k + 1] = ((2.0 * kf + 1.0) * x * b[k] - kf * b[k - 1]) / (kf + 1.0);
+            }
+        }
+    }
+    (b, d)
 }
 
 /// Basis vector `[B_0(x), B_1(x), ..., B_{n-1}(x)]`.
@@ -317,45 +431,33 @@ impl Tnx {
     /// [`FitsError::Wcs`] when the Jacobian is singular, or when the
     /// iteration does not converge within its step limit.
     pub fn inverse(&self, xip: f64, etap: f64) -> Result<(f64, f64)> {
-        let (mut xi, mut eta) = (xip, etap);
-        // Tolerance scales with coordinate magnitude so the residual's
-        // rounding floor (~eps*|coord|) stays reachable for large
-        // |xi'|,|eta'|; see the SIP inverse for the failure mode.
-        let scale = 1.0 + xip.abs() + etap.abs();
-        let tol = 1e-11 * scale;
-        let h = 1e-6_f64.max(1e-9 * scale);
-        for _ in 0..32 {
-            let (fx, fy) = self.forward(xi, eta);
-            let rx = fx - xip;
-            let ry = fy - etap;
-            if rx.abs() < tol && ry.abs() < tol {
-                return Ok((xi, eta));
-            }
-            let (fxp, fyp) = self.forward(xi + h, eta);
-            let (fxm, fym) = self.forward(xi - h, eta);
-            let (fxe, fye) = self.forward(xi, eta + h);
-            let (fxq, fyq) = self.forward(xi, eta - h);
-            let j11 = (fxp - fxm) / (2.0 * h);
-            let j21 = (fyp - fym) / (2.0 * h);
-            let j12 = (fxe - fxq) / (2.0 * h);
-            let j22 = (fye - fyq) / (2.0 * h);
-            let det = j11 * j22 - j12 * j21;
-            if det.abs() < 1e-15 {
-                return Err(FitsError::Wcs(
-                    "TNX: Jacobian singular during inverse iteration".into(),
-                ));
-            }
-            let dxi = (j22 * rx - j12 * ry) / det;
-            let deta = (-j21 * rx + j11 * ry) / det;
-            xi -= dxi;
-            eta -= deta;
-            if dxi.abs() < tol && deta.abs() < tol {
-                return Ok((xi, eta));
-            }
-        }
-        Err(FitsError::Wcs(
-            "TNX: inverse iteration did not converge".into(),
-        ))
+        newton::solve(
+            "TNX",
+            (xip, etap),
+            newton::residual_scale(xip, etap),
+            |xi, eta| {
+                // Residual and exact Jacobian in one pass per surface.
+                // F(xi, eta) = (xi + lngcor, eta + latcor), so the
+                // identity part contributes the 1 on each diagonal --
+                // the same shape as the SIP inverse.
+                let (dxi, dxi_dxi, dxi_deta) = self
+                    .lngcor
+                    .as_ref()
+                    .map_or((0.0, 0.0, 0.0), |s| s.eval_with_derivatives(xi, eta));
+                let (deta, deta_dxi, deta_deta) = self
+                    .latcor
+                    .as_ref()
+                    .map_or((0.0, 0.0, 0.0), |s| s.eval_with_derivatives(xi, eta));
+                newton::Residual2 {
+                    rx: (xi + dxi) - xip,
+                    ry: (eta + deta) - etap,
+                    j11: 1.0 + dxi_dxi,
+                    j12: dxi_deta,
+                    j21: deta_dxi,
+                    j22: 1.0 + deta_deta,
+                }
+            },
+        )
     }
 }
 
@@ -373,6 +475,98 @@ fn extract_cor<'a>(wat: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a surface that holds a single unit coefficient.
+    ///
+    /// `eval` then returns one basis function of `x` alone, and the
+    /// derivative of that function is known in closed form. The
+    /// surface uses `ni = 4`, `nj = 1` and `xterms = 0`.
+    fn single_term(ft: u32, k: usize) -> TnxSurface {
+        let mut c = ["0."; 4];
+        c[k] = "1.";
+        TnxSurface::parse(&format!("{ft}. 4. 1. 0. -1. 1. -1. 1. {}", c.join(" ")))
+            .expect("single-term surface parses")
+    }
+
+    /// Check the three derivative recurrences against closed-form
+    /// ground truth.
+    ///
+    /// The closed forms are `T'_2 = 4x`, `T'_3 = 12x^2 - 3`,
+    /// `P'_2 = 3x`, `P'_3 = (15x^2 - 3)/2` and
+    /// `d(x^k)/dx = k x^(k-1)`.
+    ///
+    /// This module has no reference implementation, as the module docs
+    /// state. The derivatives are therefore pinned to the published
+    /// polynomials rather than to a finite difference. A
+    /// finite-difference check can agree with a wrong analytic form
+    /// when both share a mistake in the basis. This check cannot.
+    #[test]
+    fn derivative_recurrences_match_closed_form() {
+        for &x in &[-1.0_f64, -0.9, -0.4, 0.0, 0.3, 0.75, 1.0] {
+            let d = |ft: u32, k: usize| single_term(ft, k).eval_with_derivatives(x, 0.0).1;
+            // Chebyshev of the first kind.
+            assert!((d(1, 2) - 4.0 * x).abs() < 1e-14, "T'_2 at {x}");
+            assert!(
+                (d(1, 3) - (12.0 * x * x - 3.0)).abs() < 1e-14,
+                "T'_3 at {x}"
+            );
+            // Legendre.
+            assert!((d(2, 2) - 3.0 * x).abs() < 1e-14, "P'_2 at {x}");
+            assert!(
+                (d(2, 3) - (15.0 * x * x - 3.0) / 2.0).abs() < 1e-14,
+                "P'_3 at {x}"
+            );
+            // Ordinary monomials.
+            assert!((d(3, 2) - 2.0 * x).abs() < 1e-14, "d(x^2) at {x}");
+            assert!((d(3, 3) - 3.0 * x * x).abs() < 1e-14, "d(x^3) at {x}");
+        }
+    }
+
+    /// The fused pass must return what [`TnxSurface::eval`] returns,
+    /// bit for bit.
+    ///
+    /// The two share the basis recurrence and the summation order. An
+    /// inequality therefore means an operation moved, and the inverse
+    /// would converge to a different point.
+    #[test]
+    fn fused_value_matches_eval() {
+        for ft in [1_u32, 2, 3] {
+            for k in 0..4 {
+                let s = single_term(ft, k);
+                for &x in &[-0.9_f64, -0.25, 0.0, 0.5, 1.0] {
+                    for &y in &[-0.7_f64, 0.0, 0.4] {
+                        assert_eq!(
+                            s.eval_with_derivatives(x, y).0,
+                            s.eval(x, y),
+                            "ft={ft} k={k} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check the normalization chain rule.
+    ///
+    /// A Chebyshev surface on `[-2, 2]` has `dxn/dxi = 1/2`. Its
+    /// derivative in `xi` is therefore half the value the same
+    /// coefficients give on `[-1, 1]`. The monomial basis reads raw
+    /// coordinates, so it must not scale.
+    #[test]
+    fn normalization_chain_rule_is_applied() {
+        let wide = |ft: u32| {
+            TnxSurface::parse(&format!("{ft}. 4. 1. 0. -2. 2. -2. 2. 0. 0. 1. 0.")).expect("parses")
+        };
+        // Chebyshev T_2 on [-2, 2]: xn = xi/2, so d/dxi = 4*xn * (1/2).
+        let (_, dx, _) = wide(1).eval_with_derivatives(1.0, 0.0);
+        assert!(
+            (dx - 4.0 * 0.5 * 0.5).abs() < 1e-14,
+            "chebyshev scaling: {dx}"
+        );
+        // Monomial x^2 ignores the interval: d/dxi = 2*xi = 2.
+        let (_, dxp, _) = wide(3).eval_with_derivatives(1.0, 0.0);
+        assert!((dxp - 2.0).abs() < 1e-14, "monomial must not scale: {dxp}");
+    }
 
     #[test]
     fn polynomial_basis_matches_monomials() {

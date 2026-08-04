@@ -185,14 +185,72 @@ enum HduSlot {
     Materialized(Py<PyAny>),
 }
 
-/// Mirror of [`HduSlot`] used as a snapshot inside
-/// [`PyFitsFile::writeto`] (and the rewrite path) so the slot list
-/// can be classified and re-framed without holding the state lock
-/// across Python-callback work.
+/// Mirror of [`HduSlot`], taken as a snapshot by both write paths.
+///
+/// Those paths are [`PyFitsFile::writeto`] and the in-place rewrite
+/// behind [`PyFitsFile::flush`]. A snapshot lets each one classify and
+/// re-frame the slot list without holding the state lock across a
+/// Python callback.
 #[derive(Debug)]
 enum WritetoSlot {
     Pending(usize),
     Materialized(Py<PyAny>),
+}
+
+/// Create a sibling temp file next to `target`, opened
+/// `O_CREAT|O_EXCL`.
+///
+/// The name is `<basename>.fitsy-tmp.<pid>.<nanos>`. The `caller`
+/// argument names the Python method in the error message.
+///
+/// The unpredictable suffix avoids the race a fixed
+/// `<path>.fitsy-tmp` name carries. Under a fixed name, an attacker or
+/// a stale file from a killed process can create the path first. The
+/// call then fails, or follows a symlink. `O_EXCL` turns a collision
+/// into a retry rather than an overwrite, and a lost race draws a
+/// fresh timestamp. Sixteen attempts cover nanosecond granularity.
+///
+/// # Errors
+///
+/// The last [`std::io::Error`], mapped through
+/// [`err_to_py`](super::err_to_py), when every attempt fails. The
+/// usual cause is a parent directory that is missing or not
+/// writable.
+fn create_sibling_temp(
+    target: &std::path::Path,
+    caller: &str,
+) -> PyResult<(PathBuf, std::fs::File)> {
+    use std::fs::OpenOptions;
+
+    let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let basename = target.file_name().map_or_else(
+        || std::ffi::OsString::from("fitsy-out"),
+        std::ffi::OsStr::to_os_string,
+    );
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..16 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let pid = std::process::id();
+        let mut name = basename.clone();
+        name.push(format!(".fitsy-tmp.{pid}.{nanos:08x}"));
+        let candidate = parent.join(&name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => return Ok((candidate, f)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(super::err_to_py(crate::error::FitsError::Io(
+        last_err.unwrap_or_else(|| {
+            std::io::Error::other(format!("{caller}: could not create temp file"))
+        }),
+    )))
 }
 
 /// Internal mutable state shared between threads. Holding `file`
@@ -388,15 +446,9 @@ impl PyFitsFile {
         let header = file.parsed_header(file_idx).into_py_result()?;
         // Detect plain-image kind without reading data.
         let is_image = if file_idx == 0 {
-            // Primary: image unless it's random-groups
-            // (NAXIS1==0, NAXIS>=2, GROUPS=T).
-            let naxis = header.naxis().unwrap_or(0);
-            let naxis1 = header.first("NAXIS1").and_then(|v| match v {
-                Value::Integer(i) => Some(*i),
-                _ => None,
-            });
-            let groups = matches!(header.first("GROUPS"), Some(Value::Logical(true)));
-            !(naxis1 == Some(0) && naxis >= 2 && groups)
+            // Primary: an image unless it is random-groups (Sec.6).
+            // This is the predicate the core reader dispatches on.
+            !header.is_random_groups()
         } else {
             matches!(
                 header.first("XTENSION"),
@@ -503,26 +555,31 @@ impl PyFitsFile {
     /// slot cannot be encoded (see [`encode_hdu`]). Returns the
     /// Python exception mapped from `fitsy.FitsError` on an I/O
     /// failure or an encoding error from the core crate.
+    /// Snapshot the slot list into owned [`WritetoSlot`] values.
+    ///
+    /// This holds the state lock for the copy alone. The caller
+    /// encodes after the lock is released. Encoding a materialized
+    /// slot calls back into Python. Holding the lock across that call
+    /// can deadlock against another thread that touches this file.
+    fn snapshot_slots(&self, py: Python<'_>) -> Vec<WritetoSlot> {
+        let st = self.lock_state();
+        st.slots
+            .iter()
+            .map(|s| match s {
+                HduSlot::Pending(i) => WritetoSlot::Pending(*i),
+                HduSlot::Materialized(p) => WritetoSlot::Materialized(p.clone_ref(py)),
+            })
+            .collect()
+    }
+
     fn persist_full_rewrite(&self, py: Python<'_>) -> PyResult<()> {
-        use std::fs::OpenOptions;
         use std::io::{BufWriter, Write};
-        enum SlotKind {
-            Pending(usize),
-            Materialized(Py<PyAny>),
-        }
 
         let original_path = self.original_path.clone().ok_or_else(|| {
             PyValueError::new_err(
                 "FitsFile.flush: cannot rewrite an in-memory file; use writeto(path)",
             )
         })?;
-        let parent = original_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let basename = original_path.file_name().map_or_else(
-            || std::ffi::OsString::from("fitsy-out"),
-            std::ffi::OsStr::to_os_string,
-        );
 
         // Make sure any in-flight `pwrite` patches are durable
         // before we start reading the source bytes.
@@ -536,53 +593,14 @@ impl PyFitsFile {
         // Snapshot slot states under the lock; release the lock
         // before doing the actual encoding (which may need to call
         // back into Python).
-        let snapshot: Vec<SlotKind> = {
-            let st = self.lock_state();
-            st.slots
-                .iter()
-                .map(|s| match s {
-                    HduSlot::Pending(i) => SlotKind::Pending(*i),
-                    HduSlot::Materialized(p) => SlotKind::Materialized(p.clone_ref(py)),
-                })
-                .collect()
-        };
+        let snapshot = self.snapshot_slots(py);
         if snapshot.is_empty() {
             return Err(PyValueError::new_err(
                 "FitsFile.flush: refusing to rewrite a file with zero HDUs",
             ));
         }
 
-        // Open a sibling temp file with O_CREAT|O_EXCL.
-        let (tmp_path, tmp_file) = {
-            let mut chosen: Option<(PathBuf, std::fs::File)> = None;
-            let mut last_err: Option<std::io::Error> = None;
-            for _ in 0..16 {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let nanos = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |d| d.subsec_nanos());
-                let pid = std::process::id();
-                let mut name = basename.clone();
-                name.push(format!(".fitsy-tmp.{pid}.{nanos:08x}"));
-                let candidate = parent.join(&name);
-                match OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&candidate)
-                {
-                    Ok(f) => {
-                        chosen = Some((candidate, f));
-                        break;
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            chosen.ok_or_else(|| {
-                super::err_to_py(crate::error::FitsError::Io(last_err.unwrap_or_else(|| {
-                    std::io::Error::other("FitsFile.flush: could not create temp file")
-                })))
-            })?
-        };
+        let (tmp_path, tmp_file) = create_sibling_temp(&original_path, "FitsFile.flush")?;
 
         let write_result: PyResult<()> = (|| {
             let mut bw = BufWriter::new(tmp_file);
@@ -602,11 +620,11 @@ impl PyFitsFile {
             let mut snapshot = snapshot;
             let stamping = self.stamp_checksums.load(Ordering::Relaxed);
             for (dst_idx, slot) in snapshot.iter_mut().enumerate() {
-                if let SlotKind::Pending(file_idx) = slot {
+                if let WritetoSlot::Pending(file_idx) = slot {
                     let needs_reframe = (*file_idx == 0) ^ (dst_idx == 0);
                     if needs_reframe || stamping {
                         let materialized = self.materialize_at(py, dst_idx)?;
-                        *slot = SlotKind::Materialized(materialized);
+                        *slot = WritetoSlot::Materialized(materialized);
                     }
                 }
             }
@@ -620,7 +638,7 @@ impl PyFitsFile {
             // (BinTable / AsciiTable can't be a primary).
             let needs_synth_primary = matches!(
                 snapshot.first(),
-                Some(SlotKind::Materialized(p)) if !is_image_like(py, p)
+                Some(WritetoSlot::Materialized(p)) if !is_image_like(py, p)
             );
             if needs_synth_primary {
                 let (h, d) = empty_primary_header_and_bytes();
@@ -629,7 +647,7 @@ impl PyFitsFile {
             }
             for slot in &snapshot {
                 match slot {
-                    SlotKind::Pending(file_idx) => {
+                    WritetoSlot::Pending(file_idx) => {
                         let st = self.lock_state();
                         let file = st.file.as_ref().ok_or_else(|| {
                             PyValueError::new_err(
@@ -651,7 +669,7 @@ impl PyFitsFile {
                             .map_err(|e| super::err_to_py(crate::error::FitsError::Io(e)))?;
                         emitted_primary = true;
                     }
-                    SlotKind::Materialized(p) => {
+                    WritetoSlot::Materialized(p) => {
                         let is_primary = !emitted_primary;
                         let (header, data) = encode_hdu(py, p, is_primary)?;
                         writer.write_hdu(&header, &data).into_py_result()?;
@@ -1169,7 +1187,6 @@ impl PyFitsFile {
     #[pyo3(signature = (path, overwrite=false))]
     fn writeto(&self, py: Python<'_>, path: PathBuf, overwrite: bool) -> PyResult<()> {
         use pyo3::exceptions::PyFileExistsError;
-        use std::fs::{File, OpenOptions};
         use std::io::BufWriter;
         // Writing back over our own backing file is allowed only via
         // `flush()`'s drop+rewrite+reopen path, because doing so
@@ -1208,45 +1225,7 @@ impl PyFitsFile {
                 path.display(),
             )));
         }
-        // Sibling temp file with O_CREAT|O_EXCL + unpredictable
-        // suffix. Avoids the predictable `<path>.fitsy-tmp` race
-        // where an attacker (or a stale leftover) could pre-create
-        // the path and have us either fail or follow a symlink.
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let basename = path.file_name().map_or_else(
-            || std::ffi::OsString::from("fitsy-out"),
-            std::ffi::OsStr::to_os_string,
-        );
-        let (tmp, tmp_file) = {
-            let mut last_err: Option<std::io::Error> = None;
-            let mut chosen: Option<(PathBuf, File)> = None;
-            for _ in 0..16 {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let nanos = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |d| d.subsec_nanos());
-                let pid = std::process::id();
-                let mut name = basename.clone();
-                name.push(format!(".fitsy-tmp.{pid}.{nanos:08x}"));
-                let candidate = parent.join(&name);
-                match OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&candidate)
-                {
-                    Ok(f) => {
-                        chosen = Some((candidate, f));
-                        break;
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            chosen.ok_or_else(|| {
-                super::err_to_py(crate::error::FitsError::Io(last_err.unwrap_or_else(|| {
-                    std::io::Error::other("FitsFile.writeto: could not create temp file")
-                })))
-            })?
-        };
+        let (tmp, tmp_file) = create_sibling_temp(&path, "FitsFile.writeto")?;
         let write_result: PyResult<()> = (|| {
             let mut w = crate::FitsWriter::new(BufWriter::new(tmp_file));
             if self.stamp_checksums.load(Ordering::Relaxed) {
@@ -1259,16 +1238,7 @@ impl PyFitsFile {
             // `hdu_raw_padded`; everything else falls back to
             // materialize + re-encode. This keeps writeto() at
             // O(materialized + raw bytes) RSS instead of O(file).
-            let snapshot: Vec<WritetoSlot> = {
-                let st = self.lock_state();
-                st.slots
-                    .iter()
-                    .map(|s| match s {
-                        HduSlot::Pending(i) => WritetoSlot::Pending(*i),
-                        HduSlot::Materialized(p) => WritetoSlot::Materialized(p.clone_ref(py)),
-                    })
-                    .collect()
-            };
+            let snapshot = self.snapshot_slots(py);
             if snapshot.is_empty() {
                 return Err(PyValueError::new_err(
                     "FitsFile.writeto: refusing to write a file with zero HDUs",
@@ -1383,14 +1353,7 @@ impl PyFitsFile {
 
                 if let Ok(img) = bound.cast::<PyImageHdu>() {
                     let img = img.borrow();
-                    let dtype = match img.bitpix {
-                        crate::data::Bitpix::U8 => "uint8",
-                        crate::data::Bitpix::I16 => "int16",
-                        crate::data::Bitpix::I32 => "int32",
-                        crate::data::Bitpix::I64 => "int64",
-                        crate::data::Bitpix::F32 => "float32",
-                        crate::data::Bitpix::F64 => "float64",
-                    };
+                    let dtype = crate::python::hdu::bitpix_numpy_dtype(img.bitpix);
                     let details = {
                         // Use the cached `axes` snapshot so the
                         // info table never triggers a lazy data

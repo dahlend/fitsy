@@ -376,7 +376,7 @@ fn freeze_array(py: Python<'_>, arr: &Py<PyAny>) -> PyResult<()> {
     Ok(())
 }
 
-fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
+pub(super) fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
     match b {
         Bitpix::U8 => "uint8",
         Bitpix::I16 => "int16",

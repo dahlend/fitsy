@@ -232,16 +232,7 @@ impl Header {
         // Resolve CONTINUE long-string concatenation (Sec.4.2.1.2).
         merge_continuations(&mut cards, &continuations);
 
-        // Build index.
-        let mut index = BTreeMap::new();
-        for (i, e) in cards.iter().enumerate() {
-            if !e.keyword.is_empty()
-                && !matches!(e.kind, CardKind::Commentary)
-                && !index.contains_key(&e.keyword)
-            {
-                index.insert(e.keyword.clone(), i);
-            }
-        }
+        let index = build_index(&cards);
 
         let blocks = block_idx;
         let consumed = (blocks * BLOCK_SIZE) as u64;
@@ -349,15 +340,7 @@ impl Header {
     /// Internal constructor used by the builder API in
     /// [`crate::header::builder`].
     pub(crate) fn from_parts(cards: Vec<HeaderEntry>, blocks: usize) -> Self {
-        let mut index = BTreeMap::new();
-        for (i, e) in cards.iter().enumerate() {
-            if !e.keyword.is_empty()
-                && !matches!(e.kind, CardKind::Commentary)
-                && !index.contains_key(&e.keyword)
-            {
-                index.insert(e.keyword.clone(), i);
-            }
-        }
+        let index = build_index(&cards);
         Self {
             cards,
             blocks,
@@ -456,6 +439,26 @@ impl Header {
             self.append_entry(entry.clone());
         }
     }
+}
+
+/// Map each keyword to the position of its first value card.
+///
+/// This skips a commentary card, meaning `COMMENT`, `HISTORY` or a
+/// blank keyword. Those repeat by design, so an index entry would name
+/// a keyword that no single value can answer. A repeated value keyword
+/// keeps its first occurrence, which is the card [`Header::first`]
+/// returns.
+fn build_index(cards: &[HeaderEntry]) -> BTreeMap<String, usize> {
+    let mut index = BTreeMap::new();
+    for (i, e) in cards.iter().enumerate() {
+        if !e.keyword.is_empty()
+            && !matches!(e.kind, CardKind::Commentary)
+            && !index.contains_key(&e.keyword)
+        {
+            index.insert(e.keyword.clone(), i);
+        }
+    }
+    index
 }
 
 fn is_structural_keyword(kw: &str) -> bool {

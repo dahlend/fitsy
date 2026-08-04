@@ -255,13 +255,9 @@ fn describe_header(h: &Header, index: usize) -> (&'static str, String) {
 
     let xtension = string_card(h, "XTENSION").unwrap_or_default();
     if index == 0 {
-        // Same test the reader uses (Sec.6): GROUPS = T alone is not
-        // enough, or an ordinary image with a stray card would be
-        // reported as random groups.
-        let random_groups = matches!(h.first("GROUPS"), Some(Value::Logical(true)))
-            && int("NAXIS").is_some_and(|n| n >= 2)
-            && int("NAXIS1") == Some(0);
-        if random_groups {
+        // The same predicate the reader dispatches on (Sec.6). The
+        // summary therefore matches the HDU kind the reader parses.
+        if h.is_random_groups() {
             return (
                 "RandomGrp",
                 format!(

@@ -287,7 +287,7 @@ def test_wcs_parity(name):
             # and discards the PV distortion terms, so the reference
             # holds the linear-only sky position. fitsy *does* apply
             # TPV, so the two legitimately diverge by the distortion
-            # magnitude. `tests/wcs_integration.rs::tpv_matches_reference`
+            # magnitude. `tests/wcs.rs::tpv_matches_reference`
             # covers TPV properly.
             f_ctype = [str(fhdu.header.get(f"CTYPE{n}", "")) for n in (1, 2)]
             if any("TPV" in c for c in f_ctype) and not any(

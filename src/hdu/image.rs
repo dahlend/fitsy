@@ -166,8 +166,8 @@ impl<'a> ImageHdu<'a> {
     pub fn read_raw<T: Pixel>(&self) -> Result<ImageData<T>> {
         if T::BITPIX != self.bitpix {
             return Err(FitsError::HduMismatch {
-                expected: bitpix_name(T::BITPIX),
-                found: bitpix_name(self.bitpix).into(),
+                expected: T::BITPIX.rust_type_name(),
+                found: self.bitpix.rust_type_name().into(),
             });
         }
         let bsize = self.bitpix.byte_size();
@@ -368,8 +368,8 @@ impl<'a> ImageHdu<'a> {
 
         if T::BITPIX != self.bitpix {
             return Err(FitsError::HduMismatch {
-                expected: bitpix_name(T::BITPIX),
-                found: bitpix_name(self.bitpix).into(),
+                expected: T::BITPIX.rust_type_name(),
+                found: self.bitpix.rust_type_name().into(),
             });
         }
         validate_subarray_shape(&self.axes, start, shape)?;
@@ -422,17 +422,6 @@ impl<'a> ImageHdu<'a> {
     /// parser rejects, such as an unknown projection code.
     pub fn wcs(&self, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         crate::wcs::Wcs::from_header(&self.header, alt)
-    }
-}
-
-fn bitpix_name(b: Bitpix) -> &'static str {
-    match b {
-        Bitpix::U8 => "u8",
-        Bitpix::I16 => "i16",
-        Bitpix::I32 => "i32",
-        Bitpix::I64 => "i64",
-        Bitpix::F32 => "f32",
-        Bitpix::F64 => "f64",
     }
 }
 

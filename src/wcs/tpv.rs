@@ -23,6 +23,8 @@
 //! Reference: <https://fits.gsfc.nasa.gov/registry/tpvwcs/tpv.html>
 
 use crate::error::{FitsError, Result};
+use crate::wcs::newton;
+use crate::wcs::poly;
 
 /// Number of TPV polynomial coefficients per axis. PV0 through PV39
 /// (PV38 corresponds to `r^7` and PV39 to `xi*eta^7` per the registry's
@@ -104,11 +106,7 @@ impl TpvAxis {
     /// registry.
     #[inline]
     fn xy(&self, xi: f64, eta: f64) -> (f64, f64) {
-        if self.axis == 1 {
-            (xi, eta)
-        } else {
-            (eta, xi)
-        }
+        if self.axis == 1 { (xi, eta) } else { (eta, xi) }
     }
 
     /// Highest total degree carrying a non-zero coefficient.
@@ -189,51 +187,30 @@ impl TpvAxis {
     pub fn eval(&self, xi: f64, eta: f64) -> f64 {
         let (x, y) = self.xy(xi, eta);
         let c = &self.coeffs;
-        let deg = self.top_degree();
-        let mut s = 0.0_f64;
-        for p in (0..=deg).rev() {
-            // Row `p` runs to degree `deg - p`: the triangle bound.
-            let qmax = deg - p;
-            let mut r = c[XY_INDEX[p][qmax]];
-            for q in (0..qmax).rev() {
-                r = r * y + c[XY_INDEX[p][q]];
-            }
-            s = s * x + r;
-        }
+        let s = poly::triangle(self.top_degree() + 1, |p, q| c[XY_INDEX[p][q]], x, y);
         s + self.radial(x, y)
     }
 
     /// Evaluate the polynomial and both partial derivatives, as
     /// `(value, d/d xi, d/d eta)`.
     ///
-    /// The derivatives ride the Horner recurrence of [`Self::eval`]:
-    /// for a step `s <- s * z + c`, the derivative satisfies
-    /// `d <- d * z + s` with `s` taken from before the step. This is
-    /// the scheme `SipPoly::eval_with_derivatives` uses.
+    /// The derivatives follow the Horner recurrence of
+    /// [`Self::eval`]. For a step `s <- s * z + c`, the derivative
+    /// satisfies `d <- d * z + s`, with `s` taken from before the
+    /// step. This adds the radial terms on top. Those are odd powers
+    /// of `r = sqrt(x^2 + y^2)`, so they are not part of the
+    /// polynomial triangle.
     ///
-    /// [`Tpv::inverse`] needs the Jacobian once per Newton step. Taking
-    /// it in closed form is exact and costs this one pass, where the
-    /// central difference it replaced cost four extra evaluations and
-    /// carried a step-size error.
+    /// [`Tpv::inverse`] needs the Jacobian once per Newton step. The
+    /// closed form is exact and costs this one pass. The central
+    /// difference it replaced cost four extra evaluations and carried
+    /// a step-size error.
     #[must_use]
     pub fn eval_with_derivatives(&self, xi: f64, eta: f64) -> (f64, f64, f64) {
         let (x, y) = self.xy(xi, eta);
         let c = &self.coeffs;
-        let deg = self.top_degree();
-        let (mut s, mut dx, mut dy) = (0.0_f64, 0.0_f64, 0.0_f64);
-        for p in (0..=deg).rev() {
-            let qmax = deg - p;
-            let mut r = c[XY_INDEX[p][qmax]];
-            let mut rd = 0.0_f64;
-            for q in (0..qmax).rev() {
-                rd = rd * y + r;
-                r = r * y + c[XY_INDEX[p][q]];
-            }
-            // `dx` consumes the previous `s`, so it updates first.
-            dx = dx * x + s;
-            s = s * x + r;
-            dy = dy * x + rd;
-        }
+        let (s, dx, dy) =
+            poly::triangle_with_derivatives(self.top_degree() + 1, |p, q| c[XY_INDEX[p][q]], x, y);
         let (rv, rdx, rdy) = self.radial_with_gradient(x, y);
         let (value, dx, dy) = (s + rv, dx + rdx, dy + rdy);
         // Undo the axis-2 swap: `x` was `eta` there, so `d/dx` is the
@@ -277,44 +254,25 @@ impl Tpv {
     pub fn inverse(&self, xi_p: f64, eta_p: f64) -> Result<(f64, f64)> {
         // Initial guess: undistorted = distorted (good when the
         // polynomial is close to identity).
-        let mut xi = xi_p;
-        let mut eta = eta_p;
-        // Tolerance scales with coordinate magnitude: the residual's
-        // rounding floor is ~eps*|coord|, so a fixed absolute tolerance
-        // becomes unreachable for large |xi'|,|eta'| (see SIP inverse).
-        // In degree-scale intermediate coords this is rarely hit, but the
-        // scaled form removes the latent failure and keeps accuracy far
-        // below any sub-pixel relevance.
-        let scale = 1.0 + xi_p.abs() + eta_p.abs();
-        let tol = 1e-11 * scale;
-        for _ in 0..32 {
-            // Residual and exact Jacobian in one pass per axis. The
-            // rows of the Jacobian are the two gradients.
-            let (fx, j11, j12) = self.pv1.eval_with_derivatives(xi, eta);
-            let (fy, j21, j22) = self.pv2.eval_with_derivatives(xi, eta);
-            let rx = fx - xi_p;
-            let ry = fy - eta_p;
-            if rx.abs() < tol && ry.abs() < tol {
-                return Ok((xi, eta));
-            }
-            let det = j11 * j22 - j12 * j21;
-            if det.abs() < 1e-15 {
-                return Err(FitsError::Wcs(
-                    "TPV: Jacobian singular during inverse iteration".into(),
-                ));
-            }
-            // Solve J * delta = r, then xi -= delta.
-            let dx = (j22 * rx - j12 * ry) / det;
-            let dy = (-j21 * rx + j11 * ry) / det;
-            xi -= dx;
-            eta -= dy;
-            if dx.abs() < tol && dy.abs() < tol {
-                return Ok((xi, eta));
-            }
-        }
-        Err(FitsError::Wcs(
-            "TPV: inverse iteration did not converge".into(),
-        ))
+        newton::solve(
+            "TPV",
+            (xi_p, eta_p),
+            newton::residual_scale(xi_p, eta_p),
+            |xi, eta| {
+                // Residual and exact Jacobian in one pass per axis. The
+                // rows of the Jacobian are the two gradients.
+                let (fx, j11, j12) = self.pv1.eval_with_derivatives(xi, eta);
+                let (fy, j21, j22) = self.pv2.eval_with_derivatives(xi, eta);
+                newton::Residual2 {
+                    rx: fx - xi_p,
+                    ry: fy - eta_p,
+                    j11,
+                    j12,
+                    j21,
+                    j22,
+                }
+            },
+        )
     }
 }
 
