@@ -16,23 +16,23 @@
 //! The solver is a self-contained Householder QR, sized for the small
 //! dense systems this needs (<= ~120 unknowns for an order-9 SIP fit).
 
-use std::sync::Arc;
-
 use crate::error::{FitsError, Result};
 use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation, RadeSys};
 use crate::wcs::celestial_block::{CelestialBlock, CelestialPair};
 use crate::wcs::linear::LinearTransform;
-use crate::wcs::projection::{self, Projection, ProjectionKind};
-use crate::wcs::sip::{SIP_MAX_ORDER, Sip, SipPoly};
+use crate::wcs::projection::Projection;
+use crate::wcs::distortion::sip::{SIP_MAX_ORDER, Sip, SipPoly};
 use crate::wcs::{Axis, WcsParts};
 use crate::wcs::{D2R, R2D};
 
 /// User-supplied configuration for [`fit_celestial_wcs`].
 #[derive(Debug, Clone)]
 pub struct WcsFitOptions {
-    /// Projection code (`TAN` is the usual choice).
-    pub projection: ProjectionKind,
+    /// Projection to fit against. `TAN`, the default, is the usual
+    /// choice. A parameterized projection carries its `PV2_m` values
+    /// with it, resolved at construction.
+    pub projection: Projection,
     /// Optional fixed reference pixel `(CRPIX1, CRPIX2)` in **0-based**
     /// pixel coordinates (numpy / C convention -- see
     /// [`crate::Wcs::pixel_to_world`] for the rationale). When `None`,
@@ -59,7 +59,7 @@ pub struct WcsFitOptions {
 impl Default for WcsFitOptions {
     fn default() -> Self {
         Self {
-            projection: ProjectionKind::Tan,
+            projection: Projection::default(),
             crpix: None,
             crval: None,
             frame: CelestialFrame::Equatorial,
@@ -153,7 +153,7 @@ pub fn fit_celestial_wcs(
     };
 
     // 2. De-project sky -> intermediate world (xi, eta) in degrees.
-    let projection = projection::build(opts.projection, &[])?;
+    let projection = opts.projection.clone();
     let theta0 = projection.theta0();
     let rotation = CelestialRotation::new(alpha0, delta0, None, None, 0.0, theta0)?;
     let mut iw: Vec<(f64, f64)> = Vec::with_capacity(n);
@@ -188,16 +188,7 @@ pub fn fit_celestial_wcs(
 
     // 5. Assemble the Wcs.
     let wcs = build_wcs(
-        opts.projection,
-        opts.frame,
-        crpix1,
-        crpix2,
-        cd,
-        alpha0,
-        delta0,
-        sip,
-        rotation,
-        projection,
+        opts.frame, crpix1, crpix2, cd, alpha0, delta0, sip, rotation, projection,
     )?;
 
     // Residuals (round-tripped through the final Wcs).
@@ -477,7 +468,6 @@ fn pow_u32(x: f64, p: u32) -> f64 {
     reason = "all parameters are required to assemble the WCS from its fitted components"
 )]
 fn build_wcs(
-    proj_kind: ProjectionKind,
     frame: CelestialFrame,
     crpix1: f64,
     crpix2: f64,
@@ -486,9 +476,9 @@ fn build_wcs(
     delta0: f64,
     sip: Option<Sip>,
     rotation: CelestialRotation,
-    projection: Arc<dyn Projection>,
+    projection: Projection,
 ) -> Result<Wcs> {
-    let proj_code = proj_kind.code();
+    let proj_code = projection.code();
     let suffix = if sip.is_some() { "-SIP" } else { "" };
     let (lon_prefix, lat_prefix) = frame.axis_prefixes();
     let ctype1 = format!("{lon_prefix}-{proj_code}{suffix}");
@@ -823,11 +813,10 @@ mod tests {
     }
 
     fn synthesize_wcs(crpix: (f64, f64), crval: (f64, f64), cd: [f64; 4], sip: Option<Sip>) -> Wcs {
-        let projection = projection::build(ProjectionKind::Tan, &[]).unwrap();
+        let projection = Projection::default();
         let theta0 = projection.theta0();
         let rotation = CelestialRotation::new(crval.0, crval.1, None, None, 0.0, theta0).unwrap();
         build_wcs(
-            ProjectionKind::Tan,
             CelestialFrame::Equatorial,
             crpix.0,
             crpix.1,

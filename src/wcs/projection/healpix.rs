@@ -1,7 +1,18 @@
+// Several projections never fail in one direction. The unit structs
+// have no state for `&self` to read. Every method still keeps one
+// uniform signature, a fallible `Result` behind a `&self` receiver,
+// so the `Projection` enum can dispatch all 28 variants through one
+// match arm shape.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "uniform method signature across all projections for enum dispatch"
+)]
+
 //! `HEALPix` projections -- Calabretta & Roukema 2007: HPX, XPH.
 
 use crate::error::{FitsError, Result};
-use crate::wcs::projection::Projection;
 use crate::wcs::{D2R, R2D};
 
 // -- HPX --------------------------------------------------------------
@@ -54,15 +65,24 @@ impl Hpx {
         idx * width - 180.0 + width / 2.0
     }
 }
-impl Projection for Hpx {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Hpx {
+    /// `PV2_1` is `H` and `PV2_2` is `K`.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         vec![(1, self.h), (2, self.k)]
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 0 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         0.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The equatorial zone and the polar zone
+    /// each cover their own latitudes, and together they cover the
+    /// sphere.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let s = (theta * D2R).sin();
         let stx = self.sin_theta_x();
         if s.abs() <= stx {
@@ -81,7 +101,13 @@ impl Projection for Hpx {
             Ok((x, if s >= 0.0 { y_mag } else { -y_mag }))
         }
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the polar-zone `sigma` is negative. Such
+    /// a point lies beyond the tip of a polar facet.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let yt = self.h * y / 90.0;
         if yt.abs() <= self.k - 1.0 {
             let s = yt / self.k;
@@ -135,16 +161,24 @@ impl Xph {
     // Pole-side tolerance for switching to the linearized sigma near theta=+/-90.
     const POLE_TOL: f64 = 1.0e-4;
 }
-impl Projection for Xph {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Xph {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
 
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. Every native point falls in one of the
+    /// four quadrants of the butterfly layout.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         // Normalize phi to [-180, 180), then build chi in [0, 360) and
         // psi = chi mod 90 in [0, 90) (local longitude within a facet).
         let mut chi = phi;
@@ -200,7 +234,13 @@ impl Projection for Xph {
         Ok((x, y))
     }
 
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. Face disambiguation has a known limit
+    /// near a facet edge, which an `#[ignore]`d test records.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         // WCSLIB stores (x, y) scaled by 1/sqrt2; undo that here.
         let s = std::f64::consts::FRAC_1_SQRT_2;
         // = x * sqrt2
@@ -262,5 +302,53 @@ impl Projection for Xph {
         // Wrap phi back into [-180, 180).
         let phi = ((phi + 180.0).rem_euclid(360.0)) - 180.0;
         Ok((phi, theta))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wcs::projection::testing::{round_trip, round_trip_tol};
+
+    /// `HPX` at the `H = 4`, `K = 3` grid of Calabretta & Roukema
+    /// (2007), which is the sky-survey layout.
+    #[test]
+    fn hpx_round_trip() {
+        round_trip(&Hpx::from_pv(&[0.0, 4.0, 3.0]).unwrap().into(), "HPX");
+    }
+
+    /// `XPH`'s inverse resolves the butterfly's face by comparison, so
+    /// it does not reach the exact-arithmetic tolerance the equatorial
+    /// `HPX` layout does.
+    #[test]
+    fn xph_round_trip() {
+        round_trip_tol(&Xph.into(), "XPH", 1e-7);
+    }
+
+    /// `phi = +180` is the closed end of Paper II's `arg` range
+    /// `(-180, 180]`: the facet index `floor((phi + 180) H / 360)`
+    /// evaluates to `H` there and walked off the ring before the
+    /// facet-center clamp -- at `H = 4`, `theta = 88` the projected
+    /// `x` came out 223.08 instead of 136.92 (the CHANGELOG's worked
+    /// example).
+    ///
+    /// The grid sweep steps `phi` by 7 from -179 and so never lands on
+    /// the closed end; only this test reaches it.
+    #[test]
+    fn hpx_polar_facet_holds_at_phi_180() {
+        let p = Hpx::from_pv(&[0.0, 4.0, 3.0]).unwrap();
+        for &theta in &[60.0_f64, 88.0, -60.0, -88.0] {
+            let (x, y) = p.s2x(180.0, theta).unwrap();
+            assert!(
+                (90.0..=180.0).contains(&x),
+                "theta {theta}: x = {x} left the last facet"
+            );
+            let (phi2, theta2) = p.x2s(x, y).unwrap();
+            let dphi = ((180.0 - phi2 + 540.0).rem_euclid(360.0)) - 180.0;
+            assert!(dphi.abs() < 1e-9, "HPX phi 180 -> {phi2} (theta {theta})");
+            assert!((theta - theta2).abs() < 1e-9, "theta {theta} -> {theta2}");
+        }
+        let (x, _) = p.s2x(180.0, 88.0).unwrap();
+        assert!((x - 136.92).abs() < 0.01, "x = {x}");
     }
 }

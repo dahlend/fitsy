@@ -243,6 +243,11 @@ fn allows_prefix(sym: &str) -> bool {
 /// peta-annum, and Table 5 marks that reading "forbidden". The same
 /// rule keeps `min`, `mas`, `cd`, `ct`, `pc`, `d`, `h` and `T` on their
 /// tabulated meanings.
+///
+/// # Errors
+///
+/// [`FitsError::Unit`] when no exact spelling and no prefixed reading
+/// of `sym` appears in the Sec.4.3 tables.
 pub(super) fn resolve_symbol(sym: &str) -> Result<Unit> {
     if let Some(q) = lookup_base(sym) {
         return Ok(q);

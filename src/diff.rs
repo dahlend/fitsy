@@ -85,7 +85,6 @@ impl Default for DiffOptions {
 /// The variant records why the two disagree: a keyword present on one
 /// side alone, or a keyword present on both with different values.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum HeaderDiff {
     /// Keyword present in `a` but not in `b`.
     OnlyInA(String),
@@ -108,7 +107,6 @@ pub enum HeaderDiff {
 /// each side holds there. An image reports a pixel number, and a table
 /// reports a row and a column.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct DataDiff {
     /// Column name for a table HDU; `None` for an image.
     pub column: Option<String>,

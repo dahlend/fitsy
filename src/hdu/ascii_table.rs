@@ -44,7 +44,6 @@ use crate::header::Header;
 /// cards that apply to it. [`AsciiTableHdu::columns`] returns one of
 /// these per column.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct AsciiColumn {
     /// 1-based field index.
     pub index: usize,

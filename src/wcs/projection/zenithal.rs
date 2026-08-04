@@ -1,3 +1,15 @@
+// Several projections never fail in one direction. The unit structs
+// have no state for `&self` to read. Every method still keeps one
+// uniform signature, a fallible `Result` behind a `&self` receiver,
+// so the `Projection` enum can dispatch all 28 variants through one
+// match arm shape.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "uniform method signature across all projections for enum dispatch"
+)]
+
 //! Zenithal (azimuthal) projections -- Paper II Sec.5.1.
 //!
 //! All nine members of this family have `theta_0 = 90deg` except for the
@@ -6,11 +18,13 @@
 use std::f64::consts::PI;
 
 use crate::error::{FitsError, Result};
-use crate::wcs::projection::Projection;
 use crate::wcs::{D2R, R2D};
 
 // -- shared zenithal helpers ------------------------------------------
 
+/// Plane `(x, y)` from a zenithal radius and native longitude, both in
+/// degrees. Every zenithal projection differs only in how it computes
+/// the radius, so they all finish here.
 #[inline]
 pub(super) fn zenithal_xy(r_deg: f64, phi_deg: f64) -> (f64, f64) {
     // Paper II eq. (12)-(13): x = R sin(phi), y = -R cos(phi).
@@ -18,6 +32,9 @@ pub(super) fn zenithal_xy(r_deg: f64, phi_deg: f64) -> (f64, f64) {
     (r_deg * phi.sin(), -r_deg * phi.cos())
 }
 
+/// Native longitude and zenithal radius from plane `(x, y)`, all in
+/// degrees. This is the inverse of [`zenithal_xy`] and the first step
+/// of every zenithal `x2s`.
 #[inline]
 pub(super) fn zenithal_phi_r(x_deg: f64, y_deg: f64) -> (f64, f64) {
     // Paper II eq. (14)-(15): phi = atan2(x, -y); R = sqrt(x^2+y^2).
@@ -88,15 +105,23 @@ fn ln_cos(xi: f64) -> f64 {
 /// Gnomonic / tangent-plane projection (Paper II Sec.5.1.4).
 #[derive(Debug, Clone, Copy)]
 pub struct Tan;
-impl Projection for Tan {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Tan {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when `theta` is 0 or less. The tangent plane
+    /// only reaches the hemisphere around the reference point.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let t = theta * D2R;
         if t.sin() <= 0.0 {
             return Err(FitsError::Wcs(
@@ -107,7 +132,13 @@ impl Projection for Tan {
         let r = R2D / t.tan();
         Ok(zenithal_xy(r, phi))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The plane covers the whole hemisphere,
+    /// and a radius of 0 is the reference point.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (phi, r) = zenithal_phi_r(x, y);
         let theta = if r == 0.0 {
             90.0
@@ -123,15 +154,23 @@ impl Projection for Tan {
 /// Stereographic projection (Paper II Sec.5.1.6).
 #[derive(Debug, Clone, Copy)]
 pub struct Stg;
-impl Projection for Stg {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Stg {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] at `theta = -90`, the point diametrically
+    /// opposite the reference point. It has no image on the plane.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let t = theta * D2R;
         let denom = 1.0 + t.sin();
         if denom.abs() < 1e-15 {
@@ -142,7 +181,13 @@ impl Projection for Stg {
         let r = 2.0 * R2D * t.cos() / denom;
         Ok(zenithal_xy(r, phi))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The stereographic plane maps to the
+    /// sphere minus one point, and every radius names a latitude.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (phi, r) = zenithal_phi_r(x, y);
         let theta = 90.0 - 2.0 * (r / (2.0 * R2D)).atan() * R2D;
         Ok((phi, theta))
@@ -177,31 +222,67 @@ impl Sin {
         Ok(Self { xi, eta })
     }
 }
-impl Projection for Sin {
-    fn theta0(&self) -> f64 {
+impl Sin {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn pv2(&self) -> Vec<(u32, f64)> {
+    /// `PV2_1` is `xi` and `PV2_2` is `eta`.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         vec![(1, self.xi), (2, self.eta)]
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the point lies in the hemisphere facing
+    /// away from the projection direction `(xi, eta, 1)`. That
+    /// hemisphere shares the plane with the visible one, and `x2s`
+    /// resolves every plane point to the visible branch.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         // Paper II eq. (30): x = R_0[costheta*sinphi + xi(1-sintheta)],
         //                    y = -R_0[costheta*cosphi - eta(1-sintheta)].
         let t = theta * D2R;
         let p = phi * D2R;
         let s = t.sin();
         let c = t.cos();
-        if self.xi == 0.0 && self.eta == 0.0 && s < 0.0 {
+        let (sin_p, cos_p) = (p.sin(), p.cos());
+        // eq. (30) is orthographic projection along `v = (xi, eta, 1)`:
+        // with direction cosines `l = costheta sinphi`, `m = -costheta
+        // cosphi`, `n = sintheta`, it reads `(x, y)/R_0 = (l, m) +
+        // (1 - n)(xi, eta)`, which is where the line `P + s*v` meets
+        // the plane `n = 1`.
+        //
+        // That map is two-to-one: the two preimages of a plane point
+        // are reflections across `P.v = 0`, and only the hemisphere
+        // facing the projection direction is the one the projection
+        // represents. `x2s` resolves the pair by taking the smaller
+        // root of its quadratic, which is the `P.v >= 0` branch, so a
+        // forward that accepted the far side would report a plane
+        // coordinate whose inverse names a different point.
+        //
+        // For `xi = eta = 0` this is `sintheta >= 0`, the orthographic
+        // condition, reproduced here exactly -- the two zero products
+        // cancel to a signed zero that leaves `s` unchanged.
+        if self.xi * c * sin_p - self.eta * c * cos_p + s < 0.0 {
             return Err(FitsError::Wcs(
-                "SIN: theta < 0 lies in the unprojected hemisphere".into(),
+                "SIN: the point lies in the unprojected hemisphere".into(),
             ));
         }
         let one_minus_s = 1.0 - s;
-        let x = R2D * (c * p.sin() + self.xi * one_minus_s);
-        let y = -R2D * (c * p.cos() - self.eta * one_minus_s);
+        let x = R2D * (c * sin_p + self.xi * one_minus_s);
+        let y = -R2D * (c * cos_p - self.eta * one_minus_s);
         Ok((x, y))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the point lies outside the disc that the
+    /// sphere projects onto. The orthographic case tests the radius
+    /// against `R_0`; the slant case tests the quadratic discriminant
+    /// and requires a root within `[0, 2]`.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         // Solve the quadratic in u = 1 - sintheta derived from
         //   (X - xiu)^2 + (-Y + etau)^2 = cos^2theta = u(2-u)
         // => (1 + xi^2 + eta^2)*u^2 - 2(Xxi + Yeta + 1)*u + (X^2 + Y^2) = 0.
@@ -254,8 +335,11 @@ impl Projection for Sin {
 #[derive(Debug, Clone)]
 pub struct Zpn {
     /// `P_m = PV2_m`, lowest order first, so `coeffs[m]` is `PV2_m`.
-    /// Trailing zeros are trimmed at construction.
-    pub coeffs: Vec<f64>,
+    ///
+    /// Private; [`Self::from_pv`] is the only way in. It trims
+    /// trailing zeros, and the evaluators rely on the last
+    /// coefficient being non-zero.
+    coeffs: Vec<f64>,
 }
 impl Zpn {
     /// Build from the `PV2_m` table of the latitude axis. The
@@ -295,11 +379,13 @@ impl Zpn {
         acc
     }
 }
-impl Projection for Zpn {
-    fn theta0(&self) -> f64 {
+impl Zpn {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn pv2(&self) -> Vec<(u32, f64)> {
+    /// `PV2_m` is the coefficient of the degree-`m` term.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         // `coeffs[m]` is PV2_m directly. Trailing zeros are dropped;
         // the parser zero-fills, and `from_pv` rejects an all-zero
         // table, so at least one term always survives.
@@ -309,12 +395,30 @@ impl Projection for Zpn {
             None => Vec::new(),
         }
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The polynomial evaluates at every
+    /// colatitude.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let zeta = (90.0 - theta) * D2R;
         let r = R2D * self.eval(zeta);
         Ok(zenithal_xy(r, phi))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// The polynomial has no closed-form inverse, so Newton iteration
+    /// solves it.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the iteration does not converge in 64
+    /// steps, which a non-monotonic polynomial causes, or when the
+    /// solved colatitude falls outside 0 to `pi`.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (phi, r) = zenithal_phi_r(x, y);
         let target = r / R2D;
         let mut zeta = if self.coeffs.len() >= 2 && self.coeffs[1] != 0.0 {
@@ -391,14 +495,27 @@ impl Azp {
         Ok(Self { mu, gamma })
     }
 }
-impl Projection for Azp {
-    fn theta0(&self) -> f64 {
+impl Azp {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn pv2(&self) -> Vec<(u32, f64)> {
+    /// `PV2_1` is `mu` and `PV2_2` is `gamma`.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         vec![(1, self.mu), (2, self.gamma)]
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - `|mu| > 1` and the point lies past the fold at
+    ///   `asin(-1 / mu)`, where two latitudes share one radius.
+    /// - The perspective denominator vanishes.
+    /// - The radius comes out negative, which puts the point behind
+    ///   the projection point.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let p = phi * D2R;
         let t = theta * D2R;
         let g = self.gamma * D2R;
@@ -443,7 +560,14 @@ impl Projection for Azp {
         }
         Ok((r * p.sin(), -r * p.cos() / g.cos()))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the point is degenerate at the origin of
+    /// the slanted frame, or when the `asin` argument exceeds 1. The
+    /// second case is a plane point with no counterpart on the sphere.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let g = self.gamma * D2R;
         let cg = g.cos();
         let phi_rad = x.atan2(-y * cg);
@@ -470,18 +594,32 @@ impl Projection for Azp {
 /// Zenithal equidistant (Paper II Sec.5.1.7).
 #[derive(Debug, Clone, Copy)]
 pub struct Arc;
-impl Projection for Arc {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Arc {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The radius is the colatitude itself,
+    /// so the whole sphere projects.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         Ok(zenithal_xy(90.0 - theta, phi))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. A radius past 180 degrees wraps rather
+    /// than failing, which matches the equidistant definition.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (phi, r) = zenithal_phi_r(x, y);
         Ok((phi, 90.0 - r))
     }
@@ -492,22 +630,36 @@ impl Projection for Arc {
 /// Zenithal equal-area (Paper II Sec.5.1.8).
 #[derive(Debug, Clone, Copy)]
 pub struct Zea;
-impl Projection for Zea {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Zea {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The whole sphere projects onto a disc
+    /// of radius `2 R_0`.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         // Paper II eq. (24) is `R = sqrt(2 (1 - sin theta))`, whose
         // radicand cancels at the pole. `sqrt(2 * 2 sin^2 h)` is
         // `2 sin h` for the half-colatitude `h`; see `sin_half_colat`.
         let r = 2.0 * R2D * sin_half_colat(theta).max(0.0);
         Ok(zenithal_xy(r, phi))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the radius exceeds `2 R_0`, which is
+    /// outside the disc the sphere fills.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (phi, r) = zenithal_phi_r(x, y);
         let arg = r / (2.0 * R2D);
         if arg.abs() > 1.0 + 1e-9 {
@@ -614,14 +766,24 @@ impl Szp {
         }
     }
 }
-impl Projection for Szp {
-    fn theta0(&self) -> f64 {
+impl Szp {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn pv2(&self) -> Vec<(u32, f64)> {
+    /// `PV2_1` is `mu`, `PV2_2` is `phi_c` and `PV2_3` is `theta_c`.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         vec![(1, self.mu), (2, self.phi_c), (3, self.theta_c)]
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the perspective denominator vanishes, or
+    /// when the point lies on the hidden branch. The hidden branch has
+    /// no closed form here, so the check asks the same root selection
+    /// that `x2s` uses and compares the answer.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let p = phi * D2R;
         let t = theta * D2R;
         let cos_t = t.cos();
@@ -648,7 +810,14 @@ impl Projection for Szp {
         }
         Ok((x, y))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when no root of the perspective quadratic
+    /// falls in `[0, 2]`. The point then lies off the region the
+    /// sphere projects onto.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let big_x = x / R2D;
         let big_y = y / R2D;
         let (zp, xp, yp) = (self.zp, self.xp, self.yp);
@@ -676,7 +845,12 @@ impl Projection for Szp {
 pub struct Air {
     /// `PV2_1` -- `theta_b`, the latitude at which the error is
     /// minimized, degrees.
-    pub theta_b: f64,
+    ///
+    /// Private; [`Self::from_pv`] is the only way to set it. It
+    /// resolves `cb`, `xi_max` and `r_max` at construction. A later
+    /// assignment would leave a projection whose serialized `PV2_1`
+    /// disagrees with its own arithmetic.
+    theta_b: f64,
     cb: f64,
     /// Half-colatitude where the invertible branch of `R` ends.
     ///
@@ -754,8 +928,9 @@ impl Air {
     ///
     /// The constant rounds that peak up, so the margin errs toward
     /// searching. A `cb` between the true peak and this value still
-    /// takes the scan and still finds no fold. `air_skips_the_scan_only_when_r_is_monotonic`
-    /// holds the bound against the behavior it stands for.
+    /// takes the scan and still finds no fold. The test
+    /// `air_skips_the_scan_only_when_r_is_monotonic` holds the bound
+    /// against the behavior it stands for.
     ///
     /// In `theta_b` the threshold is about -76.4 degrees. Every
     /// projection north of that, which is every one in practice,
@@ -858,14 +1033,23 @@ impl Air {
         )
     }
 }
-impl Projection for Air {
-    fn theta0(&self) -> f64 {
+impl Air {
+    /// Reference native latitude, 90 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         90.0
     }
-    fn pv2(&self) -> Vec<(u32, f64)> {
+    /// `PV2_1` is `theta_b`, the second point of minimum distortion.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         vec![(1, self.theta_b)]
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] at `theta = -90`, where the radius diverges,
+    /// and past the fold. Below a `theta_b` of about -76.5 degrees the
+    /// radius turns over, and two latitudes then share one radius.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         if theta <= -90.0 + 1e-12 {
             return Err(FitsError::Wcs("AIR: south pole maps to infinity".into()));
         }
@@ -884,7 +1068,14 @@ impl Projection for Air {
         }
         Ok(zenithal_xy(self.r_of_xi(xi), phi))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the radius exceeds the largest one this
+    /// projection reaches before it folds. A radius of 0 is the
+    /// reference point.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (phi, r) = zenithal_phi_r(x, y);
         if r < 1e-12 {
             return Ok((phi, 90.0));
@@ -921,7 +1112,11 @@ impl Projection for Air {
             // acceptance test below is inclusive. A converged Newton
             // step lands on that end. A strict test would reject it and
             // bisect instead, discarding the answer.
-            if f > 0.0 { hi = xi } else { lo = xi }
+            if f > 0.0 {
+                hi = xi;
+            } else {
+                lo = xi;
+            }
             // `slope > 0` across the branch; the comparison also
             // rejects the NaN a degenerate `xi` would produce.
             let next = if slope > 0.0 {
@@ -950,93 +1145,42 @@ impl Projection for Air {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Round-trip a native grid through `s2x`/`x2s`. Points the
-    /// forward refuses are skipped -- the contract is that whatever it
-    /// *accepts* must come back.
-    fn round_trip(p: &dyn Projection, label: &str) {
-        round_trip_tol(p, label, 1e-9);
-    }
-
-    fn round_trip_tol(p: &dyn Projection, label: &str, tol: f64) {
-        let (mut checked, mut worst) = (0_usize, 0.0_f64);
-        let mut theta = -88.0_f64;
-        while theta <= 88.0 {
-            let mut phi = -179.0_f64;
-            while phi <= 179.0 {
-                if let Ok((x, y)) = p.s2x(phi, theta)
-                    && x.is_finite()
-                    && y.is_finite()
-                {
-                    let (p2, t2) = p.x2s(x, y).unwrap_or_else(|e| {
-                        panic!("{label}: x2s failed after s2x accepted ({phi}, {theta}): {e}")
-                    });
-                    // Compare as unit vectors: phi is degenerate at the
-                    // poles and wraps at +-180.
-                    let v = |a: f64, b: f64| {
-                        let (c, s) = ((b * D2R).cos(), (b * D2R).sin());
-                        [c * (a * D2R).cos(), c * (a * D2R).sin(), s]
-                    };
-                    let (u, w) = (v(phi, theta), v(p2, t2));
-                    let dot = u[0] * w[0] + u[1] * w[1] + u[2] * w[2];
-                    let cr = [
-                        u[1] * w[2] - u[2] * w[1],
-                        u[2] * w[0] - u[0] * w[2],
-                        u[0] * w[1] - u[1] * w[0],
-                    ];
-                    // atan2(|u x w|, u.w): stable near zero, where
-                    // acos(u.w) would lose half the mantissa.
-                    let sep = (cr[0].powi(2) + cr[1].powi(2) + cr[2].powi(2))
-                        .sqrt()
-                        .atan2(dot)
-                        / D2R;
-                    assert!(
-                        sep < tol,
-                        "{label}: ({phi}, {theta}) -> ({x}, {y}) -> ({p2}, {t2}), off by {sep:.3e} deg"
-                    );
-                    worst = worst.max(sep);
-                    checked += 1;
-                }
-                phi += 7.0;
-            }
-            theta += 4.0;
-        }
-        assert!(checked > 100, "{label}: only {checked} points accepted");
-    }
+    use crate::wcs::projection::Projection;
+    use crate::wcs::projection::testing::{round_trip, round_trip_tol};
 
     #[test]
     fn zenithal_projections_round_trip() {
-        round_trip(&Tan, "TAN");
-        round_trip(&Stg, "STG");
-        round_trip(&Arc, "ARC");
-        round_trip(&Zea, "ZEA");
+        round_trip(&Tan.into(), "TAN");
+        round_trip(&Stg.into(), "STG");
+        round_trip(&Arc.into(), "ARC");
+        round_trip(&Zea.into(), "ZEA");
         // SIN's inverse is `theta = acos(R/R_0)`, whose derivative is
         // infinite at the limb (`theta = 0`, `R = R_0`). One ulp in
         // `R/R_0` there is ~sqrt(2e-16) rad ~ 9e-7 deg, so the limb --
         // which this grid lands on exactly -- cannot do better. Away
         // from it the error is 4e-10 deg by `theta = 0.001` and 3e-13
         // by `theta = 0.1`.
-        round_trip_tol(&Sin::from_pv(&[0.0, 0.0, 0.0]).unwrap(), "SIN", 1e-6);
+        round_trip_tol(&Sin::from_pv(&[0.0, 0.0, 0.0]).unwrap().into(), "SIN", 1e-6);
         // `theta_b` spans its whole range: the southern half was
         // untested, and it is where `R` develops a fold.
         for theta_b in [90.0_f64, 60.0, 45.0, 0.0, -45.0, -70.0, -80.0, -89.0] {
             round_trip(
-                &Air::from_pv(&[0.0, theta_b]).unwrap(),
+                &Air::from_pv(&[0.0, theta_b]).unwrap().into(),
                 &format!("AIR theta_b={theta_b}"),
             );
         }
-        round_trip(&Zpn::from_pv(&[0.0, 1.0]).unwrap(), "ZPN");
+        round_trip(&Zpn::from_pv(&[0.0, 1.0]).unwrap().into(), "ZPN");
         for mu in [0.0_f64, 0.5, 1.0, 2.0, 5.0] {
             for gamma in [0.0_f64, 30.0, -20.0] {
                 round_trip(
-                    &Azp::from_pv(&[0.0, mu, gamma]).unwrap(),
+                    &Azp::from_pv(&[0.0, mu, gamma]).unwrap().into(),
                     &format!("AZP mu={mu} gamma={gamma}"),
                 );
             }
         }
         for mu in [0.0_f64, 1.0, 2.0] {
             round_trip(
-                &Szp::from_pv(&[0.0, mu, 180.0, 60.0]).unwrap(),
+                &Szp::from_pv(&[0.0, mu, 180.0, 60.0]).unwrap().into(),
                 &format!("SZP mu={mu}"),
             );
         }
@@ -1061,19 +1205,43 @@ mod tests {
     /// colatitude most of its digits.
     #[test]
     fn zenithal_projections_keep_the_colatitude_near_the_pole() {
-        let cases: Vec<(String, Box<dyn Projection>)> = vec![
-            ("TAN".into(), Box::new(Tan)),
-            ("STG".into(), Box::new(Stg)),
-            ("ARC".into(), Box::new(Arc)),
-            ("ZEA".into(), Box::new(Zea)),
-            ("SIN".into(), Box::new(Sin::from_pv(&[0.0, 0.0, 0.0]).unwrap())),
-            ("AIR tb=45".into(), Box::new(Air::from_pv(&[0.0, 45.0]).unwrap())),
-            ("AIR tb=90".into(), Box::new(Air::from_pv(&[0.0, 90.0]).unwrap())),
-            ("ZPN".into(), Box::new(Zpn::from_pv(&[0.0, 1.0]).unwrap())),
-            ("AZP mu=0".into(), Box::new(Azp::from_pv(&[0.0, 0.0, 0.0]).unwrap())),
-            ("AZP mu=2".into(), Box::new(Azp::from_pv(&[0.0, 2.0, 30.0]).unwrap())),
-            ("SZP mu=0".into(), Box::new(Szp::from_pv(&[0.0, 0.0, 180.0, 60.0]).unwrap())),
-            ("SZP mu=2".into(), Box::new(Szp::from_pv(&[0.0, 2.0, 180.0, 60.0]).unwrap())),
+        let cases: Vec<(String, Projection)> = vec![
+            ("TAN".into(), Projection::from(Tan)),
+            ("STG".into(), Projection::from(Stg)),
+            ("ARC".into(), Projection::from(Arc)),
+            ("ZEA".into(), Projection::from(Zea)),
+            (
+                "SIN".into(),
+                Projection::from(Sin::from_pv(&[0.0, 0.0, 0.0]).unwrap()),
+            ),
+            (
+                "AIR tb=45".into(),
+                Projection::from(Air::from_pv(&[0.0, 45.0]).unwrap()),
+            ),
+            (
+                "AIR tb=90".into(),
+                Projection::from(Air::from_pv(&[0.0, 90.0]).unwrap()),
+            ),
+            (
+                "ZPN".into(),
+                Projection::from(Zpn::from_pv(&[0.0, 1.0]).unwrap()),
+            ),
+            (
+                "AZP mu=0".into(),
+                Projection::from(Azp::from_pv(&[0.0, 0.0, 0.0]).unwrap()),
+            ),
+            (
+                "AZP mu=2".into(),
+                Projection::from(Azp::from_pv(&[0.0, 2.0, 30.0]).unwrap()),
+            ),
+            (
+                "SZP mu=0".into(),
+                Projection::from(Szp::from_pv(&[0.0, 0.0, 180.0, 60.0]).unwrap()),
+            ),
+            (
+                "SZP mu=2".into(),
+                Projection::from(Szp::from_pv(&[0.0, 2.0, 180.0, 60.0]).unwrap()),
+            ),
         ];
         // One part in a million of the colatitude. The fixed code sits
         // at or below 1e-7 of it; the unfixed code lost the whole
@@ -1191,7 +1359,10 @@ mod tests {
             match air.s2x(0.0, theta) {
                 Ok((x, y)) => {
                     let r = (x * x + y * y).sqrt();
-                    assert!(r > last, "R turned over at theta = {theta} while still accepted");
+                    assert!(
+                        r > last,
+                        "R turned over at theta = {theta} while still accepted"
+                    );
                     last = r;
                     let (_, back) = air.x2s(x, y).unwrap();
                     assert!(
@@ -1204,13 +1375,19 @@ mod tests {
             }
             theta -= 0.05;
         }
-        assert!(theta < 0.0, "the fold should sit south, found it at {theta}");
+        assert!(
+            theta < 0.0,
+            "the fold should sit south, found it at {theta}"
+        );
 
         // A plane point beyond the largest radius the branch reaches
         // has no latitude on it.
         let (x, y) = air.s2x(0.0, theta + 0.05).unwrap();
         let r_max = (x * x + y * y).sqrt();
-        assert!(air.x2s(r_max * 1.01, 0.0).is_err(), "past the branch maximum");
+        assert!(
+            air.x2s(r_max * 1.01, 0.0).is_err(),
+            "past the branch maximum"
+        );
     }
 
     /// The no-fold shortcut must never skip a real fold.
@@ -1289,5 +1466,188 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `TAN` puts the reference point at the origin of the plane.
+    #[test]
+    fn tan_pole_is_origin() {
+        let (x, y) = Tan.s2x(0.0, 90.0).unwrap();
+        assert!(x.abs() < 1e-12 && y.abs() < 1e-12);
+    }
+
+    /// The slant `SIN` -- `xi`/`eta` non-zero -- is the radio
+    /// interferometry case, and takes a different code path from the
+    /// orthographic one the grid above walks.
+    ///
+    /// `eta = cot(delta_0)` is the NCP convention, so the slant runs
+    /// from a fraction of a unit up to the large values a field near
+    /// the equator produces.
+    #[test]
+    fn sin_slant_round_trip() {
+        for &(xi, eta) in &[
+            (0.05_f64, -0.03_f64),
+            (0.0, 1.0),   // NCP at delta_0 = 45 deg
+            (0.0, 1.732), // NCP at delta_0 = 30 deg
+            (-0.4, 0.25),
+            (2.0, -1.5),
+        ] {
+            round_trip_tol(
+                &Sin { xi, eta }.into(),
+                &format!("SIN xi={xi} eta={eta}"),
+                1e-6,
+            );
+        }
+    }
+
+    /// `SIN` projects along `v = (xi, eta, 1)`, and that map is
+    /// two-to-one: the hemisphere facing away from `v` lands on the
+    /// same disc as the one facing it. `x2s` resolves the pair to the
+    /// near branch, so `s2x` must refuse the far one.
+    ///
+    /// Regression: only the orthographic case (`xi = eta = 0`) was
+    /// refused. A slant `SIN` accepted the whole sphere, and a
+    /// far-side point round-tripped to its reflection -- at
+    /// `xi = 0.05, eta = -0.03`, the point `(-179, -88)` came back as
+    /// `(75.9, 84.1)`, an error of 174 degrees, reported as success.
+    ///
+    /// This asserts the domain *is* the visible hemisphere: the
+    /// accepted set matches `P.v >= 0` point for point, so the check
+    /// can neither admit a hidden point nor reject a visible one.
+    #[test]
+    fn sin_refuses_the_hidden_hemisphere() {
+        for &(xi, eta) in &[
+            (0.0_f64, 0.0_f64),
+            (0.05, -0.03),
+            (0.0, 1.732),
+            (-0.4, 0.25),
+            (2.0, -1.5),
+        ] {
+            let p = Sin { xi, eta };
+            let (mut visible, mut hidden) = (0_usize, 0_usize);
+            let mut theta = -89.5_f64;
+            while theta <= 89.5 {
+                let mut phi = -179.0_f64;
+                while phi <= 180.0 {
+                    let (c, s) = ((theta * D2R).cos(), (theta * D2R).sin());
+                    let (sp, cp) = ((phi * D2R).sin(), (phi * D2R).cos());
+                    // P.v with l = costheta sinphi, m = -costheta cosphi,
+                    // n = sintheta.
+                    let dot = xi * c * sp - eta * c * cp + s;
+                    let accepted = p.s2x(phi, theta).is_ok();
+                    // The limb (P.v == 0) is the boundary both branches
+                    // share; a point within rounding of it may fall
+                    // either way, and either answer is the same point.
+                    if dot.abs() > 1e-12 {
+                        assert_eq!(
+                            accepted,
+                            dot > 0.0,
+                            "xi={xi} eta={eta}: ({phi}, {theta}) has P.v = {dot:e} \
+                             but s2x {} it",
+                            if accepted { "accepted" } else { "refused" }
+                        );
+                        if dot > 0.0 {
+                            visible += 1;
+                        } else {
+                            hidden += 1;
+                        }
+                    }
+                    phi += 3.0;
+                }
+                theta += 2.0;
+            }
+            // Both halves have to be populated, or the assertion above
+            // is vacuous on one of them.
+            assert!(
+                visible > 100 && hidden > 100,
+                "xi={xi} eta={eta}: {visible} visible, {hidden} hidden"
+            );
+        }
+    }
+
+    /// The orthographic case must be untouched by the general check:
+    /// the two zero products cancel exactly, leaving `sintheta >= 0`.
+    #[test]
+    fn sin_orthographic_domain_is_the_northern_hemisphere() {
+        let p = Sin { xi: 0.0, eta: 0.0 };
+        for &phi in &[-179.0_f64, -90.0, 0.0, 90.0, 180.0] {
+            assert!(p.s2x(phi, 0.0).is_ok(), "the limb itself");
+            assert!(p.s2x(phi, 1e-12).is_ok(), "just inside");
+            assert!(p.s2x(phi, -1e-12).is_err(), "just outside");
+            assert!(p.s2x(phi, -45.0).is_err(), "well outside");
+        }
+    }
+
+    /// With `xi = eta = 0` the slant formulation must reduce to the
+    /// plain orthographic `R = cos(theta)`.
+    #[test]
+    fn sin_slant_zero_matches_simple() {
+        let slant = Sin { xi: 0.0, eta: 0.0 };
+        let (x, y) = slant.s2x(30.0, 50.0).unwrap();
+        let t = 50.0_f64.to_radians();
+        let p = 30.0_f64.to_radians();
+        let r = R2D * t.cos();
+        assert!((x - r * p.sin()).abs() < 1e-10 && (y - (-r * p.cos())).abs() < 1e-10);
+    }
+
+    /// `ZPN` with `PV2_1 = 1` and nothing else is `ARC` by definition
+    /// (Paper II Sec.5.1.7), so the two must agree numerically.
+    #[test]
+    fn zpn_matches_arc_with_p1_only() {
+        let p = Zpn::from_pv(&[0.0, 1.0]).unwrap();
+        for &theta in &[-50.0_f64, 0.0, 30.0, 75.0] {
+            let (x, y) = p.s2x(45.0, theta).unwrap();
+            let (xr, yr) = Arc.s2x(45.0, theta).unwrap();
+            assert!((x - xr).abs() < 1e-9 && (y - yr).abs() < 1e-9);
+        }
+    }
+
+    /// A genuinely higher-order `ZPN`. The grid above only walks the
+    /// degree-one polynomial, which never exercises the numeric root
+    /// the inverse falls back on.
+    #[test]
+    fn zpn_round_trip_monotonic_polynomial() {
+        round_trip_tol(
+            &Zpn::from_pv(&[0.0, 1.0, 0.0, 0.05]).unwrap().into(),
+            "ZPN cubic",
+            1e-7,
+        );
+    }
+
+    /// `AZP` with `mu = gamma = 0` is `TAN` (Paper II Sec.5.1.1).
+    #[test]
+    fn azp_zero_params_matches_tan() {
+        let p = Azp::from_pv(&[0.0, 0.0, 0.0]).unwrap();
+        let (x1, y1) = p.s2x(40.0, 60.0).unwrap();
+        let (x2, y2) = Tan.s2x(40.0, 60.0).unwrap();
+        assert!((x1 - x2).abs() < 1e-10 && (y1 - y2).abs() < 1e-10);
+    }
+
+    /// `SZP` with `mu = 0` is `TAN` too, for any projection point.
+    #[test]
+    fn szp_zero_params_matches_tan() {
+        let szp = Szp::from_pv(&[0.0, 0.0, 0.0, 90.0]).unwrap();
+        for &(phi, theta) in &[
+            (0.0_f64, 90.0_f64),
+            (45.0, 60.0),
+            (-90.0, 30.0),
+            (170.0, 5.0),
+        ] {
+            let (xs, ys) = szp.s2x(phi, theta).unwrap();
+            let (xn, yn) = Tan.s2x(phi, theta).unwrap();
+            assert!(
+                (xs - xn).abs() < 1e-9 && (ys - yn).abs() < 1e-9,
+                "SZP(mu=0) != TAN at ({phi},{theta})"
+            );
+        }
+    }
+
+    /// An off-axis projection point: the grid above holds `phi_c` at
+    /// 180, where the horizon stays symmetric about the meridian.
+    #[test]
+    fn szp_round_trip_oblique_projection_point() {
+        round_trip(
+            &Szp::from_pv(&[0.0, 2.0, 30.0, 60.0]).unwrap().into(),
+            "SZP phi_c=30",
+        );
     }
 }

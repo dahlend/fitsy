@@ -1556,8 +1556,8 @@ fn dss_plate_model_used_for_real_file() {
     let dss = wcs.dss.as_ref().unwrap();
     // The +0.5 - cnpix formulas above produce a 1-based FITS pixel
     // coordinate; subtract 1 for the 0-based Wcs API.
-    let plate_center_x = dss.ppo3 / dss.xpixelsz - dss.cnpix1 + 0.5 - 1.0;
-    let plate_center_y = dss.ppo6 / dss.ypixelsz - dss.cnpix2 + 0.5 - 1.0;
+    let plate_center_x = dss.ppo3() / dss.xpixelsz() - dss.cnpix1() + 0.5 - 1.0;
+    let plate_center_y = dss.ppo6() / dss.ypixelsz() - dss.cnpix2() + 0.5 - 1.0;
     let world = wcs
         .pixel_to_world(&[plate_center_x, plate_center_y])
         .unwrap();
@@ -2216,6 +2216,37 @@ fn fast_path_matches_general() {
             c[0] = "CTYPE1  = 'DEC--TPV'".into();
             c[1] = "CTYPE2  = 'RA---TPV'".into();
             c.extend(tpv_cards());
+            c
+        }),
+        // The fast path carries TNX too, in the same slot as TPV.
+        // The nonzero 2x2 surface exercises the Newton inverse; the
+        // swapped case pins the intermediate-coordinate indexing.
+        ("TNX polynomial pre-warp", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'RA---TNX'".into();
+            c[1] = "CTYPE2  = 'DEC--TNX'".into();
+            c.push(
+                "WAT1_001= 'wtype=tnx axtype=ra lngcor = \"3 2 2 1 -1 1 -1 1 0 1E-3 5E-4 0\"'"
+                    .into(),
+            );
+            c.push(
+                "WAT2_001= 'wtype=tnx axtype=dec latcor = \"3 2 2 1 -1 1 -1 1 0 -4E-4 8E-4 0\"'"
+                    .into(),
+            );
+            c
+        }),
+        ("TNX, swapped axis order", {
+            let mut c = tan_cards();
+            c[0] = "CTYPE1  = 'DEC--TNX'".into();
+            c[1] = "CTYPE2  = 'RA---TNX'".into();
+            c.push(
+                "WAT1_001= 'wtype=tnx axtype=dec latcor = \"3 2 2 1 -1 1 -1 1 0 -4E-4 8E-4 0\"'"
+                    .into(),
+            );
+            c.push(
+                "WAT2_001= 'wtype=tnx axtype=ra lngcor = \"3 2 2 1 -1 1 -1 1 0 1E-3 5E-4 0\"'"
+                    .into(),
+            );
             c
         }),
         ("TPV with a radial term", {
@@ -4097,6 +4128,59 @@ fn multi_dimensional_tab_matches_wcslib() {
 /// undefined. wcslib rejects the same header as "unmatched celestial
 /// axes".
 ///
+/// `RADESYS` must survive `to_header` for a fully tabular celestial
+/// pair. The frame is real for `RA---TAB`/`DEC--TAB`. Dropping it
+/// breaks `from_header(to_header(w)) == w`.
+///
+/// The header carries no `EQUINOX`. With one present, re-parsing
+/// derives the same frame from the Sec.8.3 equinox default. That
+/// would mask the dropped card.
+///
+/// Regression: the serializer gated `RADESYS` on the `CelestialBlock`.
+/// A tabular pair does not carry one. The parser keeps the keyword
+/// whenever the *pair* exists. `FK5` parsed, serialized to nothing,
+/// and re-parsed as the ICRS default.
+#[test]
+fn radesys_round_trips_for_a_tabular_celestial_pair() {
+    use fitsy::wcs::RadeSys;
+
+    let mut h = fitsy::Header::empty();
+    h.push("NAXIS", 2_i64, None).unwrap();
+    h.push("NAXIS1", 5_i64, None).unwrap();
+    h.push("NAXIS2", 4_i64, None).unwrap();
+    h.push("CTYPE1", "RA---TAB".to_string(), None).unwrap();
+    h.push("CTYPE2", "DEC--TAB".to_string(), None).unwrap();
+    // Both axes point at one shared coordinate array (Sec.6.1.1).
+    for axis in [1, 2] {
+        h.push(format!("PS{axis}_0"), "WCS-TAB".to_string(), None)
+            .unwrap();
+        h.push(format!("PS{axis}_1"), "COORDS".to_string(), None)
+            .unwrap();
+    }
+    h.push("RADESYS", "FK5".to_string(), None).unwrap();
+
+    let wcs = fitsy::Wcs::from_header(&h, ' ')
+        .unwrap()
+        .expect("a tabular celestial pair is a WCS");
+    assert!(wcs.celestial.is_none(), "a -TAB pair carries no projection");
+    assert!(wcs.is_celestial(), "but it is still a celestial pair");
+    assert_eq!(wcs.radesys, RadeSys::Fk5);
+
+    let serialized = wcs.to_header(' ').unwrap();
+    assert!(
+        serialized.contains("RADESYS"),
+        "to_header dropped the RADESYS card"
+    );
+    let reparsed = fitsy::Wcs::from_header(&serialized, ' ')
+        .unwrap()
+        .expect("serialized header still describes a WCS");
+    assert_eq!(
+        reparsed.radesys,
+        RadeSys::Fk5,
+        "RADESYS did not survive the round trip"
+    );
+}
+
 /// Regression: the pair parsed with no `CelestialBlock`, so the
 /// projected axis ran the bare linear pipeline -- coordinates with no
 /// projection applied, silently.
@@ -4369,7 +4453,7 @@ fn per_axis_reads_are_total_and_the_axis_count_is_derived() {
     // the linear transform.
     assert_eq!(wcs.naxis(), 2);
     assert_eq!(wcs.naxis(), wcs.axes().len());
-    assert_eq!(wcs.naxis(), wcs.linear.naxis());
+    assert_eq!(wcs.naxis(), wcs.linear().naxis());
     assert_eq!(wcs.crval().len(), wcs.naxis());
 
     assert_eq!(wcs.ctype(0), "RA---TAN");
@@ -4638,23 +4722,20 @@ fn axis_kinds_cover_stokes_and_plain_linear() {
     assert!(!wcs.is_tabular(99), "an absent axis is not tabular");
 }
 
-/// A `linear` field of the wrong rank is an error, not a panic and not
-/// a wrong answer.
-///
-/// `Wcs::new` enforces the match at construction. The `linear` field is
-/// public and `LinearTransform` has public constructors, so the two can
-/// be put out of step afterwards.
+/// A linear transform of the wrong rank is rejected at `set_linear`,
+/// not carried into the per-point bodies.
 ///
 /// The per-point bodies index `CRPIX` unchecked and zip the matrix
-/// against `naxis` rows. Without a guard, a short transform panics and
-/// a long one reuses the previous point's intermediate values.
+/// against `naxis` rows, so a mismatched transform must never be
+/// installed. The field is private; `Wcs::new` and `set_linear` are
+/// the two ways a transform gets in, and both validate the rank.
 #[test]
 fn a_mismatched_linear_transform_is_rejected() {
     use fitsy::wcs::LinearTransform;
+    let mut wcs = open_image(&tan_cards());
+    assert_eq!(wcs.naxis(), 2);
     for rank in [1_usize, 3] {
-        let mut wcs = open_image(&tan_cards());
-        assert_eq!(wcs.naxis(), 2);
-        wcs.linear = LinearTransform::from_cd(
+        let wrong = LinearTransform::from_cd(
             vec![1.0; rank],
             vec![0.0; rank],
             (0..rank * rank)
@@ -4662,21 +4743,19 @@ fn a_mismatched_linear_transform_is_rejected() {
                 .collect(),
         )
         .expect("a well-formed transform of the wrong rank");
-
-        let point = vec![0.0; 2];
-        for err in [
-            wcs.pixel_to_world(&point).unwrap_err(),
-            wcs.world_to_pixel(&point).unwrap_err(),
-            wcs.pixel_to_world_many(&point).unwrap_err(),
-            wcs.world_to_pixel_many(&point).unwrap_err(),
-        ] {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("linear transform"),
-                "rank {rank}: expected a shape complaint, got {msg}"
-            );
-        }
+        let msg = wcs.set_linear(wrong).unwrap_err().to_string();
+        assert!(
+            msg.contains("linear transform"),
+            "rank {rank}: expected a shape complaint, got {msg}"
+        );
     }
+    // A rank-matched replacement is accepted, and the transforms
+    // keep working afterwards.
+    let same_rank =
+        LinearTransform::from_cd(vec![1.0, 1.0], vec![0.0, 0.0], vec![1.0, 0.0, 0.0, 1.0])
+            .expect("a rank-2 transform");
+    wcs.set_linear(same_rank).expect("rank matches");
+    wcs.pixel_to_world(&[0.0, 0.0]).expect("still transforms");
 }
 
 /// `Time` and `Phase`, the two kinds that come from a parsed side

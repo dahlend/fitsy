@@ -17,6 +17,12 @@ use crate::error::{FitsError, Result};
 
 /// Validate that `start` and `shape` describe a sub-cuboid that fits
 /// inside an image with the given `axes`.
+///
+/// # Errors
+///
+/// [`FitsError::Data`] when `start` or `shape` has a length other than
+/// `NAXIS`, when an extent is zero, or when `start` plus `shape`
+/// leaves the image on any axis.
 pub(crate) fn validate_subarray_shape(axes: &[u64], start: &[u64], shape: &[u64]) -> Result<()> {
     if start.len() != axes.len() || shape.len() != axes.len() {
         return Err(FitsError::Data(format!(
@@ -42,7 +48,10 @@ pub(crate) fn validate_subarray_shape(axes: &[u64], start: &[u64], shape: &[u64]
 
 /// Element strides for `axes` in FITS order (NAXIS1 fastest-varying).
 /// Returns the per-axis stride in elements; the first entry is `1`.
-/// Errors if any cumulative product overflows `u64`.
+///
+/// # Errors
+///
+/// [`FitsError::Data`] when a cumulative product overflows `u64`.
 pub(crate) fn checked_strides(axes: &[u64]) -> Result<Vec<u64>> {
     let mut strides: Vec<u64> = Vec::with_capacity(axes.len());
     let mut s = 1_u64;

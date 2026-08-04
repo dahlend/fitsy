@@ -27,7 +27,7 @@
 //!
 //! The distortion is applied between the linear matrix and the base
 //! projection (TAN for TNX, ZPN for ZPX), exactly the slot occupied
-//! by [`crate::wcs::tpv::Tpv`] for the TPV convention.
+//! by [`crate::wcs::distortion::tpv::Tpv`] for the TPV convention.
 //!
 //! ## References
 //! - IRAF `noao$digiphot/lib/tnx.h` and the `MWCS` documentation.
@@ -47,7 +47,7 @@
 //! - End-to-end round trips from pixel to world and back.
 
 use crate::error::{FitsError, Result};
-use crate::wcs::newton;
+use crate::wcs::distortion::newton;
 
 /// Surface basis function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,29 +72,40 @@ pub enum TnxCrossTerm {
     Half,
 }
 
+/// Largest basis order [`TnxSurface::parse`] accepts per direction.
+///
+/// The evaluators size their stack buffers to this, so it must bound
+/// `ni` and `nj` for every instance. The fields are private and
+/// `parse` is the only way in, which is what makes that hold.
+const TNX_MAX_ORDER: usize = 20;
+
 /// One IRAF TNX/ZPX correction surface (`lngcor` or `latcor`).
+///
+/// The fields are private, with [`Self::parse`] the only way in. That
+/// makes the `parse`-time order cap unforgeable, and the evaluators
+/// use fixed stack buffers instead of a heap allocation per call.
 #[derive(Debug, Clone)]
 pub struct TnxSurface {
     /// Basis the surface is expanded in.
-    pub function: TnxFunction,
+    function: TnxFunction,
     /// Number of basis functions in the xi (longitude) direction.
-    pub ni: u32,
+    ni: u32,
     /// Number of basis functions in the eta (latitude) direction.
-    pub nj: u32,
+    nj: u32,
     /// Which cross terms the expansion retains.
-    pub cross: TnxCrossTerm,
+    cross: TnxCrossTerm,
     /// Lower bound of the `xi` normalization range.
-    pub xi_min: f64,
+    xi_min: f64,
     /// Upper bound of the `xi` normalization range.
-    pub xi_max: f64,
+    xi_max: f64,
     /// Lower bound of the `eta` normalization range.
-    pub eta_min: f64,
+    eta_min: f64,
     /// Upper bound of the `eta` normalization range.
-    pub eta_max: f64,
+    eta_max: f64,
     /// Coefficients in IRAF row-major order: outer loop over `j`,
     /// inner loop over `i`, restricted to entries selected by
-    /// [`cross`](Self::cross).
-    pub coeffs: Vec<f64>,
+    /// `cross`.
+    coeffs: Vec<f64>,
 }
 
 impl TnxSurface {
@@ -128,7 +139,8 @@ impl TnxSurface {
         };
         let ni = next(&mut tokens, "ni")? as i32;
         let nj = next(&mut tokens, "nj")? as i32;
-        if !(1..=20).contains(&ni) || !(1..=20).contains(&nj) {
+        let cap = TNX_MAX_ORDER as i32;
+        if !(1..=cap).contains(&ni) || !(1..=cap).contains(&nj) {
             return Err(FitsError::Wcs(format!(
                 "TNX: implausible orders ni={ni}, nj={nj}"
             )));
@@ -175,6 +187,48 @@ impl TnxSurface {
             eta_max,
             coeffs,
         })
+    }
+
+    /// Basis the surface is expanded in.
+    #[must_use]
+    pub fn function(&self) -> TnxFunction {
+        self.function
+    }
+
+    /// Number of basis functions in the xi direction.
+    #[must_use]
+    pub fn ni(&self) -> u32 {
+        self.ni
+    }
+
+    /// Number of basis functions in the eta direction.
+    #[must_use]
+    pub fn nj(&self) -> u32 {
+        self.nj
+    }
+
+    /// Which cross terms the expansion retains.
+    #[must_use]
+    pub fn cross(&self) -> TnxCrossTerm {
+        self.cross
+    }
+
+    /// The `xi` normalization range, as `(min, max)`.
+    #[must_use]
+    pub fn xi_range(&self) -> (f64, f64) {
+        (self.xi_min, self.xi_max)
+    }
+
+    /// The `eta` normalization range, as `(min, max)`.
+    #[must_use]
+    pub fn eta_range(&self) -> (f64, f64) {
+        (self.eta_min, self.eta_max)
+    }
+
+    /// Coefficients in IRAF row-major order.
+    #[must_use]
+    pub fn coeffs(&self) -> &[f64] {
+        &self.coeffs
     }
 
     /// Evaluate the surface at `(xi, eta)`.
@@ -301,9 +355,14 @@ fn cross_includes(cross: TnxCrossTerm, i: usize, j: usize, ni: usize, nj: usize)
 /// `(1 - x^2) P'_n = n (P_{n-1} - x P_n)` divides by zero at
 /// `x = +-1`, which is the edge of the normalization interval. The
 /// recurrence holds at every point of that interval.
-fn basis_with_derivative(f: TnxFunction, x: f64, n: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut b = vec![0.0; n];
-    let mut d = vec![0.0; n];
+fn basis_with_derivative(
+    f: TnxFunction,
+    x: f64,
+    n: usize,
+) -> ([f64; TNX_MAX_ORDER], [f64; TNX_MAX_ORDER]) {
+    debug_assert!(n <= TNX_MAX_ORDER, "basis order {n} exceeds the parse cap");
+    let mut b = [0.0; TNX_MAX_ORDER];
+    let mut d = [0.0; TNX_MAX_ORDER];
     if n == 0 {
         return (b, d);
     }
@@ -343,8 +402,9 @@ fn basis_with_derivative(f: TnxFunction, x: f64, n: usize) -> (Vec<f64>, Vec<f64
 }
 
 /// Basis vector `[B_0(x), B_1(x), ..., B_{n-1}(x)]`.
-fn basis(f: TnxFunction, x: f64, n: usize) -> Vec<f64> {
-    let mut b = vec![0.0; n];
+fn basis(f: TnxFunction, x: f64, n: usize) -> [f64; TNX_MAX_ORDER] {
+    debug_assert!(n <= TNX_MAX_ORDER, "basis order {n} exceeds the parse cap");
+    let mut b = [0.0; TNX_MAX_ORDER];
     if n == 0 {
         return b;
     }
@@ -571,7 +631,9 @@ mod tests {
     #[test]
     fn polynomial_basis_matches_monomials() {
         let b = basis(TnxFunction::Polynomial, 0.7, 4);
-        for (k, bk) in b.iter().enumerate() {
+        // The buffer is fixed-size; only the first `n` slots hold the
+        // basis, so compare those alone.
+        for (k, bk) in b.iter().enumerate().take(4) {
             assert!((bk - 0.7_f64.powi(k as i32)).abs() < 1e-15);
         }
     }

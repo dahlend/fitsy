@@ -1,4 +1,4 @@
-//! Projection trait and dispatcher (Paper II Sec.8.3).
+//! The [`Projection`] enum and its dispatcher (Paper II Sec.8.3).
 //!
 //! A [`Projection`] maps native spherical coordinates `(phi, theta)` (in
 //! degrees) to projection-plane coordinates `(x, y)` (also in degrees,
@@ -6,133 +6,224 @@
 //! latitude* `theta0` used by the celestial-rotation defaults
 //! (Paper II Sec.2.4).
 //!
-//! All Paper II projection codes are implemented natively in
-//! [`crate::wcs::projections`] (zenithal, cylindrical, pseudo-
-//! cylindrical, conic, polyconic, quadrilateralized cube, and
-//! `HEALPix`). XPH inverse currently has a known face-disambiguation
-//! limitation that is exercised by an `#[ignore]`d test.
-
-use std::sync::Arc;
+//! All Paper II projection codes are implemented natively, in one
+//! submodule per family:
+//!
+//! - `zenithal` -- TAN, STG, SIN, ZPN, AZP, ARC, ZEA, SZP and AIR
+//!   (Paper II Sec.5.1).
+//! - `cylindrical` -- CAR, CEA, MER and CYP (Sec.5.2).
+//! - `pseudocyl` -- SFL, PAR, MOL and AIT (Sec.5.3).
+//! - `conic` -- COP, COE, COD and COO (Sec.5.4).
+//! - `polyconic` -- BON and PCO (Sec.5.5).
+//! - `quadcube` -- TSC, CSC and QSC (Sec.5.6).
+//! - `healpix` -- HPX and XPH (Calabretta & Roukema 2007).
+//!
+//! The families group the source files. Table 13 is a flat set of
+//! three-letter codes, so this module re-exports every projection
+//! type. Reach one as `wcs::projection::Tan`. The XPH inverse has a
+//! known face-disambiguation limit. An `#[ignore]`d test records it.
+//!
+//! # The four methods
+//!
+//! Each projection type carries the same four methods. The
+//! [`Projection`] enum dispatches to them.
+//!
+//! - `theta0` returns the reference native latitude in degrees.
+//! - `pv2` returns the `(m, value)` pairs that rebuild the projection
+//!   through [`Projection::from_code`].
+//! - `s2x` maps native `(phi, theta)` to plane `(x, y)`.
+//! - `x2s` maps plane `(x, y)` back to native `(phi, theta)`.
+//!
+//! `s2x` and `x2s` both return [`Result`]. The error case is the
+//! contract that matters: `s2x` must refuse a point that `x2s` cannot
+//! return, or the pair reports a wrong coordinate as a right one. Each
+//! method states its own domain.
+//!
+//! The set of projections is one data-carrying enum rather than a
+//! trait object. Table 13 is complete, so a closed set costs nothing.
+//! The enum buys three things. Every dispatch site is exhaustive, so
+//! no projection can be missed. The three-letter code is a method on
+//! the value, so the code and the parameters cannot fall out of step.
+//! The per-point dispatch is a match, which the compiler can inline
+//! through; it cannot inline through a vtable call.
 
 use crate::error::{FitsError, Result};
 
-use crate::wcs::projections::{
-    Air, Ait, Arc as ArcProj, Azp, Bon, Car, Cea, Cod, Coe, Coo, Cop, Csc, Cyp, Hpx, Mer, Mol, Par,
-    Pco, Qsc, Sfl, Sin, Stg, Szp, Tan, Tsc, Xph, Zea, Zpn,
-};
+mod conic;
+mod cylindrical;
+mod healpix;
+mod polyconic;
+mod pseudocyl;
+mod quadcube;
+mod zenithal;
 
-/// Three-letter projection code (Paper II Table 13).
-// Adding a variant requires updating `code`, `from_code` and `build`;
-// all three match exhaustively, so the compiler asks for each one.
-//
-// `non_exhaustive`: Sec.8.2 registers new codes with the IAUFWG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ProjectionKind {
+#[cfg(test)]
+mod testing;
+
+pub use conic::{Cod, Coe, Coo, Cop};
+pub use cylindrical::{Car, Cea, Cyp, Mer};
+pub use healpix::{Hpx, Xph};
+pub use polyconic::{Bon, Pco};
+pub use pseudocyl::{Ait, Mol, Par, Sfl};
+pub use quadcube::{Csc, Qsc, Tsc};
+pub use zenithal::{Air, Arc, Azp, Sin, Stg, Szp, Tan, Zea, Zpn};
+
+/// Run `$body` once for the live variant, with `$p` bound to its
+/// payload. One definition serves every method below, so a variant
+/// cannot be dispatched in one method and forgotten in another.
+macro_rules! for_each_projection {
+    ($self:expr, $p:ident => $body:expr) => {
+        match $self {
+            Self::Azp($p) => $body,
+            Self::Szp($p) => $body,
+            Self::Tan($p) => $body,
+            Self::Stg($p) => $body,
+            Self::Sin($p) => $body,
+            Self::Arc($p) => $body,
+            Self::Zpn($p) => $body,
+            Self::Zea($p) => $body,
+            Self::Air($p) => $body,
+            Self::Cyp($p) => $body,
+            Self::Cea($p) => $body,
+            Self::Car($p) => $body,
+            Self::Mer($p) => $body,
+            Self::Sfl($p) => $body,
+            Self::Par($p) => $body,
+            Self::Mol($p) => $body,
+            Self::Ait($p) => $body,
+            Self::Cop($p) => $body,
+            Self::Coe($p) => $body,
+            Self::Cod($p) => $body,
+            Self::Coo($p) => $body,
+            Self::Bon($p) => $body,
+            Self::Pco($p) => $body,
+            Self::Tsc($p) => $body,
+            Self::Csc($p) => $body,
+            Self::Qsc($p) => $body,
+            Self::Hpx($p) => $body,
+            Self::Xph($p) => $body,
+        }
+    };
+}
+
+/// A Paper II Table 13 projection with its parameters resolved.
+///
+/// Build one with [`Self::from_code`], or wrap a projection struct
+/// directly. Every payload type converts with `From`, so
+/// `Projection::from(Tan)` and `Tan.into()` both work.
+#[derive(Debug, Clone)]
+pub enum Projection {
     /// `AZP` -- zenithal/azimuthal perspective (Paper II Sec.5.1.1).
-    Azp,
+    Azp(Azp),
     /// `SZP` -- slant zenithal perspective (Sec.5.1.2).
-    Szp,
+    Szp(Szp),
     /// `TAN` -- gnomonic, the tangent plane (Sec.5.1.3).
-    Tan,
+    Tan(Tan),
     /// `STG` -- stereographic (Sec.5.1.4).
-    Stg,
+    Stg(Stg),
     /// `SIN` -- orthographic / slant orthographic, the radio
     /// interferometry projection (Sec.5.1.5).
-    Sin,
+    Sin(Sin),
     /// `ARC` -- zenithal equidistant (Sec.5.1.6).
-    Arc,
+    Arc(Arc),
     /// `ZPN` -- zenithal polynomial (Sec.5.1.7).
-    Zpn,
+    Zpn(Zpn),
     /// `ZEA` -- zenithal equal-area (Sec.5.1.8).
-    Zea,
+    Zea(Zea),
     /// `AIR` -- Airy (Sec.5.1.9).
-    Air,
+    Air(Air),
     /// `CYP` -- cylindrical perspective (Sec.5.2.1).
-    Cyp,
+    Cyp(Cyp),
     /// `CEA` -- cylindrical equal-area (Sec.5.2.2).
-    Cea,
+    Cea(Cea),
     /// `CAR` -- plate carree, the equirectangular projection
     /// (Sec.5.2.3).
-    Car,
+    Car(Car),
     /// `MER` -- Mercator (Sec.5.2.4).
-    Mer,
+    Mer(Mer),
     /// `SFL` -- Sanson-Flamsteed, a.k.a. global sinusoidal
     /// (Sec.5.3.1).
-    Sfl,
+    Sfl(Sfl),
     /// `PAR` -- parabolic (Sec.5.3.2).
-    Par,
+    Par(Par),
     /// `MOL` -- Mollweide (Sec.5.3.3).
-    Mol,
+    Mol(Mol),
     /// `AIT` -- Hammer-Aitoff (Sec.5.3.4).
-    Ait,
+    Ait(Ait),
     /// `COP` -- conic perspective (Sec.5.4.1).
-    Cop,
+    Cop(Cop),
     /// `COE` -- conic equal-area (Sec.5.4.2).
-    Coe,
+    Coe(Coe),
     /// `COD` -- conic equidistant (Sec.5.4.3).
-    Cod,
+    Cod(Cod),
     /// `COO` -- conic orthomorphic (Sec.5.4.4).
-    Coo,
+    Coo(Coo),
     /// `BON` -- Bonne's equal-area (Sec.5.5.1).
-    Bon,
+    Bon(Bon),
     /// `PCO` -- polyconic (Sec.5.5.2).
-    Pco,
+    Pco(Pco),
     /// `TSC` -- tangential spherical cube (Sec.5.6.1).
-    Tsc,
+    Tsc(Tsc),
     /// `CSC` -- COBE quadrilateralized spherical cube (Sec.5.6.2).
     ///
     /// The forward map is a polynomial approximation accurate to about
     /// an arcminute, so a round trip does not return to machine
     /// precision.
-    Csc,
+    Csc(Csc),
     /// `QSC` -- quadrilateralized spherical cube (Sec.5.6.3).
-    Qsc,
+    Qsc(Qsc),
     /// `HPX` -- `HEALPix` grid (Calabretta & Roukema 2007).
-    Hpx,
+    Hpx(Hpx),
     /// `XPH` -- polar `HEALPix`, the "butterfly" layout (Calabretta &
     /// Roukema 2007 Sec.6).
-    Xph,
+    Xph(Xph),
 }
 
-impl ProjectionKind {
-    /// Parse a three-letter code from a `CTYPEia` value, matched
+impl Projection {
+    /// Build the projection a three-letter code names, matched
     /// case-insensitively.
+    ///
+    /// The `pv2` argument is the table of `PV2_m` keyword values for
+    /// the latitude axis, indexed by `m` from 0. An entry that no card
+    /// supplies holds 0. A projection without parameters ignores it.
     ///
     /// # Errors
     ///
-    /// If the code is not in Table 13. The distortion pseudo-codes
-    /// (`TPV`, `TNX`, `ZPX`) are handled a layer up.
-    pub fn from_code(code: &str) -> Result<Self> {
+    /// [`FitsError::Wcs`] when the code is not in Table 13, or when
+    /// the parameters in `pv2` are invalid for that projection. The
+    /// `from_pv` constructor of each projection states its own
+    /// conditions. The distortion pseudo-codes (`TPV`, `TNX`, `ZPX`)
+    /// are handled a layer up.
+    pub fn from_code(code: &str, pv2: &[f64]) -> Result<Self> {
         Ok(match code.to_uppercase().as_str() {
-            "AZP" => Self::Azp,
-            "SZP" => Self::Szp,
-            "TAN" => Self::Tan,
-            "STG" => Self::Stg,
-            "SIN" => Self::Sin,
-            "ARC" => Self::Arc,
-            "ZPN" => Self::Zpn,
-            "ZEA" => Self::Zea,
-            "AIR" => Self::Air,
-            "CYP" => Self::Cyp,
-            "CEA" => Self::Cea,
-            "CAR" => Self::Car,
-            "MER" => Self::Mer,
-            "SFL" => Self::Sfl,
-            "PAR" => Self::Par,
-            "MOL" => Self::Mol,
-            "AIT" => Self::Ait,
-            "COP" => Self::Cop,
-            "COE" => Self::Coe,
-            "COD" => Self::Cod,
-            "COO" => Self::Coo,
-            "BON" => Self::Bon,
-            "PCO" => Self::Pco,
-            "TSC" => Self::Tsc,
-            "CSC" => Self::Csc,
-            "QSC" => Self::Qsc,
-            "HPX" => Self::Hpx,
-            "XPH" => Self::Xph,
+            "AZP" => Self::Azp(Azp::from_pv(pv2)?),
+            "SZP" => Self::Szp(Szp::from_pv(pv2)?),
+            "TAN" => Self::Tan(Tan),
+            "STG" => Self::Stg(Stg),
+            "SIN" => Self::Sin(Sin::from_pv(pv2)?),
+            "ARC" => Self::Arc(Arc),
+            "ZPN" => Self::Zpn(Zpn::from_pv(pv2)?),
+            "ZEA" => Self::Zea(Zea),
+            "AIR" => Self::Air(Air::from_pv(pv2)?),
+            "CYP" => Self::Cyp(Cyp::from_pv(pv2)?),
+            "CEA" => Self::Cea(Cea::from_pv(pv2)?),
+            "CAR" => Self::Car(Car),
+            "MER" => Self::Mer(Mer),
+            "SFL" => Self::Sfl(Sfl),
+            "PAR" => Self::Par(Par),
+            "MOL" => Self::Mol(Mol),
+            "AIT" => Self::Ait(Ait),
+            "COP" => Self::Cop(Cop::from_pv(pv2)?),
+            "COE" => Self::Coe(Coe::from_pv(pv2)?),
+            "COD" => Self::Cod(Cod::from_pv(pv2)?),
+            "COO" => Self::Coo(Coo::from_pv(pv2)?),
+            "BON" => Self::Bon(Bon::from_pv(pv2)?),
+            "PCO" => Self::Pco(Pco),
+            "TSC" => Self::Tsc(Tsc),
+            "CSC" => Self::Csc(Csc),
+            "QSC" => Self::Qsc(Qsc),
+            "HPX" => Self::Hpx(Hpx::from_pv(pv2)?),
+            "XPH" => Self::Xph(Xph),
             _ => {
                 return Err(FitsError::Wcs(format!("unknown projection code `{code}`")));
             }
@@ -141,44 +232,45 @@ impl ProjectionKind {
 
     /// Three-letter code for this projection (Paper II Table 13).
     #[must_use]
-    pub fn code(self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
-            Self::Azp => "AZP",
-            Self::Szp => "SZP",
-            Self::Tan => "TAN",
-            Self::Stg => "STG",
-            Self::Sin => "SIN",
-            Self::Arc => "ARC",
-            Self::Zpn => "ZPN",
-            Self::Zea => "ZEA",
-            Self::Air => "AIR",
-            Self::Cyp => "CYP",
-            Self::Cea => "CEA",
-            Self::Car => "CAR",
-            Self::Mer => "MER",
-            Self::Sfl => "SFL",
-            Self::Par => "PAR",
-            Self::Mol => "MOL",
-            Self::Ait => "AIT",
-            Self::Cop => "COP",
-            Self::Coe => "COE",
-            Self::Cod => "COD",
-            Self::Coo => "COO",
-            Self::Bon => "BON",
-            Self::Pco => "PCO",
-            Self::Tsc => "TSC",
-            Self::Csc => "CSC",
-            Self::Qsc => "QSC",
-            Self::Hpx => "HPX",
-            Self::Xph => "XPH",
+            Self::Azp(_) => "AZP",
+            Self::Szp(_) => "SZP",
+            Self::Tan(_) => "TAN",
+            Self::Stg(_) => "STG",
+            Self::Sin(_) => "SIN",
+            Self::Arc(_) => "ARC",
+            Self::Zpn(_) => "ZPN",
+            Self::Zea(_) => "ZEA",
+            Self::Air(_) => "AIR",
+            Self::Cyp(_) => "CYP",
+            Self::Cea(_) => "CEA",
+            Self::Car(_) => "CAR",
+            Self::Mer(_) => "MER",
+            Self::Sfl(_) => "SFL",
+            Self::Par(_) => "PAR",
+            Self::Mol(_) => "MOL",
+            Self::Ait(_) => "AIT",
+            Self::Cop(_) => "COP",
+            Self::Coe(_) => "COE",
+            Self::Cod(_) => "COD",
+            Self::Coo(_) => "COO",
+            Self::Bon(_) => "BON",
+            Self::Pco(_) => "PCO",
+            Self::Tsc(_) => "TSC",
+            Self::Csc(_) => "CSC",
+            Self::Qsc(_) => "QSC",
+            Self::Hpx(_) => "HPX",
+            Self::Xph(_) => "XPH",
         }
     }
-}
 
-/// Projection interface: spherical <-> planar.
-pub trait Projection: std::fmt::Debug + Send + Sync {
-    /// Reference native latitude `theta_0` in degrees (Paper II Sec.2.4).
-    fn theta0(&self) -> f64;
+    /// Reference native latitude `theta_0` in degrees
+    /// (Paper II Sec.2.4).
+    #[must_use]
+    pub fn theta0(&self) -> f64 {
+        for_each_projection!(self, p => p.theta0())
+    }
 
     /// Forward step, from native `(phi, theta)` to plane `(x, y)`.
     /// Both pairs are in degrees.
@@ -187,7 +279,9 @@ pub trait Projection: std::fmt::Debug + Send + Sync {
     ///
     /// [`crate::FitsError::Wcs`] when the point lies outside the
     /// domain that this projection covers.
-    fn s2x(&self, phi_deg: f64, theta_deg: f64) -> Result<(f64, f64)>;
+    pub fn s2x(&self, phi_deg: f64, theta_deg: f64) -> Result<(f64, f64)> {
+        for_each_projection!(self, p => p.s2x(phi_deg, theta_deg))
+    }
 
     /// Inverse step, from plane `(x, y)` to native `(phi, theta)`.
     /// Both pairs are in degrees.
@@ -196,117 +290,165 @@ pub trait Projection: std::fmt::Debug + Send + Sync {
     ///
     /// [`crate::FitsError::Wcs`] when the point lies outside the
     /// region of the plane that this projection fills.
-    fn x2s(&self, x_deg: f64, y_deg: f64) -> Result<(f64, f64)>;
+    pub fn x2s(&self, x_deg: f64, y_deg: f64) -> Result<(f64, f64)> {
+        for_each_projection!(self, p => p.x2s(x_deg, y_deg))
+    }
 
-    /// The `(m, value)` pairs that [`build`] needs to reconstruct this
-    /// projection, which are the `PV2_m` cards it was parsed from. A
-    /// projection without parameters returns an empty vector.
+    /// The `(m, value)` pairs that [`Self::from_code`] needs to
+    /// reconstruct this projection, which are the `PV2_m` cards it was
+    /// parsed from. A projection without parameters returns an empty
+    /// vector.
     ///
-    /// This is a required method, not one that defaults to
-    /// `Vec::new()`. A new parameterized projection that omitted it
-    /// would serialize to a header that re-parses with different
-    /// parameters, and nothing would report that. The exhaustive
-    /// matches on [`ProjectionKind`] exist for the same reason.
-    fn pv2(&self) -> Vec<(u32, f64)>;
+    /// A parameterized projection that returned the wrong pairs would
+    /// serialize to a header that re-parses with different parameters,
+    /// and nothing would report that. The
+    /// `from_code_round_trips_every_code` test pins the pairing.
+    #[must_use]
+    pub fn pv2(&self) -> Vec<(u32, f64)> {
+        for_each_projection!(self, p => p.pv2())
+    }
 }
 
-/// Construct the projection that `kind` names.
-///
-/// The `pv2` argument is the table of `PV2_m` keyword values for the
-/// latitude axis, indexed by `m` from 0. An entry that no card
-/// supplies holds 0.
-///
-/// # Errors
-///
-/// [`FitsError::Wcs`] when the parameters in `pv2` are invalid for
-/// that projection. The `from_pv` constructor of each projection
-/// states its own conditions.
-pub fn build(kind: ProjectionKind, pv2: &[f64]) -> Result<Arc<dyn Projection>> {
-    use ProjectionKind as K;
-    Ok(match kind {
-        K::Azp => Arc::new(Azp::from_pv(pv2)?),
-        K::Szp => Arc::new(Szp::from_pv(pv2)?),
-        K::Tan => Arc::new(Tan),
-        K::Stg => Arc::new(Stg),
-        K::Sin => Arc::new(Sin::from_pv(pv2)?),
-        K::Arc => Arc::new(ArcProj),
-        K::Zpn => Arc::new(Zpn::from_pv(pv2)?),
-        K::Zea => Arc::new(Zea),
-        K::Air => Arc::new(Air::from_pv(pv2)?),
-        K::Cyp => Arc::new(Cyp::from_pv(pv2)?),
-        K::Cea => Arc::new(Cea::from_pv(pv2)?),
-        K::Car => Arc::new(Car),
-        K::Mer => Arc::new(Mer),
-        K::Sfl => Arc::new(Sfl),
-        K::Par => Arc::new(Par),
-        K::Mol => Arc::new(Mol),
-        K::Ait => Arc::new(Ait),
-        K::Cop => Arc::new(Cop::from_pv(pv2)?),
-        K::Coe => Arc::new(Coe::from_pv(pv2)?),
-        K::Cod => Arc::new(Cod::from_pv(pv2)?),
-        K::Coo => Arc::new(Coo::from_pv(pv2)?),
-        K::Bon => Arc::new(Bon::from_pv(pv2)?),
-        K::Pco => Arc::new(Pco),
-        K::Tsc => Arc::new(Tsc),
-        K::Csc => Arc::new(Csc),
-        K::Qsc => Arc::new(Qsc),
-        K::Hpx => Arc::new(Hpx::from_pv(pv2)?),
-        K::Xph => Arc::new(Xph),
-    })
+/// The default is TAN, the projection of a plain undistorted image.
+impl Default for Projection {
+    fn default() -> Self {
+        Self::Tan(Tan)
+    }
 }
+
+macro_rules! impl_from {
+    ($($variant:ident: $ty:ty),* $(,)?) => {$(
+        impl From<$ty> for Projection {
+            fn from(p: $ty) -> Self {
+                Self::$variant(p)
+            }
+        }
+    )*};
+}
+impl_from!(
+    Azp: Azp, Szp: Szp, Tan: Tan, Stg: Stg, Sin: Sin, Arc: Arc, Zpn: Zpn,
+    Zea: Zea, Air: Air, Cyp: Cyp, Cea: Cea, Car: Car, Mer: Mer, Sfl: Sfl,
+    Par: Par, Mol: Mol, Ait: Ait, Cop: Cop, Coe: Coe, Cod: Cod, Coo: Coo,
+    Bon: Bon, Pco: Pco, Tsc: Tsc, Csc: Csc, Qsc: Qsc, Hpx: Hpx, Xph: Xph,
+);
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectionKind;
+    use super::Projection;
 
-    /// All currently-defined `ProjectionKind` variants. Used by the
-    /// round-trip test below; the compiler does not enumerate enum
-    /// variants for us, so this list has to be kept in sync with the
-    /// enum manually. Adding a variant without updating this list
-    /// only weakens the test, not the compile-time exhaustiveness
-    /// of the three matches above.
-    const ALL_KINDS: &[ProjectionKind] = &[
-        ProjectionKind::Azp,
-        ProjectionKind::Szp,
-        ProjectionKind::Tan,
-        ProjectionKind::Stg,
-        ProjectionKind::Sin,
-        ProjectionKind::Arc,
-        ProjectionKind::Zpn,
-        ProjectionKind::Zea,
-        ProjectionKind::Air,
-        ProjectionKind::Cyp,
-        ProjectionKind::Cea,
-        ProjectionKind::Car,
-        ProjectionKind::Mer,
-        ProjectionKind::Sfl,
-        ProjectionKind::Par,
-        ProjectionKind::Mol,
-        ProjectionKind::Ait,
-        ProjectionKind::Cop,
-        ProjectionKind::Coe,
-        ProjectionKind::Cod,
-        ProjectionKind::Coo,
-        ProjectionKind::Bon,
-        ProjectionKind::Pco,
-        ProjectionKind::Tsc,
-        ProjectionKind::Csc,
-        ProjectionKind::Qsc,
-        ProjectionKind::Hpx,
-        ProjectionKind::Xph,
+    /// Every Table 13 code, with `PV2_m` values each parameterized
+    /// projection accepts. The compiler does not enumerate the codes
+    /// for us, so the assertion below checks that the list covers
+    /// every variant.
+    const ALL_CODES: &[(&str, &[f64])] = &[
+        ("AZP", &[0.0, 2.0, 15.0]),
+        ("SZP", &[0.0, 2.0, 180.0, 45.0]),
+        ("TAN", &[]),
+        ("STG", &[]),
+        ("SIN", &[0.0, 0.0, 0.0]),
+        ("ARC", &[]),
+        ("ZPN", &[0.0, 1.0, 0.0, 2.0e-4]),
+        ("ZEA", &[]),
+        ("AIR", &[0.0, 45.0]),
+        ("CYP", &[0.0, 1.0, 1.0]),
+        ("CEA", &[0.0, 1.0]),
+        ("CAR", &[]),
+        ("MER", &[]),
+        ("SFL", &[]),
+        ("PAR", &[]),
+        ("MOL", &[]),
+        ("AIT", &[]),
+        ("COP", &[0.0, 45.0, 25.0]),
+        ("COE", &[0.0, 45.0, 25.0]),
+        ("COD", &[0.0, 45.0, 25.0]),
+        ("COO", &[0.0, 45.0, 25.0]),
+        ("BON", &[0.0, 30.0]),
+        ("PCO", &[]),
+        ("TSC", &[]),
+        ("CSC", &[]),
+        ("QSC", &[]),
+        ("HPX", &[0.0, 4.0, 3.0]),
+        ("XPH", &[]),
     ];
 
-    /// Round-trip every variant through `code()` -> `from_code()`,
-    /// pinning the inverse-pair invariant. Exhaustiveness of the
-    /// individual matches is already a compile-time guarantee.
+    /// `from_code` -> `code()` is the identity for every Table 13
+    /// code, case-insensitively, and the list covers every variant.
+    ///
+    /// The second half re-parses each projection from its own
+    /// `code()` and `pv2()` output and requires the same `pv2()`
+    /// back. A projection that reported the wrong pairs would
+    /// serialize to a header that re-parses with different
+    /// parameters; this is the check the `pv2` documentation names.
     #[test]
-    fn projection_code_round_trips() {
-        for &kind in ALL_KINDS {
-            let code = kind.code();
-            let parsed = ProjectionKind::from_code(code).unwrap_or_else(|e| {
-                panic!("from_code({code:?}) failed: {e}");
-            });
-            assert_eq!(parsed, kind, "from_code({code:?}) returned wrong variant");
+    fn from_code_round_trips_every_code() {
+        let mut seen = Vec::new();
+        for &(code, pv2) in ALL_CODES {
+            let p = Projection::from_code(code, pv2)
+                .unwrap_or_else(|e| panic!("from_code({code:?}) failed: {e}"));
+            assert_eq!(p.code(), code, "code() disagrees for {code}");
+            let lower = Projection::from_code(&code.to_lowercase(), pv2).unwrap();
+            assert_eq!(lower.code(), code);
+
+            // Rebuild from the projection's own serialization pairs.
+            let pairs = p.pv2();
+            let n = pairs
+                .iter()
+                .map(|&(m, _)| m as usize + 1)
+                .max()
+                .unwrap_or(0);
+            let mut table = vec![0.0_f64; n];
+            for &(m, v) in &pairs {
+                table[m as usize] = v;
+            }
+            let rebuilt = Projection::from_code(p.code(), &table)
+                .unwrap_or_else(|e| panic!("{code}: rebuild from pv2() failed: {e}"));
+            assert_eq!(
+                rebuilt.pv2(),
+                pairs,
+                "{code}: pv2() does not survive a rebuild"
+            );
+
+            let d = std::mem::discriminant(&p);
+            if !seen.contains(&d) {
+                seen.push(d);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            28,
+            "a Table 13 variant is missing from ALL_CODES"
+        );
+    }
+
+    #[test]
+    fn unknown_code_is_rejected() {
+        assert!(Projection::from_code("XYZ", &[]).is_err());
+    }
+
+    /// A dense sweep over *every* registered projection, built the way
+    /// a header would build it, asserting that whatever `s2x` accepts
+    /// `x2s` inverts.
+    ///
+    /// The family modules test each projection against the parameters
+    /// its own formulation makes interesting. This one tests the
+    /// *table*: it walks `ALL_CODES` so that a projection cannot be
+    /// added to the enum and left without a round-trip check.
+    #[test]
+    fn every_registered_projection_inverts_what_it_accepts() {
+        // `CSC` is a polynomial *approximation* (Paper II Sec.5.6.2);
+        // its own paper quotes an error near an arcminute, so it gets
+        // a matching tolerance rather than a machine-precision one.
+        // `SIN`'s limb inverts through `acos`, which loses half the
+        // mantissa exactly at `theta = 0`.
+        let tol = |code: &str| match code {
+            "CSC" => 5e-2,
+            "SIN" => 1e-6,
+            _ => 1e-9,
+        };
+        for &(code, pv2) in ALL_CODES {
+            let p = Projection::from_code(code, pv2)
+                .unwrap_or_else(|e| panic!("{code} failed to build: {e}"));
+            super::testing::round_trip_tol(&p, code, tol(code));
         }
     }
 }

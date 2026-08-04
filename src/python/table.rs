@@ -20,7 +20,7 @@ use crate::hdu::{AsciiCell, AsciiTableHdu, BinTableHdu, BinValue};
 
 /// Convert an `Option<i64>` column to a Python object: a plain
 /// `numpy.int64` array if there are no nulls, otherwise a
-/// `numpy.ma.MaskedArray` so callers don't lose the integer dtype.
+/// `numpy.ma.MaskedArray` so callers do not lose the integer dtype.
 /// A masked position's underlying value is `0`; only the mask
 /// records that it is undefined.
 ///

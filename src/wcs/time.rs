@@ -44,7 +44,6 @@ pub fn is_time_scale(code: &str) -> bool {
 
 /// A recognized time axis (Standard Sec.9.5.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct TimeAxis {
     /// Zero-based axis index.
     pub axis: usize,
@@ -116,7 +115,6 @@ impl TimeAxis {
 /// keywords only a phase axis may carry -- the time at its zero point
 /// and its period.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct PhaseAxis {
     /// Zero-based axis index.
     pub axis: usize,

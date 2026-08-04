@@ -61,8 +61,8 @@
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
-use crate::wcs::newton;
-use crate::wcs::poly;
+use crate::wcs::distortion::newton;
+use crate::wcs::distortion::poly;
 
 /// Arcseconds per radian.
 const ARCSEC_PER_RAD: f64 = 180.0 * 3600.0 / std::f64::consts::PI;
@@ -72,28 +72,43 @@ const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 const RAD_PER_DEG: f64 = std::f64::consts::PI / 180.0;
 
 /// One DSS plate solution.
+///
+/// The fields are private; [`Self::new`] and [`Self::from_header`]
+/// are the ways in. Construction resolves the folded coefficient
+/// triangles and the plate-center trigonometry, so the transforms
+/// read those instead of re-deriving them per point.
 #[derive(Debug, Clone)]
 pub struct Dss {
     /// Plate-center right ascension, degrees.
-    pub plate_ra: f64,
+    plate_ra: f64,
     /// Plate-center declination, degrees.
-    pub plate_dec: f64,
+    plate_dec: f64,
     /// `PPO3` -- plate center x in microns.
-    pub ppo3: f64,
+    ppo3: f64,
     /// `PPO6` -- plate center y in microns.
-    pub ppo6: f64,
+    ppo6: f64,
     /// `XPIXELSZ` -- pixel size on the plate, microns.
-    pub xpixelsz: f64,
+    xpixelsz: f64,
     /// `YPIXELSZ` -- pixel size on the plate, microns.
-    pub ypixelsz: f64,
+    ypixelsz: f64,
     /// `CNPIX1` -- x-offset of the subimage in original plate pixels.
-    pub cnpix1: f64,
+    cnpix1: f64,
     /// `CNPIX2` -- y-offset of the subimage in original plate pixels.
-    pub cnpix2: f64,
+    cnpix2: f64,
     /// 20 polynomial coefficients for xi.
-    pub amdx: [f64; 20],
+    amdx: [f64; 20],
     /// 20 polynomial coefficients for eta.
-    pub amdy: [f64; 20],
+    amdy: [f64; 20],
+    /// `amdx` folded into a triangle (see [`amd_triangle`]).
+    tx: [f64; AMD_DIM * AMD_DIM],
+    /// `amdy` folded into a triangle.
+    ty: [f64; AMD_DIM * AMD_DIM],
+    /// Plate-center right ascension, radians.
+    ra0: f64,
+    /// Cosine of the plate-center declination.
+    cos_dec0: f64,
+    /// Sine of the plate-center declination.
+    sin_dec0: f64,
 }
 
 impl Dss {
@@ -135,7 +150,33 @@ impl Dss {
             amdx[i] = read_optional_real(header, &format!("AMDX{}", i + 1)).unwrap_or(0.0);
             amdy[i] = read_optional_real(header, &format!("AMDY{}", i + 1)).unwrap_or(0.0);
         }
-        Ok(Some(Self {
+        Ok(Some(Self::new(
+            plate_ra, plate_dec, ppo3, ppo6, xpixelsz, ypixelsz, cnpix1, cnpix2, amdx, amdy,
+        )))
+    }
+
+    /// Build a plate solution from its parameters.
+    ///
+    /// The argument names follow the header keywords that
+    /// [`Self::from_header`] reads: the plate center in degrees, the
+    /// `PPO3`/`PPO6` center offsets in microns, the pixel sizes in
+    /// microns, the `CNPIX` subimage offsets in original plate pixels,
+    /// and the 20 `AMDX`/`AMDY` coefficients each.
+    #[must_use]
+    pub fn new(
+        plate_ra: f64,
+        plate_dec: f64,
+        ppo3: f64,
+        ppo6: f64,
+        xpixelsz: f64,
+        ypixelsz: f64,
+        cnpix1: f64,
+        cnpix2: f64,
+        amdx: [f64; 20],
+        amdy: [f64; 20],
+    ) -> Self {
+        let dec0 = plate_dec * RAD_PER_DEG;
+        Self {
             plate_ra,
             plate_dec,
             ppo3,
@@ -146,7 +187,72 @@ impl Dss {
             cnpix2,
             amdx,
             amdy,
-        }))
+            tx: amd_triangle(&amdx),
+            ty: amd_triangle(&amdy),
+            ra0: plate_ra * RAD_PER_DEG,
+            cos_dec0: dec0.cos(),
+            sin_dec0: dec0.sin(),
+        }
+    }
+
+    /// Plate-center right ascension, degrees.
+    #[must_use]
+    pub fn plate_ra(&self) -> f64 {
+        self.plate_ra
+    }
+
+    /// Plate-center declination, degrees.
+    #[must_use]
+    pub fn plate_dec(&self) -> f64 {
+        self.plate_dec
+    }
+
+    /// `PPO3` -- plate center x in microns.
+    #[must_use]
+    pub fn ppo3(&self) -> f64 {
+        self.ppo3
+    }
+
+    /// `PPO6` -- plate center y in microns.
+    #[must_use]
+    pub fn ppo6(&self) -> f64 {
+        self.ppo6
+    }
+
+    /// `XPIXELSZ` -- pixel size on the plate, microns.
+    #[must_use]
+    pub fn xpixelsz(&self) -> f64 {
+        self.xpixelsz
+    }
+
+    /// `YPIXELSZ` -- pixel size on the plate, microns.
+    #[must_use]
+    pub fn ypixelsz(&self) -> f64 {
+        self.ypixelsz
+    }
+
+    /// `CNPIX1` -- x-offset of the subimage in original plate pixels.
+    #[must_use]
+    pub fn cnpix1(&self) -> f64 {
+        self.cnpix1
+    }
+
+    /// `CNPIX2` -- y-offset of the subimage in original plate pixels.
+    #[must_use]
+    pub fn cnpix2(&self) -> f64 {
+        self.cnpix2
+    }
+
+    /// The 20 `AMDX` coefficients.
+    #[must_use]
+    pub fn amdx(&self) -> &[f64; 20] {
+        &self.amdx
+    }
+
+    /// The 20 `AMDY` coefficients.
+    #[must_use]
+    pub fn amdy(&self) -> &[f64; 20] {
+        &self.amdy
     }
 
     /// Pixel (1-based, FITS convention) -> plate position (mm).
@@ -170,19 +276,17 @@ impl Dss {
     pub fn pixel_to_world(&self, pix_x: f64, pix_y: f64) -> (f64, f64) {
         let (xmm, ymm) = self.pixel_to_plate(pix_x, pix_y);
         // The eta solution is the xi solution with x and y exchanged
-        // (`AMDY` multiplies `y` where `AMDX` multiplies `x`), so one
-        // folded table serves both -- evaluated with its arguments
-        // swapped for eta. This is the same device `TpvAxis::xy` uses.
-        let xi_arcsec = amd_eval(&amd_triangle(&self.amdx), xmm, ymm);
-        let eta_arcsec = amd_eval(&amd_triangle(&self.amdy), ymm, xmm);
+        // (`AMDY` multiplies `y` where `AMDX` multiplies `x`), so a
+        // folded table is evaluated with its arguments swapped for
+        // eta. This is the same device `TpvAxis::xy` uses.
+        let xi_arcsec = amd_eval(&self.tx, xmm, ymm);
+        let eta_arcsec = amd_eval(&self.ty, ymm, xmm);
         let xi = xi_arcsec / ARCSEC_PER_RAD;
         let eta = eta_arcsec / ARCSEC_PER_RAD;
-        let dec0 = self.plate_dec * RAD_PER_DEG;
-        let ra0 = self.plate_ra * RAD_PER_DEG;
-        let cd = dec0.cos();
-        let sd = dec0.sin();
+        let cd = self.cos_dec0;
+        let sd = self.sin_dec0;
         let denom = cd - eta * sd;
-        let alpha = xi.atan2(denom) + ra0;
+        let alpha = xi.atan2(denom) + self.ra0;
         let delta = (sd + eta * cd).atan2((denom * denom + xi * xi).sqrt());
         let mut ra = alpha * DEG_PER_RAD;
         ra = ra.rem_euclid(360.0);
@@ -200,16 +304,14 @@ impl Dss {
     pub fn world_to_pixel(&self, ra: f64, dec: f64) -> Result<(f64, f64)> {
         // Forward gnomonic: (alpha, delta) -> (xi, eta) at plate center, then
         // invert the polynomial via Newton on the (xmm, ymm) plane.
-        let dec0 = self.plate_dec * RAD_PER_DEG;
-        let ra0 = self.plate_ra * RAD_PER_DEG;
         let alpha = ra * RAD_PER_DEG;
         let delta = dec * RAD_PER_DEG;
-        let cd = dec0.cos();
-        let sd = dec0.sin();
+        let cd = self.cos_dec0;
+        let sd = self.sin_dec0;
         let cdec = delta.cos();
         let sdec = delta.sin();
-        let cdra = (alpha - ra0).cos();
-        let sdra = (alpha - ra0).sin();
+        let cdra = (alpha - self.ra0).cos();
+        let sdra = (alpha - self.ra0).sin();
         let denom = sdec * sd + cdec * cd * cdra;
         if denom <= 0.0 {
             return Err(FitsError::Wcs(
@@ -240,10 +342,9 @@ impl Dss {
         // Newton on the plate polynomial, with an exact Jacobian: the
         // AMD terms fold into a triangle (see `amd_triangle`), so the
         // derivatives come out of the same Horner pass as the value.
-        // Hoisted out of the loop -- the tables depend on the header,
-        // not on the iterate.
-        let tx = amd_triangle(&self.amdx);
-        let ty = amd_triangle(&self.amdy);
+        // The tables are resolved at construction.
+        let tx = &self.tx;
+        let ty = &self.ty;
         let (xmm, ymm) = newton::solve(
             "DSS",
             guess,
@@ -296,7 +397,7 @@ const AMD_DIM: usize = 6;
 /// [`Dss::world_to_pixel`] can then use the shared Newton solver with
 /// an exact Jacobian.
 ///
-/// The radial terms of [`Tpv`](crate::wcs::tpv::Tpv) are odd powers of
+/// The radial terms of [`Tpv`](crate::wcs::Tpv) are odd powers of
 /// `r`. Those are not polynomial, and that module carries them apart
 /// from its triangle.
 ///
@@ -305,10 +406,8 @@ const AMD_DIM: usize = 6;
 /// mag, mag^2, mag^3, mag*x, mag*(x^2+y^2), mag*x*(x^2+y^2) and color.
 /// Image astrometry takes them as zero.
 ///
-/// This builds the table on each call rather than caching it, because
-/// [`Dss::amdx`] is a public field. A table resolved at construction
-/// would go stale when a caller assigns to that field. Callers hoist
-/// the call out of their loops.
+/// This runs once, in [`Dss::new`]; the results live in `Dss::tx` and
+/// `Dss::ty`.
 fn amd_triangle(c: &[f64; 20]) -> [f64; AMD_DIM * AMD_DIM] {
     let mut t = [0.0_f64; AMD_DIM * AMD_DIM];
     let mut add = |p: usize, q: usize, v: f64| t[p * AMD_DIM + q] += v;
@@ -569,14 +668,15 @@ mod tests {
     /// the iteration does not recover within its step limit.
     #[test]
     fn non_convergence_is_reported() {
-        let mut d = dss_fixture();
-        d.amdx = [0.0; 20];
-        d.amdy = [0.0; 20];
-        // Linear term, then the degree-5 `x r^4` term.
-        d.amdx[0] = 1e-3;
-        d.amdy[0] = 1e-3;
-        d.amdx[12] = 1e-6;
-        d.amdy[12] = 1e-6;
+        // Linear term, then the degree-5 `x r^4` term. Built through
+        // the constructor: the folded triangles are resolved there,
+        // and a field assignment is no longer possible.
+        let mut amd = [0.0_f64; 20];
+        amd[0] = 1e-3;
+        amd[12] = 1e-6;
+        let d = Dss::new(
+            187.5, 30.0, 177500.0, 177500.0, 25.284, 25.284, 1000.0, 1000.0, amd, amd,
+        );
         let mut errs = 0_usize;
         for px in [-5000.0_f64, -400.0, 0.0, 250.0, 4000.0] {
             for py in [-5000.0_f64, -400.0, 0.0, 250.0, 4000.0] {
@@ -650,18 +750,9 @@ mod tests {
         amdx[0] = 1.0;
         // eta = 1*y
         amdy[0] = 1.0;
-        let dss = Dss {
-            plate_ra: 10.0,
-            plate_dec: -5.0,
-            ppo3: 100_000.0,
-            ppo6: 100_000.0,
-            xpixelsz: 25.0,
-            ypixelsz: 25.0,
-            cnpix1: 0.0,
-            cnpix2: 0.0,
-            amdx,
-            amdy,
-        };
+        let dss = Dss::new(
+            10.0, -5.0, 100_000.0, 100_000.0, 25.0, 25.0, 0.0, 0.0, amdx, amdy,
+        );
         for &(px, py) in &[(100.0, 200.0), (4000.0, 4000.0), (1.0, 1.0)] {
             let (ra, dec) = dss.pixel_to_world(px, py);
             let (bx, by) = dss.world_to_pixel(ra, dec).unwrap();

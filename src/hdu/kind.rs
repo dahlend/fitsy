@@ -38,6 +38,10 @@ use super::random_groups::RandomGroupsHdu;
 /// }
 /// # Ok::<(), fitsy::FitsError>(())
 /// ```
+// `non_exhaustive` stays here even though the standard is complete.
+// The `CompressedImage` variant is feature-gated. An exhaustive match
+// written without the `compression` feature would stop compiling when
+// any crate in the graph enables it, and features must stay additive.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Hdu<'a> {
@@ -64,7 +68,6 @@ pub enum Hdu<'a> {
 /// Construct via [`ConformingHdu::new`]. Inspect via [`header`](Self::header),
 /// [`data_bytes`](Self::data_bytes), and [`xtension`](Self::xtension).
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct ConformingHdu<'a> {
     header: Header,
     /// Raw data bytes (size already validated against header).

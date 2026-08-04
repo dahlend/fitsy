@@ -41,7 +41,6 @@ use crate::wcs::{Wcs, alt_suffix};
 
 /// A coordinate description read out of a binary table header.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct TableWcs {
     /// The coordinate description itself, identical in kind to one
     /// parsed from an image header.

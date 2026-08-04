@@ -45,15 +45,15 @@ mod na {
     #[test]
     fn linear_matrix_round_trips() {
         let w = tan_wcs();
-        let m = w.linear.matrix_na();
+        let m = w.linear().matrix_na();
         assert_eq!(m.shape(), (2, 2));
-        let row_major = w.linear.matrix_row_major();
+        let row_major = w.linear().matrix_row_major();
         for i in 0..2 {
             for j in 0..2 {
                 assert_eq!(m[(i, j)], row_major[i * 2 + j]);
             }
         }
-        let inv = w.linear.inverse_na();
+        let inv = w.linear().inverse_na();
         let id = &m * &inv;
         for i in 0..2 {
             for j in 0..2 {
@@ -154,10 +154,10 @@ mod fa {
     #[test]
     fn linear_matrix_round_trips() {
         let w = tan_wcs();
-        let m = w.linear.matrix_faer();
+        let m = w.linear().matrix_faer();
         assert_eq!(m.nrows(), 2);
         assert_eq!(m.ncols(), 2);
-        let row_major = w.linear.matrix_row_major();
+        let row_major = w.linear().matrix_row_major();
         for i in 0..2 {
             for j in 0..2 {
                 assert_eq!(m[(i, j)], row_major[i * 2 + j]);

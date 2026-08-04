@@ -138,6 +138,13 @@ impl Unit {
         })
     }
 
+    /// Divide two units, which raises `other` to the power -1 and
+    /// multiplies.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Unit`] when `other` carries a level, because a
+    /// level has no reciprocal.
     pub(super) fn div(self, other: Self) -> Result<Self> {
         self.mul(other.powf(-1.0)?)
     }

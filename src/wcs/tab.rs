@@ -51,7 +51,6 @@ use crate::error::{FitsError, Result};
 /// parser; several of these resolve into one [`TabGroup`] once the
 /// binary table is loaded.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct TabSpec {
     /// Zero-based axis index in the WCS pipeline.
     pub axis: usize,
@@ -86,7 +85,6 @@ impl TabSpec {
 
 /// A resolved lookup table plus the WCS axes it drives.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct TabGroup {
     /// WCS axis index for each coordinate-array slot: `axes[m]` is the
     /// axis whose `PVi_3` is `m + 1`. Length *M*.
@@ -110,6 +108,13 @@ impl TabGroup {
     }
 
     /// Check the pieces agree before anything relies on them.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the group has no axes, when the axis
+    /// list and the index list disagree with the rank, when the
+    /// coordinate array length does not match the declared dimensions,
+    /// or when an index vector has the wrong length.
     pub(crate) fn validate(&self) -> Result<()> {
         let m = self.dims.len();
         if m == 0 {

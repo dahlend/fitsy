@@ -101,7 +101,6 @@ pub struct Header {
 
 /// One entry in a parsed header.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct HeaderEntry {
     /// Keyword name, trimmed and upper-cased.
     pub keyword: String,

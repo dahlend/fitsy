@@ -126,12 +126,12 @@ impl PyWcs {
         }
 
         let _ = writeln!(out, "CRVAL : {}", nums(w.crval()));
-        let _ = writeln!(out, "CRPIX : {}", nums(w.linear.crpix()));
+        let _ = writeln!(out, "CRPIX : {}", nums(w.linear().crpix()));
 
         // Linear matrix as CD<i>_<j> rows. This layer does not
         // carry the PC-vs-CD distinction, so it always labels the
         // matrix as CD.
-        let m = w.linear.matrix_row_major();
+        let m = w.linear().matrix_row_major();
         if m.len() == n * n && n > 0 {
             for i in 0..n {
                 let mut header_label = String::new();
@@ -809,9 +809,7 @@ pub fn fit_wcs<'py>(
     let sky_v: Vec<(f64, f64)> = sv.outer_iter().map(|r| (r[0], r[1])).collect();
     let crpix = crpix.map(|(x, y)| (x + off, y + off));
 
-    let proj_kind =
-        crate::wcs::projection::ProjectionKind::from_code(&projection.to_ascii_uppercase())
-            .into_py_result()?;
+    let proj = crate::wcs::projection::Projection::from_code(projection, &[]).into_py_result()?;
     let frame_kind = match frame.to_ascii_lowercase().as_str() {
         "equatorial" | "icrs" | "fk5" | "fk4" => crate::wcs::CelestialFrame::Equatorial,
         "galactic" => crate::wcs::CelestialFrame::Galactic,
@@ -826,7 +824,7 @@ pub fn fit_wcs<'py>(
     };
 
     let opts = crate::wcs::WcsFitOptions {
-        projection: proj_kind,
+        projection: proj,
         crpix,
         crval,
         frame: frame_kind,

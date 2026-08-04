@@ -49,10 +49,10 @@ use std::fmt::Write as _;
 use crate::error::{FitsError, Result};
 use crate::header::{Header, Value};
 use crate::wcs::celestial::{CelestialFrame, RadeSys};
-use crate::wcs::dss::Dss;
-use crate::wcs::sip::{Sip, SipPoly};
-use crate::wcs::tnx::{Tnx, TnxCrossTerm, TnxFunction, TnxSurface};
-use crate::wcs::tpv::Tpv;
+use crate::wcs::distortion::dss::Dss;
+use crate::wcs::distortion::sip::{Sip, SipPoly};
+use crate::wcs::distortion::tnx::{Tnx, TnxCrossTerm, TnxFunction, TnxSurface};
+use crate::wcs::distortion::tpv::Tpv;
 use crate::wcs::{Wcs, alt_suffix};
 
 impl Wcs {
@@ -223,8 +223,13 @@ impl Wcs {
         }
 
         // RADESYS / EQUINOX / MJD-OBS / WCSNAME.
-        if let Some(cb) = &self.celestial
-            && cb.pair.frame == CelestialFrame::Equatorial
+        //
+        // Gated on the *pair*, not the block. A tabular pair
+        // (`RA---TAB`/`DEC--TAB`) has a frame but no `CelestialBlock`.
+        // The parser keeps `RADESYS` whenever the pair exists.
+        if self
+            .celestial_pair
+            .is_some_and(|p| p.frame == CelestialFrame::Equatorial)
         {
             let rs = match self.radesys {
                 RadeSys::Icrs => "ICRS",
@@ -540,7 +545,7 @@ fn write_tpv(
     suffix: &str,
 ) -> Result<()> {
     for (axis, table) in [(lon_axis, &tpv.pv1), (lat_axis, &tpv.pv2)] {
-        for (m, &c) in table.coeffs.iter().enumerate() {
+        for (m, &c) in table.coeffs().iter().enumerate() {
             if c != 0.0 || m == 1 {
                 h.push(
                     format!("PV{axis}_{m}{suffix}"),
@@ -609,21 +614,30 @@ fn write_tnx(
 /// eta_min eta_max c0 c1 ...`, the token order `TnxSurface::parse`
 /// consumes.
 fn encode_tnx_surface(s: &TnxSurface) -> String {
-    let ft = match s.function {
+    let ft = match s.function() {
         TnxFunction::Chebyshev => 1,
         TnxFunction::Legendre => 2,
         TnxFunction::Polynomial => 3,
     };
-    let xt = match s.cross {
+    let xt = match s.cross() {
         TnxCrossTerm::None => 0,
         TnxCrossTerm::Full => 1,
         TnxCrossTerm::Half => 2,
     };
+    let (xi_min, xi_max) = s.xi_range();
+    let (eta_min, eta_max) = s.eta_range();
     let mut out = format!(
         "{}. {}. {}. {}. {:?} {:?} {:?} {:?}",
-        ft, s.ni, s.nj, xt, s.xi_min, s.xi_max, s.eta_min, s.eta_max
+        ft,
+        s.ni(),
+        s.nj(),
+        xt,
+        xi_min,
+        xi_max,
+        eta_min,
+        eta_max
     );
-    for c in &s.coeffs {
+    for c in s.coeffs() {
         // `{:?}` on f64 emits the shortest representation that
         // round-trips exactly, which is what keeps the coefficients
         // bit-identical across a write/read cycle.
@@ -686,7 +700,7 @@ fn write_wat_record(h: &mut Header, axis: usize, record: &str) -> Result<()> {
 /// `PLTRAH/M/S` and `PLTDECSN/D/M/S` are written back in sexagesimal
 /// because that is the only form the reader accepts.
 fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
-    let ra_hours = dss.plate_ra / 15.0;
+    let ra_hours = dss.plate_ra() / 15.0;
     let rah = ra_hours.trunc();
     let ram = ((ra_hours - rah) * 60.0).trunc();
     let ras = (ra_hours - rah - ram / 60.0) * 3600.0;
@@ -694,8 +708,8 @@ fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
     h.push("PLTRAM", Value::Real(ram), Some("[min] Plate center RA"))?;
     h.push("PLTRAS", Value::Real(ras), Some("[s] Plate center RA"))?;
 
-    let sign = if dss.plate_dec < 0.0 { "-" } else { "+" };
-    let ad = dss.plate_dec.abs();
+    let sign = if dss.plate_dec() < 0.0 { "-" } else { "+" };
+    let ad = dss.plate_dec().abs();
     let dd = ad.trunc();
     let dm = ((ad - dd) * 60.0).trunc();
     let ds = (ad - dd - dm / 60.0) * 3600.0;
@@ -716,31 +730,31 @@ fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
         Some("[arcsec] Plate center Dec"),
     )?;
 
-    h.push("PPO3", Value::Real(dss.ppo3), Some("[um] Plate center x"))?;
-    h.push("PPO6", Value::Real(dss.ppo6), Some("[um] Plate center y"))?;
+    h.push("PPO3", Value::Real(dss.ppo3()), Some("[um] Plate center x"))?;
+    h.push("PPO6", Value::Real(dss.ppo6()), Some("[um] Plate center y"))?;
     h.push(
         "XPIXELSZ",
-        Value::Real(dss.xpixelsz),
+        Value::Real(dss.xpixelsz()),
         Some("[um] Pixel size in x"),
     )?;
     h.push(
         "YPIXELSZ",
-        Value::Real(dss.ypixelsz),
+        Value::Real(dss.ypixelsz()),
         Some("[um] Pixel size in y"),
     )?;
     h.push(
         "CNPIX1",
-        Value::Real(dss.cnpix1),
+        Value::Real(dss.cnpix1()),
         Some("Subimage x offset on the plate"),
     )?;
     h.push(
         "CNPIX2",
-        Value::Real(dss.cnpix2),
+        Value::Real(dss.cnpix2()),
         Some("Subimage y offset on the plate"),
     )?;
     // AMDX1 / AMDY1 gate detection in `Dss::from_header`, so both are
     // emitted unconditionally; the rest only when non-zero.
-    for (i, &v) in dss.amdx.iter().enumerate() {
+    for (i, &v) in dss.amdx().iter().enumerate() {
         if v != 0.0 || i == 0 {
             h.push(
                 format!("AMDX{}", i + 1),
@@ -749,7 +763,7 @@ fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
             )?;
         }
     }
-    for (i, &v) in dss.amdy.iter().enumerate() {
+    for (i, &v) in dss.amdy().iter().enumerate() {
         if v != 0.0 || i == 0 {
             h.push(
                 format!("AMDY{}", i + 1),
@@ -764,12 +778,12 @@ fn write_dss(h: &mut Header, dss: &Dss) -> Result<()> {
 fn write_sip(h: &mut Header, sip: &Sip) -> Result<()> {
     h.push(
         "A_ORDER",
-        Value::Integer(i64::from(sip.a.order)),
+        Value::Integer(i64::from(sip.a.order())),
         Some("SIP polynomial order, axis 1, detector to sky"),
     )?;
     h.push(
         "B_ORDER",
-        Value::Integer(i64::from(sip.b.order)),
+        Value::Integer(i64::from(sip.b.order())),
         Some("SIP polynomial order, axis 2, detector to sky"),
     )?;
     write_sip_poly(h, "A", &sip.a)?;
@@ -777,12 +791,12 @@ fn write_sip(h: &mut Header, sip: &Sip) -> Result<()> {
     if let (Some(ap), Some(bp)) = (&sip.ap, &sip.bp) {
         h.push(
             "AP_ORDER",
-            Value::Integer(i64::from(ap.order)),
+            Value::Integer(i64::from(ap.order())),
             Some("SIP polynomial order, axis 1, sky to detector"),
         )?;
         h.push(
             "BP_ORDER",
-            Value::Integer(i64::from(bp.order)),
+            Value::Integer(i64::from(bp.order())),
             Some("SIP polynomial order, axis 2, sky to detector"),
         )?;
         write_sip_poly(h, "AP", ap)?;
@@ -792,13 +806,13 @@ fn write_sip(h: &mut Header, sip: &Sip) -> Result<()> {
 }
 
 fn write_sip_poly(h: &mut Header, prefix: &str, poly: &SipPoly) -> Result<()> {
-    let n = (poly.order as usize) + 1;
+    let n = poly.order() + 1;
     for p in 0..n {
         for q in 0..n {
-            if p + q > poly.order as usize {
+            if p + q > poly.order() {
                 continue;
             }
-            let c = poly.coeffs[p * n + q];
+            let c = poly.coeff(p, q);
             if c == 0.0 {
                 continue;
             }
@@ -871,9 +885,7 @@ mod tests {
         // Round-trip through the fitter to obtain a Wcs we know
         // serializes cleanly. Use a tight grid so the fit is
         // numerically perfect and the comparison is well-defined.
-        let projection =
-            crate::wcs::projection::build(crate::wcs::projection::ProjectionKind::Tan, &[])
-                .unwrap();
+        let projection = crate::wcs::projection::Projection::default();
         let theta0 = projection.theta0();
         let rotation = crate::wcs::celestial::CelestialRotation::new(
             crval.0, crval.1, None, None, 0.0, theta0,

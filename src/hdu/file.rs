@@ -478,6 +478,11 @@ impl FitsFile {
     ///
     /// An in-memory backing still copies, so that the return type
     /// stays uniform. Call [`FitsFile::hdu`] there to avoid the copy.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `i` is out of range, and
+    /// [`FitsError::Io`] when the read fails.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_owned(&self, i: usize) -> Result<Vec<u8>> {
         let span = self.hdu_spans.get(i).ok_or_else(|| {
@@ -509,6 +514,12 @@ impl FitsFile {
     /// [`read_data_owned`](Self::read_data_owned) allocates. That
     /// halves both the copy count and the peak memory. The Python
     /// reader passes the numpy allocation here for that reason.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `i` is out of range or `dst` does not
+    /// match the data-section length, and [`FitsError::Io`] when the
+    /// read fails.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_into(&self, i: usize, dst: &mut [u8]) -> Result<()> {
         let logical = self
@@ -530,6 +541,12 @@ impl FitsFile {
     /// Fill `dst` from the data section of HDU `i`, starting `offset`
     /// bytes in. Lets a caller stream the section through a small fixed
     /// buffer instead of materializing it whole.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `i` is out of range or the requested
+    /// range leaves the data section, and [`FitsError::Io`] when the
+    /// read fails.
     #[cfg(feature = "python")]
     pub(crate) fn read_data_range_into(&self, i: usize, offset: u64, dst: &mut [u8]) -> Result<()> {
         let span = self.hdu_spans.get(i).ok_or_else(|| {
@@ -713,6 +730,11 @@ impl FitsFile {
     /// directly into a writer when persisting modifications without
     /// re-encoding. Returns `None` if `i` is out of range. Loads the
     /// data section from disk if it has not been read yet.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Io`] when the data section has not been read yet
+    /// and reading it fails.
     #[cfg(feature = "python")]
     pub(crate) fn hdu_raw_padded(&self, i: usize) -> Result<Option<Vec<u8>>> {
         if i >= self.hdu_spans.len() {
@@ -1260,7 +1282,6 @@ impl FitsFile {
 /// or an owned decompressed image.
 #[cfg(feature = "compression")]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum ImageOrOwned<'a> {
     /// An image HDU read in place, borrowing the file buffer.
     Borrowed(ImageHdu<'a>),
@@ -1272,7 +1293,6 @@ pub enum ImageOrOwned<'a> {
 /// `None` means the corresponding keyword was absent (FITS standard
 /// permits omitting either independently).
 #[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
 pub struct ChecksumReport {
     /// Zero-based index of the HDU this report covers.
     pub hdu: usize,
@@ -1289,7 +1309,6 @@ pub struct ChecksumReport {
 /// arrives unchanged as [`Decompressed::Hdu`].
 #[cfg(feature = "compression")]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum Decompressed<'a> {
     /// A regular HDU, returned untouched.
     Hdu(Hdu<'a>),
@@ -1500,6 +1519,12 @@ fn pread_exact(file: &File, mut off: u64, mut buf: &mut [u8]) -> Result<()> {
 ///   per group.
 /// - Generic conforming extension (Sec.7.1.3): product starts at
 ///   NAXIS1; an empty data axis means zero bytes total.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when `BITPIX` or `NAXIS` is absent or holds a
+/// value the standard does not define, or when the byte count overflows
+/// `u64`.
 pub(crate) fn data_section_size(h: &Header) -> Result<u64> {
     let bitpix = Bitpix::from_i64(h.bitpix()?)?;
     let naxis = h.naxis()?;

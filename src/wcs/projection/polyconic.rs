@@ -1,9 +1,20 @@
+// Several projections never fail in one direction. The unit structs
+// have no state for `&self` to read. Every method still keeps one
+// uniform signature, a fallible `Result` behind a `&self` receiver,
+// so the `Projection` enum can dispatch all 28 variants through one
+// match arm shape.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "uniform method signature across all projections for enum dispatch"
+)]
+
 //! Polyconic projections -- Paper II Sec.5.5: BON, PCO.
 
 use std::f64::consts::FRAC_PI_2;
 
 use crate::error::{FitsError, Result};
-use crate::wcs::projection::Projection;
 use crate::wcs::{D2R, R2D};
 
 // -- BON --------------------------------------------------------------
@@ -42,21 +53,29 @@ impl Bon {
     }
     #[allow(
         clippy::trivially_copy_pass_by_ref,
-        reason = "aligns with Projection trait's &self convention"
+        reason = "keeps the uniform &self receiver the enum dispatch expects"
     )]
     fn y0(&self) -> f64 {
         R2D / (self.theta_1 * D2R).tan() + self.theta_1
     }
 }
-impl Projection for Bon {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Bon {
+    /// `PV2_1` is `theta_1`, the standard parallel.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         vec![(1, self.theta_1)]
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 0 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         0.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the parallel radius is 0. The parallel
+    /// collapses to the cone apex there.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let r = self.y0() - theta;
         let cos_t = (theta * D2R).cos();
         if r.abs() < 1e-15 {
@@ -65,7 +84,13 @@ impl Projection for Bon {
         let a_rad = phi * cos_t / r;
         Ok((r * a_rad.sin(), -r * a_rad.cos() + self.y0()))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. A point at a pole returns a longitude
+    /// of 0, because every longitude meets there.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let s = if self.theta_1 >= 0.0 { 1.0 } else { -1.0 };
         let dy = self.y0() - y;
         let r = s * (x * x + dy * dy).sqrt();
@@ -84,15 +109,23 @@ impl Projection for Bon {
 /// American polyconic `PCO` (Paper II Sec.5.5.2, eqs. 32-34).
 #[derive(Debug, Clone, Copy)]
 pub struct Pco;
-impl Projection for Pco {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Pco {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 0 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         0.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The equator takes a closed form and
+    /// every other parallel takes the cotangent form.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let p = phi * D2R;
         let t = theta * D2R;
         if t.abs() < 1e-12 {
@@ -102,7 +135,16 @@ impl Projection for Pco {
         let e = p * t.sin();
         Ok((R2D * cot_t * e.sin(), theta + R2D * cot_t * (1.0 - e.cos())))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// The latitude has no closed form. Newton iteration solves
+    /// `G(theta) = tan(theta)(X^2 + (Y - theta)^2) - 2(Y - theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the iteration does not converge in 128
+    /// steps. That is a point off the region the projection fills.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         // Newton on G(theta) = tantheta*(X^2+(Y-theta)^2) - 2(Y-theta) = 0 with
         // X = x*pi/180, Y = y*pi/180.
         let big_x = x * D2R;
@@ -150,5 +192,35 @@ impl Projection for Pco {
             (e / theta.sin()) * R2D
         };
         Ok((phi, theta_deg))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wcs::projection::testing::{round_trip, round_trip_tol};
+
+    /// `BON` at `theta_1 = 45`, the parameter Paper II Sec.5.5.1 uses
+    /// as its worked example.
+    #[test]
+    fn bon_round_trip() {
+        round_trip(&Bon::from_pv(&[0.0, 45.0]).unwrap().into(), "BON");
+    }
+
+    /// `PCO`'s inverse solves a transcendental equation by iteration,
+    /// so it lands near but not at machine precision.
+    #[test]
+    fn pco_round_trip() {
+        round_trip_tol(&Pco.into(), "PCO", 1e-6);
+    }
+
+    /// The equator is the one parallel `PCO` maps to a straight line,
+    /// and it maps to it exactly (Paper II Sec.5.5.2).
+    #[test]
+    fn pco_equator_is_straight() {
+        for &phi in &[-170.0_f64, -50.0, 0.0, 50.0, 170.0] {
+            let (x, y) = Pco.s2x(phi, 0.0).unwrap();
+            assert!((x - phi).abs() < 1e-12 && y.abs() < 1e-12);
+        }
     }
 }

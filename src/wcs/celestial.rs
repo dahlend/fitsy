@@ -26,10 +26,7 @@ use crate::wcs::{D2R, R2D};
 
 /// Frame of reference attached to the celestial axis pair (Paper II
 /// Sec.3.1, Standard Sec.8.4 Table 26).
-// `non_exhaustive`: a frame now falling into `Other` may later get its
-// own variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum CelestialFrame {
     /// `RA`/`DEC` -- equatorial, the frame `RADESYSa` qualifies.
     Equatorial,
@@ -128,10 +125,7 @@ impl CelestialFrame {
 /// Equatorial reference system identifier (Standard Sec.8.4, Paper II
 /// Sec.3.1, `RADESYS` keyword). This carries meaning only for
 /// [`CelestialFrame::Equatorial`].
-// `non_exhaustive`: new realizations of the equatorial system keep
-// appearing, each one promoted out of `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub enum RadeSys {
     /// International Celestial Reference System. The default when
     /// `EQUINOX` is absent; with `EQUINOX` present the default is

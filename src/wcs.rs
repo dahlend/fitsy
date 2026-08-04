@@ -16,15 +16,15 @@
 //! # Layout
 //!
 //! - [`linear`] -- the `CRPIX`, `CDELT`, `PCi_j` and `CDi_j` step.
-//! - [`projection`] and [`projections`] -- the celestial projections
-//!   of Paper II Table 13, selected by the `CTYPE` code.
+//! - [`projection`] -- the celestial projections of Paper II Table 13,
+//!   selected by the `CTYPE` code.
 //! - [`celestial`] -- the spherical rotation and the reference frame.
 //! - [`spectral`] -- the spectral `CTYPE` codes and the non-linear
 //!   algorithms of Paper III Sec.3.3 (Greisen et al. 2006).
 //! - [`tab`] -- the `-TAB` lookup axes of Paper III Sec.6.
 //! - [`time`] -- the time axis of Sec.9.5.3.
-//! - [`sip`], [`tpv`], [`tnx`], [`dss`] -- distortion conventions that
-//!   sit outside the `PVi_m` family.
+//! - [`distortion`] -- SIP, TPV, TNX and the DSS plate solution, the
+//!   conventions that sit outside the `PVi_m` family.
 //! - [`table`] -- the table-resident forms of Sec.8.2, Table 22.
 //! - [`fit_celestial_wcs`] -- fits a celestial WCS from pixel and sky
 //!   pairs.
@@ -56,32 +56,32 @@
 
 pub mod celestial;
 pub mod celestial_block;
-pub mod dss;
+pub mod distortion;
 pub mod linear;
 pub mod projection;
-pub mod sip;
 pub mod spectral;
 pub mod tab;
 pub mod table;
 pub mod time;
-pub mod tnx;
-pub mod tpv;
-
-pub mod projections;
-pub(crate) mod wat;
 
 mod fit;
-mod newton;
 mod parse;
-mod poly;
 mod serialize;
 
 pub use celestial::{CelestialFrame, RadeSys};
 pub use celestial_block::{CelestialBlock, CelestialPair};
-pub use dss::Dss;
+// The distortion conventions are applied by the transform pipeline
+// here, so a caller inspecting one needs it at the same level.
+pub use distortion::{Dss, Sip, Tnx, Tpv};
 pub use fit::{WcsFit, WcsFitOptions, fit_celestial_wcs};
 pub use linear::LinearTransform;
-pub use projection::{Projection, ProjectionKind};
+// The projection structs are the payloads of `Projection`'s variants
+// and the arguments to its `From` impls, so a caller writing
+// `Projection::from(Tan)` needs them at the same level as the enum.
+pub use projection::{
+    Air, Ait, Arc, Azp, Bon, Car, Cea, Cod, Coe, Coo, Cop, Csc, Cyp, Hpx, Mer, Mol, Par, Pco,
+    Projection, Qsc, Sfl, Sin, Stg, Szp, Tan, Tsc, Xph, Zea, Zpn,
+};
 // `Linearized` and `Grism` are reachable from `SpectralAlgorithm`'s
 // variants, so a caller matching on one needs them at the same level.
 pub use spectral::{
@@ -101,8 +101,10 @@ pub(crate) const R2D: f64 = 180.0 / std::f64::consts::PI;
 /// The suffix an alternate code contributes to a WCS keyword: nothing
 /// for the primary description, the letter itself otherwise.
 ///
-/// Sec.8.2 restricts the code to a space or `A`-`Z`; anything else is
-/// an error.
+/// # Errors
+///
+/// [`FitsError::Wcs`] when `alt` is neither a space nor an ASCII
+/// uppercase letter. Sec.8.2 admits no other code.
 // Shared by every entry point so the rule is stated once.
 pub(crate) fn alt_suffix(alt: char) -> Result<String> {
     if alt == ' ' {
@@ -146,7 +148,6 @@ pub(crate) fn alt_suffix(alt: char) -> Result<String> {
 /// # Ok::<(), fitsy::FitsError>(())
 /// ```
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct Wcs {
     // Private so `naxis()` can be its length: public parallel vectors
     // could be truncated out of step and the pipeline indexed them
@@ -154,7 +155,14 @@ pub struct Wcs {
     axes: Vec<Axis>,
     /// Linear stage of the pipeline: `CRPIX`, `CRVAL`, and the combined
     /// `CDELT`/`PC` or `CD` matrix.
-    pub linear: LinearTransform,
+    ///
+    /// Private for the same reason as `axes`. The per-point bodies
+    /// index `CRPIX` unchecked and zip the matrix against `naxis`
+    /// rows, so a transform of a different rank must be impossible
+    /// rather than checked per call. [`Self::new`] and
+    /// [`Self::set_linear`] validate the rank once. Read via
+    /// [`Self::linear`].
+    linear: LinearTransform,
     /// Celestial axis pair plus everything that depends on it
     /// (projection, native<->celestial rotation, optional SIP/TPV).
     /// Either every component is present or `celestial` is `None` --
@@ -215,6 +223,12 @@ pub struct Wcs {
     /// Set even when [`Self::celestial`] is `None`, which happens for
     /// a `RA---TAB`/`DEC--TAB` pair: those carry no projection at all,
     /// their coordinates coming straight from the lookup table.
+    ///
+    /// When the block exists it holds the same pair. Construction
+    /// rejects a disagreement.
+    ///
+    /// Classification queries and the serializer read this field.
+    /// The transform pipeline reads the block's copy.
     pub celestial_pair: Option<CelestialPair>,
     /// Snapshot of the `NAXISn` cards, in FITS axis order, for callers
     /// like [`Self::footprint`] that need the image extent. Not part of
@@ -233,7 +247,6 @@ pub struct Wcs {
 ///
 /// One entry per axis; [`Wcs::naxis`] is the length of the list.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[non_exhaustive]
 pub struct Axis {
     /// `CTYPEia` -- axis type and, past the fourth character, the
     /// algorithm code. Blank means a plain linear axis.
@@ -366,28 +379,32 @@ impl Scratch {
     }
 }
 
-/// A two-axis celestial WCS with at most a SIP distortion attached,
-/// with every per-point input resolved.
+/// A two-axis celestial WCS with at most one pixel-space and one
+/// intermediate-space distortion attached, every per-point input
+/// resolved.
 ///
 /// [`Wcs::pixel_to_world_into`] is written for the general case, so it
-/// re-derives loop-invariant state for every point. It probes six
+/// re-derives loop-invariant state for every point. It probes several
 /// `Option` fields. It walks the spectral and `-TAB` lists. It reads
-/// `CRPIX` and the matrix through slice-returning accessors, indexes
-/// the celestial pair with runtime indices, and reaches the projection
-/// through an `Arc`. None of that varies across a batch.
+/// `CRPIX` and the matrix through slice-returning accessors and
+/// indexes the celestial pair with runtime indices. None of that
+/// varies across a batch.
 ///
 /// This resolves all of it once. The parts it removes are worth about a
 /// third of the per-point cost on a `TAN` batch. That saving is spread
-/// across six small terms rather than concentrated in one.
+/// across several small terms rather than concentrated in one.
 ///
-/// This path carries SIP and TPV rather than declining them. They are
-/// the two common distortions on survey images, and each costs a few
-/// multiply-adds of its own. Sending them to the general body added the
+/// This path carries SIP, TPV and TNX rather than declining them.
+/// SIP and TPV are the two common distortions on survey images. Each
+/// costs a few multiply-adds of its own. TNX occupies the same
+/// pipeline slot as TPV, with the same analytic-Jacobian inverse
+/// shape. Sending any of them to the general body added the
 /// per-point overhead above on top of that cost.
 ///
-/// The saving is smaller for TPV than for SIP, because a TPV inverse
-/// iterates and that iteration dominates what the specialization
-/// removes. It is still a saving, and it costs the other paths nothing.
+/// The saving is smaller for TPV and TNX than for SIP, because their
+/// inverses iterate and that iteration dominates what the
+/// specialization removes. It is still a saving, and it costs the
+/// other paths nothing.
 ///
 /// The two paths must agree bit for bit. `fast_path_matches_general` in
 /// `tests/wcs.rs` is what holds them together.
@@ -404,18 +421,22 @@ struct FastCelestial<'a> {
     fiducial_offset: (f64, f64),
     /// Inverse of `matrix`, row-major.
     inverse: [f64; 4],
-    /// Borrowed out of the `Arc` once, so the loop pays a vtable call
-    /// rather than a vtable call behind a refcount indirection.
-    projection: &'a dyn Projection,
+    /// Borrowed, so each point pays one match dispatch and no clone
+    /// of the projection's parameters.
+    projection: &'a Projection,
     /// Native to celestial rotation.
     rotation: &'a celestial::CelestialRotation,
     /// Pixel-space SIP distortion, when the header carries one.
-    sip: Option<&'a sip::Sip>,
+    sip: Option<&'a Sip>,
     /// Intermediate-space TPV distortion, when the header carries one.
     ///
     /// Borrowed rather than copied: the two coefficient tables are 640
     /// bytes, which is not something to move per point.
-    tpv: Option<&'a tpv::Tpv>,
+    tpv: Option<&'a Tpv>,
+    /// Intermediate-space TNX/ZPX distortion, when the header carries
+    /// one. Occupies the same pipeline slot as TPV; the parser sets at
+    /// most one of the two.
+    tnx: Option<&'a Tnx>,
 }
 
 impl FastCelestial<'_> {
@@ -447,9 +468,13 @@ impl FastCelestial<'_> {
         let (ilon, ilat) = if self.lon == 0 { (i0, i1) } else { (i1, i0) };
         let (fx, fy) = self.cunit_to_deg;
         let (mut x, mut y) = (ilon * fx, ilat * fy);
-        // TPV sits between the linear stage and the projection.
+        // TPV sits between the linear stage and the projection, and
+        // TNX shares that slot; the general body applies TPV first.
         if let Some(tpv) = self.tpv {
             (x, y) = tpv.forward(x, y);
+        }
+        if let Some(tnx) = self.tnx {
+            (x, y) = tnx.forward(x, y);
         }
         let (phi, theta) = self
             .projection
@@ -471,9 +496,13 @@ impl FastCelestial<'_> {
         let (x_proj, y_proj) = self.projection.s2x(phi, theta).ok()?;
         let mut x = x_proj - self.fiducial_offset.0;
         let mut y = y_proj - self.fiducial_offset.1;
-        // Inverse TPV, before the `CUNIT` rescaling, which is the order
-        // the general body uses. It iterates, so it can fail to
-        // converge -- a per-point rejection like the projection's.
+        // Inverse TNX then inverse TPV, before the `CUNIT` rescaling,
+        // which is the order the general body uses. Each iterates, so
+        // each can fail to converge -- a per-point rejection like the
+        // projection's.
+        if let Some(tnx) = self.tnx {
+            (x, y) = tnx.inverse(x, y).ok()?;
+        }
         if let Some(tpv) = self.tpv {
             (x, y) = tpv.inverse(x, y).ok()?;
         }
@@ -562,8 +591,7 @@ impl Wcs {
     ///
     /// The conditions cover what this path reproduces: two axes, both
     /// celestial, and no spectral, tabular or plate-solution stage.
-    /// This path carries SIP and TPV. It declines `TNX`, which is
-    /// rarer and needs its own resolved state.
+    /// This path carries SIP, TPV and TNX.
     fn fast_celestial(&self) -> Option<FastCelestial<'_>> {
         if self.naxis() != 2
             || !self.spectral.is_empty()
@@ -574,9 +602,6 @@ impl Wcs {
             return None;
         }
         let c = self.celestial.as_ref()?;
-        if c.tnx.is_some() {
-            return None;
-        }
         // Both axes must be the celestial pair, or an axis would need
         // the `CRVAL` step this path skips.
         if c.pair.lon.max(c.pair.lat) > 1 || c.pair.lon == c.pair.lat {
@@ -595,10 +620,11 @@ impl Wcs {
             lon: c.pair.lon,
             cunit_to_deg: c.cunit_to_deg,
             fiducial_offset: c.fiducial_offset,
-            projection: c.projection.as_ref(),
+            projection: &c.projection,
             rotation: &c.rotation,
             sip: c.sip.as_ref(),
             tpv: c.tpv.as_ref(),
+            tnx: c.tnx.as_ref(),
         })
     }
 }
@@ -652,8 +678,17 @@ impl Wcs {
         self.linear.crval()
     }
 
-    /// Assemble a `Wcs`, rejecting pieces that disagree on the axis
-    /// count or carry an out-of-range axis index.
+    /// Assemble a `Wcs` from its parts.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] in three cases:
+    ///
+    /// - The linear transform and the axis list disagree on the axis
+    ///   count.
+    /// - A spectral, phase, time, `-TAB` or celestial entry names an
+    ///   axis index the description does not have.
+    /// - `celestial` and `celestial_pair` disagree.
     // `LinearTransform` and `Axis` each validate themselves, so what
     // is left is the agreement between them, plus the axis indices in
     // `SpectralAxis`, `PhaseAxis`, `TabSpec`, `TabGroup` and
@@ -695,6 +730,30 @@ impl Wcs {
         if let Some(p) = &parts.celestial_pair {
             check("celestial longitude axis", p.lon)?;
             check("celestial latitude axis", p.lat)?;
+        }
+        // The pair is stored twice when a block exists. `celestial_pair`
+        // answers classification queries (`axis_kind`, `is_celestial`,
+        // `celestial_axes`, the serializer's frame gate). `celestial.pair`
+        // drives the transform pipeline. Both fields are public, so a
+        // disagreement between them is otherwise possible. It would send
+        // the two sets of consumers to different axes. Check it here,
+        // the one choke point both construction paths pass through.
+        if let Some(c) = &parts.celestial {
+            match &parts.celestial_pair {
+                Some(p) if *p == c.pair => {}
+                Some(p) => {
+                    return Err(FitsError::Wcs(format!(
+                        "WCS celestial pair {p:?} disagrees with its \
+                         celestial block's pair {:?}",
+                        c.pair,
+                    )));
+                }
+                None => {
+                    return Err(FitsError::Wcs(
+                        "WCS has a celestial block but no celestial pair".into(),
+                    ));
+                }
+            }
         }
         Ok(Self {
             axes,
@@ -739,10 +798,9 @@ impl Wcs {
     ///
     /// # Errors
     ///
-    /// [`FitsError::Wcs`] in five cases:
+    /// [`FitsError::Wcs`] in four cases:
     ///
     /// - `pix.len()` does not equal `NAXIS`.
-    /// - The `linear` field does not describe `NAXIS` axes.
     /// - A `-TAB` axis remains unresolved.
     /// - The point lies outside the domain of the projection.
     /// - A spectral or tabular axis cannot evaluate the point.
@@ -754,44 +812,39 @@ impl Wcs {
     /// [`footprint`]: Self::footprint
     /// [`pixel_scale_at`]: Self::pixel_scale_at
     pub fn pixel_to_world(&self, pix: &[f64]) -> Result<Vec<f64>> {
-        self.check_linear_shape()?;
         self.check_tab_resolved()?;
         let mut scratch = Scratch::new(self.naxis());
         self.pixel_to_world_into(pix, &mut scratch)?;
         Ok(scratch.out)
     }
 
-    /// Check that the linear stage covers the same axes the WCS does.
+    /// The linear stage of the pipeline: `CRPIX`, `CRVAL`, and the
+    /// combined `CDELT`/`PC` or `CD` matrix.
+    #[must_use]
+    pub fn linear(&self) -> &LinearTransform {
+        &self.linear
+    }
+
+    /// Replace the linear stage.
     ///
-    /// [`Self::new`] enforces this at construction. The `linear` field
-    /// is public and has public constructors, so a caller can replace
-    /// it with a transform of a different rank.
-    ///
-    /// The per-point bodies below index `CRPIX` unchecked and zip the
-    /// matrix against `naxis` rows. A short transform then panics. A
-    /// long one leaves the previous point's intermediate values in
-    /// place and reports nothing. This check runs once per call rather
-    /// than once per point.
+    /// The per-point bodies index `CRPIX` unchecked and zip the matrix
+    /// against `naxis` rows, so the rank is validated here, once,
+    /// rather than on every transform call.
     ///
     /// # Errors
     ///
     /// [`FitsError::Wcs`] when `linear` does not describe `naxis`
     /// axes.
-    fn check_linear_shape(&self) -> Result<()> {
+    pub fn set_linear(&mut self, linear: LinearTransform) -> Result<()> {
         let n = self.naxis();
-        let (crpix, crval) = (self.linear.crpix().len(), self.linear.crval().len());
-        let m = self.linear.matrix_row_major().len();
-        let inv = self.linear.inverse_row_major().len();
-        if crpix == n && crval == n && m == n * n && inv == n * n {
-            return Ok(());
+        if linear.naxis() != n {
+            return Err(FitsError::Wcs(format!(
+                "WCS describes {n} axes but the linear transform describes {}",
+                linear.naxis()
+            )));
         }
-        Err(FitsError::Wcs(format!(
-            "WCS describes {n} axes but its linear transform holds {crpix} CRPIX \
-             and {crval} CRVAL entries with a {m}-element matrix and a \
-             {inv}-element inverse; {n}, {n}, {} and {} are required",
-            n * n,
-            n * n,
-        )))
+        self.linear = linear;
+        Ok(())
     }
 
     /// Forward transform of one point, writing into `s.out`.
@@ -800,9 +853,8 @@ impl Wcs {
     /// batch loop can reuse one [`Scratch`] instead of allocating a
     /// vector per point.
     ///
-    /// The caller runs [`Self::check_linear_shape`] and
-    /// [`Self::check_tab_resolved`] first. This is the per-point work
-    /// alone.
+    /// The caller runs [`Self::check_tab_resolved`] first. This is
+    /// the per-point work alone.
     ///
     /// # Errors
     ///
@@ -836,8 +888,8 @@ impl Wcs {
         // Step 3: linear matrix, accumulated in place. `apply_matrix`
         // would return a fresh vector on every point.
         let m = self.linear.matrix_row_major();
-        // Guaranteed by `check_linear_shape`, which every entry point
-        // runs once before reaching here. Restated because the loop
+        // Guaranteed at construction: `Wcs::new` and `set_linear`
+        // validate the rank, and the field is private.
         // below would silently keep the previous point's values if a
         // short matrix made `chunks_exact` yield too few rows.
         debug_assert_eq!(m.len(), n * n, "linear matrix does not match NAXIS");
@@ -864,10 +916,10 @@ impl Wcs {
         // exactly `s.out[axis]` at this point.
         //
         // `check_tab_resolved` guards this loop, and every entry point
-        // runs it once before reaching here. It is hoisted for the same
-        // reason as `check_linear_shape`: an unresolved `-TAB` axis is
-        // a property of the WCS, not of the point, so a batch must fail
-        // the whole call rather than mark each point `NaN`.
+        // runs it once before reaching here. It is hoisted because an
+        // unresolved `-TAB` axis is a property of the WCS, not of the
+        // point, so a batch must fail the whole call rather than mark
+        // each point `NaN`.
         for group in &self.tab {
             // A separable axis takes the scalar path: no per-point
             // allocation, same numbers.
@@ -931,15 +983,13 @@ impl Wcs {
     ///
     /// # Errors
     ///
-    /// [`FitsError::Wcs`] in five cases:
+    /// [`FitsError::Wcs`] in four cases:
     ///
     /// - `world.len()` does not equal `NAXIS`.
-    /// - The `linear` field does not describe `NAXIS` axes.
     /// - A `-TAB` axis remains unresolved.
     /// - The point lies outside the domain of the projection.
     /// - An iterative inverse fails to converge.
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
-        self.check_linear_shape()?;
         self.check_tab_resolved()?;
         let mut scratch = Scratch::new(self.naxis());
         self.world_to_pixel_into(world, &mut scratch)?;
@@ -952,8 +1002,7 @@ impl Wcs {
     /// batch loop can reuse one [`Scratch`] instead of allocating a
     /// vector per point.
     ///
-    /// The caller runs [`Self::check_linear_shape`] and
-    /// [`Self::check_tab_resolved`] first, as in
+    /// The caller runs [`Self::check_tab_resolved`] first, as in
     /// [`Self::pixel_to_world_into`].
     ///
     /// # Errors
@@ -1094,7 +1143,6 @@ impl Wcs {
     ///
     /// - `pix.len()` is not a multiple of `NAXIS`.
     /// - `NAXIS` is zero.
-    /// - The `linear` field does not describe `NAXIS` axes.
     /// - A `-TAB` axis remains unresolved.
     pub fn pixel_to_world_many(&self, pix: &[f64]) -> Result<Vec<f64>> {
         if let Some(fast) = self.fast_celestial() {
@@ -1115,7 +1163,6 @@ impl Wcs {
     ///
     /// - `world.len()` is not a multiple of `NAXIS`.
     /// - `NAXIS` is zero.
-    /// - The `linear` field does not describe `NAXIS` axes.
     /// - A `-TAB` axis remains unresolved.
     pub fn world_to_pixel_many(&self, world: &[f64]) -> Result<Vec<f64>> {
         if let Some(fast) = self.fast_celestial() {
@@ -1152,7 +1199,6 @@ impl Wcs {
         // Hoisted out of the loop so a per-point `Err` means "this
         // point is outside the projection", never "this WCS cannot
         // transform at all". The latter must fail the whole call.
-        self.check_linear_shape()?;
         self.check_tab_resolved()?;
         let mut scratch = Scratch::new(n);
         let mut out = vec![0.0; input.len()];
@@ -1444,11 +1490,10 @@ impl Wcs {
     /// silently.
     ///
     /// Every entry point runs this once per call, before the
-    /// per-point body, exactly as it runs
-    /// [`Self::check_linear_shape`]. Both describe the WCS rather
-    /// than the point, so a batch must fail the whole call rather
-    /// than mark each point `NaN`. The fast path has no check of its
-    /// own; [`Self::fast_celestial`] declines a WCS that carries any
+    /// per-point body: it describes the WCS rather than the point, so
+    /// a batch must fail the whole call rather than mark each point
+    /// `NaN`. The fast path has no check of its own;
+    /// [`Self::fast_celestial`] declines a WCS that carries any
     /// `-TAB` spec.
     fn check_tab_resolved(&self) -> Result<()> {
         let resolved = self.resolved_tab_axes();
@@ -1647,4 +1692,86 @@ fn great_circle_arcsec(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
     let num = ((c2 * sd).powi(2) + (c1 * s2 - s1 * c2 * cd).powi(2)).sqrt();
     let den = s1 * s2 + c1 * c2 * cd;
     num.atan2(den) / d2r * 3600.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both construction paths pass through [`Wcs::new`]. It is the
+    /// one place that can hold `celestial` and `celestial_pair` to
+    /// agreement. A disagreement would send the classification
+    /// queries and the transform pipeline to different axes.
+    #[test]
+    fn celestial_block_and_pair_must_agree() {
+        let pair = CelestialPair {
+            lon: 0,
+            lat: 1,
+            frame: CelestialFrame::Equatorial,
+        };
+        let block = || CelestialBlock {
+            pair,
+            projection: Projection::default(),
+            rotation: celestial::CelestialRotation::new(150.0, 30.0, None, None, 0.0, 90.0)
+                .unwrap(),
+            sip: None,
+            tpv: None,
+            tnx: None,
+            cunit_to_deg: (1.0, 1.0),
+            fiducial_offset: (0.0, 0.0),
+        };
+        let linear = || {
+            LinearTransform::from_pc(
+                vec![1.0, 1.0],
+                vec![150.0, 30.0],
+                vec![1.0, 1.0],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )
+            .unwrap()
+        };
+        let axes = || vec![Axis::default(), Axis::default()];
+
+        // Agreeing pair: accepted.
+        let parts = WcsParts {
+            celestial: Some(block()),
+            celestial_pair: Some(pair),
+            ..WcsParts::default()
+        };
+        assert!(Wcs::new(axes(), linear(), parts).is_ok());
+
+        // Swapped axes on the outer pair: rejected.
+        let parts = WcsParts {
+            celestial: Some(block()),
+            celestial_pair: Some(CelestialPair {
+                lon: 1,
+                lat: 0,
+                frame: CelestialFrame::Equatorial,
+            }),
+            ..WcsParts::default()
+        };
+        let err = Wcs::new(axes(), linear(), parts).unwrap_err();
+        assert!(err.to_string().contains("disagrees"), "got: {err}");
+
+        // A frame-only disagreement is a disagreement too.
+        let parts = WcsParts {
+            celestial: Some(block()),
+            celestial_pair: Some(CelestialPair {
+                lon: 0,
+                lat: 1,
+                frame: CelestialFrame::Galactic,
+            }),
+            ..WcsParts::default()
+        };
+        let err = Wcs::new(axes(), linear(), parts).unwrap_err();
+        assert!(err.to_string().contains("disagrees"), "got: {err}");
+
+        // A block with no pair at all: rejected.
+        let parts = WcsParts {
+            celestial: Some(block()),
+            celestial_pair: None,
+            ..WcsParts::default()
+        };
+        let err = Wcs::new(axes(), linear(), parts).unwrap_err();
+        assert!(err.to_string().contains("no celestial pair"), "got: {err}");
+    }
 }

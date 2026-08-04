@@ -23,8 +23,8 @@
 //! Reference: <https://fits.gsfc.nasa.gov/registry/tpvwcs/tpv.html>
 
 use crate::error::{FitsError, Result};
-use crate::wcs::newton;
-use crate::wcs::poly;
+use crate::wcs::distortion::newton;
+use crate::wcs::distortion::poly;
 
 /// Number of TPV polynomial coefficients per axis. PV0 through PV39
 /// (PV38 corresponds to `r^7` and PV39 to `xi*eta^7` per the registry's
@@ -62,13 +62,40 @@ const DEGREE_END: [usize; 8] = [0, 3, 6, 11, 16, 23, 30, 39];
 /// Registry indices of the radial terms `r`, `r^3`, `r^5` and `r^7`.
 const RADIAL: [usize; 4] = [3, 11, 23, 39];
 
+/// Highest total degree carrying a non-zero coefficient.
+///
+/// The table holds 40 slots whatever the solution used. A real TPV is
+/// cubic or quintic, so the top groups are usually all zero, and
+/// evaluating them multiplies by zero and adds nothing. This runs once
+/// at construction; the result lives in [`TpvAxis::degree`].
+fn top_degree(coeffs: &[f64; TPV_NCOEFFS]) -> usize {
+    for d in (1..8).rev() {
+        if coeffs[DEGREE_END[d - 1] + 1..=DEGREE_END[d]]
+            .iter()
+            .any(|v| *v != 0.0)
+        {
+            return d;
+        }
+    }
+    0
+}
+
 /// Per-axis TPV coefficient table. Defaults: PV*_1 = 1, others 0.
+///
+/// The fields are private; [`Self::from_pv_pairs`] is the only way
+/// in. It resolves `degree` and `has_radial` from the coefficients,
+/// so the evaluators read those instead of re-scanning the table on
+/// every call.
 #[derive(Debug, Clone, Copy)]
 pub struct TpvAxis {
     /// 0 -> axis 1 (xi -> xi'), 1 -> axis 2 (eta -> eta').
-    pub axis: u8,
+    axis: u8,
     /// 40 polynomial coefficients indexed by `m`.
-    pub coeffs: [f64; TPV_NCOEFFS],
+    coeffs: [f64; TPV_NCOEFFS],
+    /// Highest total degree with a non-zero coefficient.
+    degree: usize,
+    /// Whether any radial term (`r`, `r^3`, `r^5`, `r^7`) is non-zero.
+    has_radial: bool,
 }
 
 impl TpvAxis {
@@ -97,7 +124,24 @@ impl TpvAxis {
             }
             coeffs[m as usize] = v;
         }
-        Ok(Self { axis, coeffs })
+        Ok(Self {
+            axis,
+            coeffs,
+            degree: top_degree(&coeffs),
+            has_radial: RADIAL.iter().any(|&i| coeffs[i] != 0.0),
+        })
+    }
+
+    /// The axis this table corrects: 1 for xi, 2 for eta.
+    #[must_use]
+    pub fn axis(&self) -> u8 {
+        self.axis
+    }
+
+    /// The 40 polynomial coefficients, indexed by the registry `m`.
+    #[must_use]
+    pub fn coeffs(&self) -> &[f64; TPV_NCOEFFS] {
+        &self.coeffs
     }
 
     /// The polynomial arguments, in the order this axis reads them.
@@ -109,29 +153,6 @@ impl TpvAxis {
         if self.axis == 1 { (xi, eta) } else { (eta, xi) }
     }
 
-    /// Highest total degree carrying a non-zero coefficient.
-    ///
-    /// The table holds 40 slots whatever the solution used. A real TPV
-    /// is cubic or quintic, so the top groups are usually all zero, and
-    /// evaluating them multiplies by zero and adds nothing. This finds
-    /// where the polynomial actually stops.
-    ///
-    /// This reads the coefficients rather than a cached bound because
-    /// [`Self::coeffs`] is public. A bound resolved at construction
-    /// would go stale the moment a caller assigned to that field.
-    #[inline]
-    fn top_degree(&self) -> usize {
-        for d in (1..8).rev() {
-            if self.coeffs[DEGREE_END[d - 1] + 1..=DEGREE_END[d]]
-                .iter()
-                .any(|v| *v != 0.0)
-            {
-                return d;
-            }
-        }
-        0
-    }
-
     /// The radial terms `c3 r + c11 r^3 + c23 r^5 + c39 r^7`.
     ///
     /// Factoring out `r` leaves a cubic in `t = r^2`, so this needs one
@@ -140,7 +161,7 @@ impl TpvAxis {
     #[inline]
     fn radial(&self, x: f64, y: f64) -> f64 {
         let c = &self.coeffs;
-        if RADIAL.iter().all(|&i| c[i] == 0.0) {
+        if !self.has_radial {
             return 0.0;
         }
         let t = x * x + y * y;
@@ -160,7 +181,7 @@ impl TpvAxis {
     #[inline]
     fn radial_with_gradient(&self, x: f64, y: f64) -> (f64, f64, f64) {
         let c = &self.coeffs;
-        if RADIAL.iter().all(|&i| c[i] == 0.0) {
+        if !self.has_radial {
             return (0.0, 0.0, 0.0);
         }
         let t = x * x + y * y;
@@ -187,7 +208,7 @@ impl TpvAxis {
     pub fn eval(&self, xi: f64, eta: f64) -> f64 {
         let (x, y) = self.xy(xi, eta);
         let c = &self.coeffs;
-        let s = poly::triangle(self.top_degree() + 1, |p, q| c[XY_INDEX[p][q]], x, y);
+        let s = poly::triangle(self.degree + 1, |p, q| c[XY_INDEX[p][q]], x, y);
         s + self.radial(x, y)
     }
 
@@ -210,7 +231,7 @@ impl TpvAxis {
         let (x, y) = self.xy(xi, eta);
         let c = &self.coeffs;
         let (s, dx, dy) =
-            poly::triangle_with_derivatives(self.top_degree() + 1, |p, q| c[XY_INDEX[p][q]], x, y);
+            poly::triangle_with_derivatives(self.degree + 1, |p, q| c[XY_INDEX[p][q]], x, y);
         let (rv, rdx, rdy) = self.radial_with_gradient(x, y);
         let (value, dx, dy) = (s + rv, dx + rdx, dy + rdy);
         // Undo the axis-2 swap: `x` was `eta` there, so `d/dx` is the

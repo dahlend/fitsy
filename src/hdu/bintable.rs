@@ -44,10 +44,9 @@ use crate::header::Header;
 use crate::header::value::Value;
 
 /// `TFORM` type code (Standard Table 18).
-// `non_exhaustive`: Table 18 has grown before -- `Q` arrived in
+// Exhaustive: Table 18 has not grown since `Q` arrived in
 // FITS 3.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum BinFieldKind {
     /// `L` -- logical (1 byte: 'T', 'F', or 0 = undefined).
     Logical,
@@ -145,7 +144,6 @@ impl BinFieldKind {
 ///
 /// [`BinFormat::parse`] builds one from the card text.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct BinFormat {
     /// Repeat count (default 1).
     pub repeat: usize,
@@ -276,7 +274,6 @@ impl BinFormat {
 /// these per column, and [`BinTableHdu::cell_value`] takes one to
 /// decode a cell.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct BinColumn {
     /// 1-based column number, as in `TFORMn`.
     pub index: usize,
@@ -707,9 +704,7 @@ impl<'a> BinTableHdu<'a> {
 }
 
 /// Decoded value of one BINTABLE cell.
-// `non_exhaustive`: tracks `BinFieldKind`, which grows with Table 18.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum BinValue {
     /// Fixed-length array of logicals (`L`).
     Logical(Vec<Option<bool>>),

@@ -1,7 +1,18 @@
+// Several projections never fail in one direction. The unit structs
+// have no state for `&self` to read. Every method still keeps one
+// uniform signature, a fallible `Result` behind a `&self` receiver,
+// so the `Projection` enum can dispatch all 28 variants through one
+// match arm shape.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "uniform method signature across all projections for enum dispatch"
+)]
+
 //! Quadrilateralized cube projections -- Paper II Sec.5.6: TSC, CSC, QSC.
 
 use crate::error::{FitsError, Result};
-use crate::wcs::projection::Projection;
 use crate::wcs::{D2R, R2D};
 
 // -- TSC --------------------------------------------------------------
@@ -79,19 +90,32 @@ impl Tsc {
         }
     }
 }
-impl Projection for Tsc {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Tsc {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 0 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         0.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The six cube faces cover the sphere.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let (face, xi, eta) = Self::face_coords(phi, theta);
         Ok(Self::face_to_xy(face, xi, eta))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the point falls outside the cross-shaped
+    /// cube layout, which does not fill its bounding rectangle.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (face, xi, eta) = Self::xy_to_face(x, y)
             .ok_or_else(|| FitsError::Wcs(format!("TSC: ({x}, {y}) is outside the cube layout")))?;
         let (l, m, n) = Self::face_to_lmn(face, xi, eta);
@@ -247,6 +271,12 @@ impl Csc {
         };
         (cx + 45.0 * xf, cy + 45.0 * yf)
     }
+    /// The cube face that plane `(x, y)` falls on, with the face-local
+    /// coordinates, each scaled to the range -1 to 1.
+    ///
+    /// Returns `None` when the point falls outside every face. The six
+    /// faces form a cross, so they do not fill the bounding rectangle.
+    /// `QSC` shares this layout and calls the same function.
     pub(super) fn xy_to_face(x: f64, y: f64) -> Option<(u32, f64, f64)> {
         let in_unit = |a: f64| a.abs() <= 1.0 + 1e-9;
         for (face, cx, cy) in [
@@ -266,21 +296,36 @@ impl Csc {
         None
     }
 }
-impl Projection for Csc {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Csc {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 0 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         0.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. The six cube faces cover the sphere.
+    /// The forward polynomial is an approximation, so a round trip
+    /// returns to about an arcminute rather than machine precision.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         let (face, chi, psi) = Self::face_chi_psi(phi, theta);
         let xf = Self::forward_poly(chi, psi).clamp(-1.0, 1.0);
         let yf = Self::forward_poly(psi, chi).clamp(-1.0, 1.0);
         Ok(Self::face_to_xy(face, xf, yf))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the point falls outside the cross-shaped
+    /// cube layout.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (face, xf, yf) = Self::xy_to_face(x, y)
             .ok_or_else(|| FitsError::Wcs(format!("CSC: ({x}, {y}) is outside the cube layout")))?;
         let chi = Self::inverse_poly(xf, yf);
@@ -344,15 +389,23 @@ impl Qsc {
         (face, l, m, n)
     }
 }
-impl Projection for Qsc {
-    fn pv2(&self) -> Vec<(u32, f64)> {
+impl Qsc {
+    /// No parameters, so the table is empty.
+    pub(crate) fn pv2(&self) -> Vec<(u32, f64)> {
         Vec::new()
     }
 
-    fn theta0(&self) -> f64 {
+    /// Reference native latitude, 0 degrees.
+    pub(crate) fn theta0(&self) -> f64 {
         0.0
     }
-    fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
+    /// Forward step, native `(phi, theta)` to plane `(x, y)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] never. Each pole takes a closed form and the
+    /// six cube faces cover the rest of the sphere.
+    pub(crate) fn s2x(&self, phi: f64, theta: f64) -> Result<(f64, f64)> {
         if (theta - 90.0).abs() < 1e-12 {
             return Ok((0.0, 90.0));
         }
@@ -392,7 +445,13 @@ impl Projection for Qsc {
             yf.clamp(-1.0, 1.0),
         ))
     }
-    fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    /// Inverse step, plane `(x, y)` to native `(phi, theta)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Wcs`] when the point falls outside the cross-shaped
+    /// cube layout.
+    pub(crate) fn x2s(&self, x: f64, y: f64) -> Result<(f64, f64)> {
         let (face, xf, yf) = Csc::xy_to_face(x, y)
             .ok_or_else(|| FitsError::Wcs(format!("QSC: ({x}, {y}) is outside the cube layout")))?;
         let direct = xf.abs() > yf.abs();
@@ -483,5 +542,52 @@ impl Projection for Qsc {
             m.atan2(l) * R2D
         };
         Ok((phi, theta))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wcs::projection::testing::round_trip_tol;
+
+    /// `TSC` and `QSC` are exact; both must invert to machine
+    /// precision across every face of the cube.
+    #[test]
+    fn exact_quadcube_projections_round_trip() {
+        round_trip_tol(&Tsc.into(), "TSC", 1e-9);
+        round_trip_tol(&Qsc.into(), "QSC", 1e-6);
+    }
+
+    /// `CSC` is a polynomial *approximation* (Paper II Sec.5.6.2). Its
+    /// own paper quotes an error near an arcminute, so a round trip
+    /// cannot return to machine precision and the tolerance says so.
+    #[test]
+    fn csc_round_trip_within_its_approximation_error() {
+        round_trip_tol(&Csc.into(), "CSC", 5e-2);
+    }
+
+    /// Face centers are where the cube's six patches meet the sphere
+    /// tangentially; a face-index error shows up here first.
+    #[test]
+    fn tsc_face_centers_round_trip() {
+        for &(phi, theta) in &[
+            (0.0_f64, 0.0_f64),
+            (45.0, 0.0),
+            (-30.0, 20.0),
+            (170.0, -25.0),
+            (0.0, 80.0),
+            (0.0, -80.0),
+        ] {
+            let (x, y) = Tsc.s2x(phi, theta).unwrap();
+            let (phi2, theta2) = Tsc.x2s(x, y).unwrap();
+            assert!(
+                (theta - theta2).abs() < 1e-9,
+                "TSC theta ({phi},{theta}) -> {theta2}"
+            );
+            if theta.abs() < 89.0 {
+                let dphi = ((phi - phi2 + 540.0).rem_euclid(360.0)) - 180.0;
+                assert!(dphi.abs() < 1e-9, "TSC phi ({phi},{theta}) -> {phi2}");
+            }
+        }
     }
 }

@@ -124,6 +124,11 @@ pub(super) fn decompress_into(
 }
 
 /// Convenience wrapper that allocates the output `Vec`.
+///
+/// # Errors
+///
+/// [`FitsError::Data`] when `src` is truncated or holds a block the
+/// Rice decoder does not accept.
 #[cfg(test)]
 pub(super) fn decompress(bytepix: u32, nblock: u32, nx: u32, src: &[u8]) -> Result<Vec<u8>> {
     let mut out = vec![0_u8; (nx as usize) * (bytepix as usize)];

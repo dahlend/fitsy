@@ -13,7 +13,7 @@ use fitsy::{FitsAppender, FitsFile, Hdu, Header, ImageBuilder, Wcs};
 /// this file puts longitude on axis 1.
 fn sky(wcs: &Wcs, px: f64, py: f64) -> (f64, f64) {
     // `CRPIX` is 1-based and the API is 0-based, hence the shift.
-    let mut point: Vec<f64> = wcs.linear.crpix().iter().map(|c| c - 1.0).collect();
+    let mut point: Vec<f64> = wcs.linear().crpix().iter().map(|c| c - 1.0).collect();
     point[0] = px;
     point[1] = py;
     let w = wcs.pixel_to_world(&point).expect("pixel_to_world");
@@ -127,7 +127,7 @@ fn crota_follows_the_latitude_axis() {
         "CROTA3  =                 30.0",
     ];
     let w = wcs_of(&cube);
-    let m = w.linear.matrix_row_major();
+    let m = w.linear().matrix_row_major();
     // The FREQ axis keeps its own CDELT and picks up no rotation...
     assert!((m[0] - 1.0).abs() < 1e-12, "FREQ axis scale changed");
     assert!(

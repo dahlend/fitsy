@@ -168,13 +168,10 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
             CelestialFrame::Ecliptic => "Ecliptic",
             CelestialFrame::Supergalactic => "Supergalactic",
             CelestialFrame::HelioEcliptic => "HelioEcliptic",
-            // `CelestialFrame` is `#[non_exhaustive]`, so a frame added
-            // later reaches this arm rather than failing the build of
-            // every downstream consumer.
-            CelestialFrame::Other | _ => "Other",
+            CelestialFrame::Other => "Other",
         };
         // CRPIX
-        let crpix = wcs.linear.crpix();
+        let crpix = wcs.linear().crpix();
         let lon_idx = cb.pair.lon;
         let lat_idx = cb.pair.lat;
         let crpix1 = crpix.get(lon_idx).copied().unwrap_or(0.0);

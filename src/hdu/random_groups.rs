@@ -46,7 +46,6 @@ use crate::header::Header;
 /// stored value to the physical one by eq. 6.1,
 /// `physical = PZEROn + PSCALn x stored`.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct GroupParameter {
     /// 1-based parameter index, as in `PTYPEn`.
     pub index: usize,

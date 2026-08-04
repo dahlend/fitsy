@@ -39,8 +39,8 @@
 //! `p + q <= order` and adds it to the polynomial.
 
 use crate::error::{FitsError, Result};
-use crate::wcs::newton;
-use crate::wcs::poly;
+use crate::wcs::distortion::newton;
+use crate::wcs::distortion::poly;
 
 /// Highest polynomial order that this module accepts.
 pub const SIP_MAX_ORDER: u32 = 9;
@@ -51,10 +51,14 @@ pub const SIP_MAX_ORDER: u32 = 9;
 #[derive(Debug, Clone)]
 pub struct SipPoly {
     /// Highest total degree `p + q` the expansion carries.
-    pub order: u32,
+    ///
+    /// Private; [`Self::from_terms`] is the only way in. It sizes
+    /// `coeffs` as `(order + 1)^2`, so the evaluators index by that
+    /// stride without a per-call bounds defense.
+    order: u32,
     /// `coeffs[p * (order+1) + q]`. Entries with `p + q > order`
-    /// must remain zero.
-    pub coeffs: Vec<f64>,
+    /// stay zero.
+    coeffs: Vec<f64>,
 }
 
 impl SipPoly {
@@ -84,21 +88,29 @@ impl SipPoly {
         Ok(Self { order, coeffs })
     }
 
+    /// Highest total degree `p + q` the expansion carries.
+    #[must_use]
+    pub fn order(&self) -> u32 {
+        self.order
+    }
+
+    /// The coefficient of `u^p v^q`, or 0 for a term past `order`.
+    #[must_use]
+    pub fn coeff(&self, p: u32, q: u32) -> f64 {
+        if p + q > self.order {
+            return 0.0;
+        }
+        self.coeffs[(p as usize) * self.dim() + (q as usize)]
+    }
+
     /// Number of coefficient rows, and the row stride of `coeffs`.
     ///
     /// [`Self::from_terms`] sizes `coeffs` as `(order + 1)^2` and
-    /// refuses an order above [`SIP_MAX_ORDER`]. The fields are public,
-    /// so a hand-built polynomial can hold any size. This takes the
-    /// largest square the coefficients hold. A stride other than the
-    /// true `order + 1` reads the wrong terms.
+    /// refuses an order above [`SIP_MAX_ORDER`]. The fields are
+    /// private, so that holds for every instance.
     #[inline]
     fn dim(&self) -> usize {
-        debug_assert!(
-            self.order <= SIP_MAX_ORDER,
-            "SIP order {} exceeds the maximum {SIP_MAX_ORDER}",
-            self.order
-        );
-        ((self.order as usize) + 1).min(self.coeffs.len().isqrt())
+        (self.order as usize) + 1
     }
 
     /// Evaluate `Sigma c_{p,q} * u^p * v^q`.

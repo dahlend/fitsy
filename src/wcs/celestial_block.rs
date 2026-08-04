@@ -9,18 +9,15 @@
 //! which the math paths silently treated as "no celestial axes". The
 //! grouping makes that state unrepresentable.
 
-use std::sync::Arc;
-
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation};
 use crate::wcs::projection::Projection;
-use crate::wcs::sip::Sip;
-use crate::wcs::tnx::Tnx;
-use crate::wcs::tpv::Tpv;
+use crate::wcs::distortion::sip::Sip;
+use crate::wcs::distortion::tnx::Tnx;
+use crate::wcs::distortion::tpv::Tpv;
 
 /// Indices (zero-based) of the celestial-longitude and -latitude axes,
 /// plus the frame inferred from their `CTYPE` prefix.
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CelestialPair {
     /// Zero-based index of the longitude axis.
     pub lon: usize,
@@ -33,12 +30,11 @@ pub struct CelestialPair {
 /// Everything that exists if and only if a WCS has a celestial axis
 /// pair (Paper II Sec.2). Constructed atomically by the parser.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct CelestialBlock {
     /// Indices of the celestial axis pair.
     pub pair: CelestialPair,
     /// Projection on the tangent plane (TAN, SIN, ZPN, ...).
-    pub projection: Arc<dyn Projection>,
+    pub projection: Projection,
     /// Native <-> celestial rotation (LONPOLE/LATPOLE machinery).
     pub rotation: CelestialRotation,
     /// Optional SIP pixel-space distortion (CTYPE suffix `-SIP`).

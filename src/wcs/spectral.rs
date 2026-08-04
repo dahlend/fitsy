@@ -157,7 +157,6 @@ fn vacuum_to_air(lambda: f64) -> Result<f64> {
 /// User-facing spectral coordinate type (the `S` in Paper III).
 // `non_exhaustive`: Table 25 registers new types over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum SpectralKind {
     /// `FREQ` -- frequency, Hz.
     Freq,
@@ -244,7 +243,6 @@ enum SpectralClass {
 /// (Paper III Sec.3.3: the *first* letter of the algorithm code).
 // `non_exhaustive`: Table 25 registers new codes over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Linearized {
     /// Frequency-linear (`-F2*`).
     Freq,
@@ -260,7 +258,6 @@ pub enum Linearized {
 /// Sec.5.1 for the grism codes).
 // `non_exhaustive`: Table 25 registers new codes over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum SpectralAlgorithm {
     /// `-LOG` -- `S` is logarithmic in pixel:
     /// `S = S_r * exp(w / S_r)`.
@@ -465,7 +462,6 @@ fn freq_from_medium_wavelength(air: bool, lambda_medium: f64) -> Result<f64> {
 /// inverse (`S -> pix`) transforms to its intermediate world
 /// coordinate.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct SpectralAxis {
     /// Zero-based axis index.
     pub axis: usize,
@@ -994,7 +990,6 @@ impl SpectralAxis {
 /// Present on a [`Wcs`](crate::Wcs) only when the description has a
 /// spectral axis; see the layering note in [`crate::wcs`].
 #[derive(Debug, Clone, PartialEq, Default)]
-#[non_exhaustive]
 pub struct SpectralFrame {
     /// `SPECSYS` -- frame the coordinates are expressed in
     /// (`TOPOCENT`, `BARYCENT`, `LSRK`, ..., Table 27).
@@ -1013,7 +1008,6 @@ pub struct SpectralFrame {
 /// is the parent: `SSYSSRC` and `VELANGL` describe it, so neither is
 /// retained without it.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct SourceFrame {
     /// `ZSOURCE` -- systemic velocity of the source as a unitless
     /// redshift.

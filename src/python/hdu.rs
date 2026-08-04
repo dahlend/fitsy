@@ -66,7 +66,7 @@ pub(crate) struct ReadBinding {
     /// Index of this HDU in `file`.
     pub(crate) hdu_idx: usize,
     /// Image axes in **FITS order** (`NAXIS1` fastest). Cached so
-    /// section reads/writes don't have to reparse the header.
+    /// section reads and writes do not reparse the header.
     pub(crate) axes: Vec<u64>,
 }
 
@@ -376,6 +376,10 @@ fn freeze_array(py: Python<'_>, arr: &Py<PyAny>) -> PyResult<()> {
     Ok(())
 }
 
+/// The numpy dtype name for a `BITPIX` value.
+///
+/// Returned as a string rather than a numpy type object, because the
+/// callers pass it straight to `dtype()` on the Python side.
 pub(super) fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
     match b {
         Bitpix::U8 => "uint8",
@@ -1212,6 +1216,9 @@ impl PyRandomGroups {
         self.data.clone()
     }
 
+    /// Snapshot a borrowed random-groups HDU into an owned Python
+    /// object. The data section is copied, so the result outlives the
+    /// [`FitsFile`](crate::FitsFile) it came from.
     pub(crate) fn from_hdu(rg: &RandomGroupsHdu<'_>, header: PyHeader) -> Self {
         Self {
             header,

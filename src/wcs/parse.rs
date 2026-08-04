@@ -2,8 +2,6 @@
 //! code (Standard Sec.8.2.6: `' '` is the primary description, `'A'`
 //! through `'Z'` are alternates).
 
-use std::sync::Arc;
-
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
@@ -11,18 +9,18 @@ use crate::units::{dimensions, factor_to};
 use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation, RadeSys};
 use crate::wcs::celestial_block::{CelestialBlock, CelestialPair};
-use crate::wcs::dss::Dss;
+use crate::wcs::distortion::dss::Dss;
 use crate::wcs::linear::LinearTransform;
-use crate::wcs::projection::{self, Projection, ProjectionKind};
-use crate::wcs::sip::{Sip, SipPoly};
+use crate::wcs::projection::Projection;
+use crate::wcs::distortion::sip::{Sip, SipPoly};
 use crate::wcs::spectral::{
     Grism, SourceFrame, SpectralAlgorithm, SpectralAxis, SpectralFrame, SpectralKind,
 };
 use crate::wcs::tab::TabSpec;
 use crate::wcs::time::{PhaseAxis, TimeAxis, is_phase_ctype};
-use crate::wcs::tnx::Tnx;
-use crate::wcs::tpv::{Tpv, TpvAxis};
-use crate::wcs::wat;
+use crate::wcs::distortion::tnx::Tnx;
+use crate::wcs::distortion::tpv::{Tpv, TpvAxis};
+use crate::wcs::distortion::wat;
 use crate::wcs::{Axis, WcsParts};
 
 impl Wcs {
@@ -473,14 +471,14 @@ fn build_celestial_block(
     // TPV is signaled by projection code; underlying maths is TAN
     // with polynomial pre-warp on intermediate coords. TNX uses the
     // same slot on TAN; ZPX uses it on ZPN.
-    let (kind, is_tpv, is_tnx, is_zpx) = if proj_code.eq_ignore_ascii_case("TPV") {
-        (ProjectionKind::Tan, true, false, false)
+    let (canon_code, is_tpv, is_tnx, is_zpx) = if proj_code.eq_ignore_ascii_case("TPV") {
+        ("TAN", true, false, false)
     } else if proj_code.eq_ignore_ascii_case("TNX") {
-        (ProjectionKind::Tan, false, true, false)
+        ("TAN", false, true, false)
     } else if proj_code.eq_ignore_ascii_case("ZPX") {
-        (ProjectionKind::Zpn, false, false, true)
+        ("ZPN", false, false, true)
     } else {
-        (ProjectionKind::from_code(proj_code)?, false, false, false)
+        (proj_code, false, false, false)
     };
     // Collect PV2_m. Sec.8.2 puts `m` in the range 0..=99; ZPN is the
     // projection that reaches highest, with a polynomial in
@@ -488,11 +486,11 @@ fn build_celestial_block(
     // term. TPV reuses the same slot for its own 0..=39.
     let pv_count = if is_tpv { 40 } else { PV_MAX + 1 };
     let pv2 = collect_pv(header, pair.lat + 1, alt_suffix, pv_count);
-    let projection: Arc<dyn Projection> = if is_tpv || is_tnx {
+    let projection = if is_tpv || is_tnx {
         // TAN takes no PV parameters.
-        projection::build(kind, &[])?
+        Projection::from_code(canon_code, &[])?
     } else {
-        projection::build(kind, &pv2)?
+        Projection::from_code(canon_code, &pv2)?
     };
     // Sec.8.2 puts four parameters on the *longitude* axis: `PVi_1`
     // and `PVi_2` are the fiducial point, `PVi_3`/`PVi_4` spell

@@ -430,7 +430,6 @@ impl<'a> ImageHdu<'a> {
 /// Returned by [`ImageHdu::read_raw_dyn`] so callers can dispatch on
 /// the pixel type without knowing it at compile time.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum ImagePixels {
     /// `BITPIX = 8`.
     U8(ImageData<u8>),
