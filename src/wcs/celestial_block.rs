@@ -10,10 +10,10 @@
 //! grouping makes that state unrepresentable.
 
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation};
-use crate::wcs::projection::Projection;
 use crate::wcs::distortion::sip::Sip;
 use crate::wcs::distortion::tnx::Tnx;
 use crate::wcs::distortion::tpv::Tpv;
+use crate::wcs::projection::Projection;
 
 /// Indices (zero-based) of the celestial-longitude and -latitude axes,
 /// plus the frame inferred from their `CTYPE` prefix.

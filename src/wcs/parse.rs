@@ -10,17 +10,17 @@ use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation, RadeSys};
 use crate::wcs::celestial_block::{CelestialBlock, CelestialPair};
 use crate::wcs::distortion::dss::Dss;
+use crate::wcs::distortion::sip::{Sip, SipPoly};
+use crate::wcs::distortion::tnx::Tnx;
+use crate::wcs::distortion::tpv::{Tpv, TpvAxis};
+use crate::wcs::distortion::wat;
 use crate::wcs::linear::LinearTransform;
 use crate::wcs::projection::Projection;
-use crate::wcs::distortion::sip::{Sip, SipPoly};
 use crate::wcs::spectral::{
     Grism, SourceFrame, SpectralAlgorithm, SpectralAxis, SpectralFrame, SpectralKind,
 };
 use crate::wcs::tab::TabSpec;
 use crate::wcs::time::{PhaseAxis, TimeAxis, is_phase_ctype};
-use crate::wcs::distortion::tnx::Tnx;
-use crate::wcs::distortion::tpv::{Tpv, TpvAxis};
-use crate::wcs::distortion::wat;
 use crate::wcs::{Axis, WcsParts};
 
 impl Wcs {

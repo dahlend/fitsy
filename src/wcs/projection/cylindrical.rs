@@ -248,10 +248,7 @@ mod tests {
         let cases: Vec<(&str, Projection)> = vec![
             ("CAR", Projection::from(Car)),
             ("MER", Projection::from(Mer)),
-            (
-                "CEA",
-                Projection::from(Cea::from_pv(&[0.0, 1.0]).unwrap()),
-            ),
+            ("CEA", Projection::from(Cea::from_pv(&[0.0, 1.0]).unwrap())),
             (
                 "CYP",
                 Projection::from(Cyp {

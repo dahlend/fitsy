@@ -20,9 +20,9 @@ use crate::error::{FitsError, Result};
 use crate::wcs::Wcs;
 use crate::wcs::celestial::{CelestialFrame, CelestialRotation, RadeSys};
 use crate::wcs::celestial_block::{CelestialBlock, CelestialPair};
+use crate::wcs::distortion::sip::{SIP_MAX_ORDER, Sip, SipPoly};
 use crate::wcs::linear::LinearTransform;
 use crate::wcs::projection::Projection;
-use crate::wcs::distortion::sip::{SIP_MAX_ORDER, Sip, SipPoly};
 use crate::wcs::{Axis, WcsParts};
 use crate::wcs::{D2R, R2D};
 
