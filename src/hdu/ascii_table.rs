@@ -61,6 +61,14 @@ pub struct AsciiColumn {
     pub tzero: f64,
     /// `TNULLn` -- string indicating an undefined value.
     pub tnull: Option<String>,
+    /// `TDISPn`, trimmed (Standard Sec.7.2.5). `None` when the card
+    /// is absent.
+    ///
+    /// This is the recommended display format for the field, held as
+    /// written. It is a Fortran edit descriptor such as `F8.3`. It
+    /// describes presentation only, so this crate stores it and never
+    /// interprets it.
+    pub tdisp: Option<String>,
 }
 
 impl AsciiColumn {
@@ -298,6 +306,9 @@ impl<'a> AsciiTableHdu<'a> {
                     .optional_string(&format!("TNULL{i}"))
                     .map(String::from)
             };
+            let tdisp = header
+                .optional_string(&format!("TDISP{i}"))
+                .map(|s| s.trim().to_string());
             columns.push(AsciiColumn {
                 index: i,
                 name,
@@ -307,6 +318,7 @@ impl<'a> AsciiTableHdu<'a> {
                 tscal,
                 tzero,
                 tnull,
+                tdisp,
             });
         }
 

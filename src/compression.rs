@@ -110,7 +110,7 @@ struct QuantizeInfo {
     /// Per-tile seed offset from `ZDITHER0`. This defaults to 1.
     dither_seed: u32,
     /// Integer sentinel for NaN/Inf source pixels.
-    blank: i32,
+    blank: BlankSource,
     scale: ScaleSource,
     zero: ScaleSource,
 }
@@ -121,6 +121,21 @@ enum ScaleSource {
     /// Constant value from a header keyword.
     Constant(f64),
     /// Slot index into [`BinTableHdu::columns`], one scalar per row.
+    Column(usize),
+}
+
+/// Source of the `ZBLANK` undefined-pixel sentinel (Standard
+/// Sec.10.2.2).
+///
+/// The sentinel may vary from tile to tile, so the Standard allows a
+/// `ZBLANK` column beside the `ZBLANK` keyword. Sec.10.2.2 requires
+/// the reader to use the column when a file carries both.
+#[derive(Debug, Clone)]
+enum BlankSource {
+    /// Constant sentinel from the `ZBLANK` keyword. This holds
+    /// [`NULL_VALUE`] when the file names no sentinel.
+    Constant(i32),
+    /// Slot index into [`BinTableHdu::columns`], one sentinel per row.
     Column(usize),
 }
 
@@ -246,7 +261,7 @@ impl<'a> CompressedImageHdu<'a> {
         let quantize = if let Some(method) = quant_method {
             let scale = lookup_scale_source(h, &inner, "ZSCALE")?;
             let zero = lookup_scale_source(h, &inner, "ZZERO")?;
-            let blank = h.optional_int("ZBLANK").map_or(NULL_VALUE, |v| v as i32);
+            let blank = lookup_blank_source(h, &inner)?;
             // cfitsio defaults the dither seed to 1 when ZDITHER0 is absent.
             let dither_seed = h
                 .optional_int("ZDITHER0")
@@ -479,6 +494,7 @@ impl<'a> CompressedImageHdu<'a> {
                 float_buf.resize(tile_bytes_outer, 0);
                 let scale = q.scale.fetch(&self.inner, row)?;
                 let zero = q.zero.fetch(&self.inner, row)?;
+                let blank = q.blank.fetch(&self.inner, row)?;
                 // cfitsio: seed = ZDITHER0 + (row + 1) - 1 = ZDITHER0 + row,
                 // with `row` 0-based here (DitherWalker applies the final -1).
                 let dither_seed = u64::from(q.dither_seed) + (row as u64);
@@ -492,7 +508,7 @@ impl<'a> CompressedImageHdu<'a> {
                         &mut float_buf,
                         scale,
                         zero,
-                        q.blank,
+                        blank,
                         dither_arg,
                     ),
                     Bitpix::F64 => quantize::unquantize_to_f64_be(
@@ -500,7 +516,7 @@ impl<'a> CompressedImageHdu<'a> {
                         &mut float_buf,
                         scale,
                         zero,
-                        q.blank,
+                        blank,
                         dither_arg,
                     ),
                     _ => unreachable!("quantize is only set for float images"),
@@ -767,6 +783,59 @@ fn parse_hcompress_params(h: &Header) -> Result<(i32, bool)> {
         }
     }
     Ok((scale, smooth))
+}
+
+/// Resolve the `ZBLANK` sentinel: column first, then header keyword,
+/// then the fallback.
+///
+/// Standard Sec.10.2.2 requires the reader to use the column when a
+/// file carries both forms. A file may omit both. That states the
+/// image holds no undefined pixel, and the fallback is then
+/// [`NULL_VALUE`], the sentinel the dequantizer compares against.
+fn lookup_blank_source(h: &Header, bt: &BinTableHdu<'_>) -> Result<BlankSource> {
+    if let Some((slot, col)) = bt
+        .columns()
+        .iter()
+        .enumerate()
+        .find(|(_, c)| c.name.eq_ignore_ascii_case("ZBLANK"))
+    {
+        if !matches!(
+            col.format.kind,
+            BinFieldKind::Byte | BinFieldKind::I16 | BinFieldKind::I32 | BinFieldKind::I64
+        ) {
+            return Err(FitsError::Value {
+                keyword: format!("TFORM(col {})", col.index),
+                msg: "ZBLANK column must be a scalar integer".into(),
+            });
+        }
+        return Ok(BlankSource::Column(slot));
+    }
+    Ok(BlankSource::Constant(
+        h.optional_int("ZBLANK").map_or(NULL_VALUE, |v| v as i32),
+    ))
+}
+
+impl BlankSource {
+    /// Look up the sentinel for `row` (0-based).
+    ///
+    /// A null cell states that the tile holds no undefined pixel.
+    /// That case returns [`NULL_VALUE`].
+    fn fetch(&self, bt: &BinTableHdu<'_>, row: usize) -> Result<i32> {
+        match self {
+            Self::Constant(v) => Ok(*v),
+            Self::Column(slot) => {
+                let col = bt.columns().get(*slot).ok_or_else(|| {
+                    FitsError::Header(format!("ZBLANK column slot {slot} no longer present"))
+                })?;
+                match bt.cell_value(row, col)? {
+                    BinValue::Int(v) if v.len() == 1 => Ok(v[0].map_or(NULL_VALUE, |x| x as i32)),
+                    other => Err(FitsError::Data(format!(
+                        "expected scalar integer in ZBLANK column, got {other:?}"
+                    ))),
+                }
+            }
+        }
+    }
 }
 
 /// Resolve a `ZSCALE` / `ZZERO` parameter: column first, then

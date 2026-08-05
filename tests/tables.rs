@@ -576,3 +576,138 @@ fn bintable_vla_repeat_must_be_zero_or_one() {
     assert!(BinFormat::parse("0PE").is_ok());
     assert!(BinFormat::parse("1PE").is_ok());
 }
+
+/// `TDISPn` round trip through the binary-table builder and reader
+/// (Standard Sec.7.3.4). The reader must return the text the builder
+/// wrote. A column without the card must report `None`.
+#[test]
+fn bintable_tdisp_round_trip() {
+    use fitsy::{BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder};
+
+    let primary = ImageBuilder::<f32>::new(Vec::<u64>::new(), Vec::<f32>::new())
+        .unwrap()
+        .primary(true)
+        .build()
+        .unwrap();
+
+    let mut bt = BinTableBuilder::new();
+    bt.add_column("ID", BinFieldKind::I32, 1, None, None)
+        .unwrap();
+    bt.display("I6.4").unwrap();
+    bt.add_column("FLUX", BinFieldKind::F64, 1, Some("Jy"), None)
+        .unwrap();
+    bt.display("E12.5E3").unwrap();
+    // A column with no TDISPn card at all.
+    bt.add_column("NAME", BinFieldKind::Char, 8, None, None)
+        .unwrap();
+
+    let mut row = Vec::new();
+    row.extend_from_slice(&1_i32.to_be_bytes());
+    row.extend_from_slice(&1.5_f64.to_be_bytes());
+    row.extend_from_slice(b"ALPHA   ");
+    let (h, data) = bt.build(1, row).unwrap();
+
+    assert_eq!(h.optional_string("TDISP1"), Some("I6.4"));
+    assert_eq!(h.optional_string("TDISP2"), Some("E12.5E3"));
+    assert_eq!(h.optional_string("TDISP3"), None);
+
+    let mut buf = Vec::new();
+    let mut w = FitsWriter::new(&mut buf);
+    w.write_hdu(&primary.0, &primary.1).unwrap();
+    w.write_hdu(&h, &data).unwrap();
+    w.finish().unwrap();
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::BinTable(t) = f.hdu(1).unwrap() else {
+        panic!("not bintable");
+    };
+    let cols = t.columns();
+    assert_eq!(cols[0].tdisp.as_deref(), Some("I6.4"));
+    assert_eq!(cols[1].tdisp.as_deref(), Some("E12.5E3"));
+    assert_eq!(cols[2].tdisp, None);
+}
+
+/// `TDISPn` round trip through the ASCII-table builder and reader
+/// (Standard Sec.7.2.5).
+#[test]
+fn ascii_table_tdisp_round_trip() {
+    use fitsy::hdu::builder::AsciiColumnData;
+    use fitsy::{AsciiFormat, AsciiTableBuilder, FitsWriter, ImageBuilder};
+
+    let primary = ImageBuilder::<f32>::new(Vec::<u64>::new(), Vec::<f32>::new())
+        .unwrap()
+        .primary(true)
+        .build()
+        .unwrap();
+
+    let mut b = AsciiTableBuilder::new();
+    b.add_column(
+        "NAME",
+        AsciiFormat::A(8),
+        AsciiColumnData::Str(vec!["alpha".into()]),
+    )
+    .unwrap();
+    b.display("A8").unwrap();
+    b.add_column(
+        "FLUX",
+        AsciiFormat::F(9, 3),
+        AsciiColumnData::Float(vec![1.5]),
+    )
+    .unwrap();
+    b.display("F9.3").unwrap();
+    let (h, data) = b.build().unwrap();
+
+    assert_eq!(h.optional_string("TDISP1"), Some("A8"));
+    assert_eq!(h.optional_string("TDISP2"), Some("F9.3"));
+
+    let mut buf = Vec::new();
+    let mut w = FitsWriter::new(&mut buf);
+    w.write_hdu(&primary.0, &primary.1).unwrap();
+    w.write_hdu(&h, &data).unwrap();
+    w.finish().unwrap();
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::AsciiTable(t) = f.hdu(1).unwrap() else {
+        panic!("not ascii table");
+    };
+    let cols = t.columns();
+    assert_eq!(cols[0].tdisp.as_deref(), Some("A8"));
+    assert_eq!(cols[1].tdisp.as_deref(), Some("F9.3"));
+}
+
+/// `TDISPn` is advisory, and this crate does not interpret it. Any
+/// text therefore survives the read unchanged, and the table stays
+/// usable.
+#[test]
+fn unrecognized_tdisp_is_preserved_verbatim() {
+    let cards = [
+        "XTENSION= 'BINTABLE'",
+        "BITPIX  =                    8",
+        "NAXIS   =                    2",
+        "NAXIS1  =                    4",
+        "NAXIS2  =                    1",
+        "PCOUNT  =                    0",
+        "GCOUNT  =                    1",
+        "TFIELDS =                    1",
+        "TTYPE1  = 'ID      '",
+        "TFORM1  = '1J      '",
+        "TDISP1  = 'nonsense'",
+        "END",
+    ];
+    let mut buf = empty_primary();
+    for c in cards {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    pad_to_block(&mut buf, b' ');
+    buf.extend_from_slice(&7_i32.to_be_bytes());
+    pad_to_block(&mut buf, 0);
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::BinTable(t) = f.hdu(1).unwrap() else {
+        panic!("not bintable");
+    };
+    assert_eq!(t.columns()[0].tdisp.as_deref(), Some("nonsense"));
+    assert_eq!(t.header().optional_string("TDISP1"), Some("nonsense"));
+    let col = t.column_by_name("ID").unwrap();
+    assert!(matches!(t.cell_value(0, col).unwrap(), BinValue::Int(_)));
+}

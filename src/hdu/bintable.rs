@@ -294,6 +294,14 @@ pub struct BinColumn {
     pub tnull: Option<i64>,
     /// `TDIMn` shape, if present (Standard Sec.7.3.3.2).
     pub tdim: Option<Vec<usize>>,
+    /// `TDISPn`, trimmed (Standard Sec.7.3.4). `None` when the card
+    /// is absent.
+    ///
+    /// This is the recommended display format for the field, held as
+    /// written. It is a Fortran edit descriptor such as `I6.4` or
+    /// `E12.5E3`. It describes presentation only, so this crate stores
+    /// it and never interprets it.
+    pub tdisp: Option<String>,
     /// How integer columns (`B/I/J/K`) should be interpreted given
     /// `TSCAL`/`TZERO` (Standard Sec.11.3.1). Always `RawSigned` for
     /// non-integer kinds.
@@ -509,6 +517,9 @@ impl<'a> BinTableHdu<'a> {
             } else {
                 IntStorage::RawSigned
             };
+            let tdisp = header
+                .optional_string(&format!("TDISP{i}"))
+                .map(|s| s.trim().to_string());
             columns.push(BinColumn {
                 index: i,
                 name,
@@ -519,6 +530,7 @@ impl<'a> BinTableHdu<'a> {
                 tzero,
                 tnull,
                 tdim,
+                tdisp,
                 int_storage,
             });
             offset = offset.checked_add(width).ok_or_else(|| FitsError::Value {
@@ -894,6 +906,9 @@ fn decode_cell(col: &BinColumn, raw: &[u8], heap: &[u8]) -> Result<BinValue> {
                 tzero: col.tzero,
                 tnull: col.tnull,
                 tdim: None,
+                // The inner column decodes bytes. `TDISPn` describes
+                // presentation, so it plays no part here.
+                tdisp: None,
                 int_storage: inner_storage,
             };
             let inner_value = decode_cell(&inner_col, slice, &[])?;
@@ -1126,6 +1141,7 @@ mod tests {
             tzero,
             tnull: None,
             tdim: None,
+            tdisp: None,
             int_storage: IntStorage::detect(kind, tscal, tzero),
         }
     }

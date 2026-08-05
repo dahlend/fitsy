@@ -615,3 +615,173 @@ fn synthetic_header_preserves_non_reserved_z_keywords() {
         Some("RA---TAN".to_string())
     );
 }
+
+/// Standard Sec.10.2.2 requires the reader to use the `ZBLANK`
+/// column. This applies when an image carries both forms.
+///
+/// The image holds two tiles. Each tile marks a different quantized
+/// value as undefined. Only a per-tile column can express that. The
+/// keyword names a third value, which matches no pixel. A reader that
+/// consults the keyword therefore returns four defined pixels, and
+/// fails the assertions below.
+#[test]
+fn fz_zblank_column_overrides_keyword() {
+    let nx: usize = 2;
+    let ny: usize = 2;
+    // ZSCALE=2.0, ZZERO=100.0 -> physical = q * 2 + 100.
+    let tiles: [[i32; 2]; 2] = [[10, -5], [0, 7]];
+    // Per-tile sentinel: tile 0 blanks -5, tile 1 blanks 7.
+    let zblank_per_tile: [i32; 2] = [-5, 7];
+
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    for tile in &tiles {
+        let mut be = Vec::new();
+        for v in tile {
+            be.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(&be).unwrap();
+        payloads.push(e.finish().unwrap());
+    }
+
+    // Row: COMPRESSED_DATA descriptor (8 bytes) + ZBLANK i32 (4 bytes).
+    let row_size: usize = 12;
+    let n_rows: usize = 2;
+    let heap: usize = payloads.iter().map(Vec::len).sum();
+    let header_cards: Vec<String> = vec![
+        "XTENSION= 'BINTABLE'".into(),
+        "BITPIX  =                    8".into(),
+        "NAXIS   =                    2".into(),
+        format!("NAXIS1  = {row_size:>20}"),
+        format!("NAXIS2  = {n_rows:>20}"),
+        format!("PCOUNT  = {heap:>20}"),
+        "GCOUNT  =                    1".into(),
+        "TFIELDS =                    2".into(),
+        "TTYPE1  = 'COMPRESSED_DATA'".into(),
+        "TFORM1  = '1PB     '".into(),
+        "TTYPE2  = 'ZBLANK  '".into(),
+        "TFORM2  = '1J      '".into(),
+        format!("THEAP   = {:>20}", row_size * n_rows),
+        "ZIMAGE  =                    T".into(),
+        "ZBITPIX =                  -32".into(),
+        "ZNAXIS  =                    2".into(),
+        format!("ZNAXIS1 = {nx:>20}"),
+        format!("ZNAXIS2 = {ny:>20}"),
+        format!("ZTILE1  = {nx:>20}"),
+        "ZTILE2  =                    1".into(),
+        "ZCMPTYPE= 'GZIP_1  '".into(),
+        "ZQUANTIZ= 'NO_DITHER'".into(),
+        "ZSCALE  =                  2.0".into(),
+        "ZZERO   =                100.0".into(),
+        // Matches no quantized value. A reader that uses the keyword
+        // instead of the column blanks nothing.
+        "ZBLANK  =                 -999".into(),
+        "END".into(),
+    ];
+    let mut buf = empty_primary();
+    for c in &header_cards {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    pad_to_block(&mut buf, b' ');
+
+    // Row area: descriptor then sentinel, one row per tile.
+    let mut offset = 0_i32;
+    for (p, z) in payloads.iter().zip(zblank_per_tile.iter()) {
+        buf.extend_from_slice(&(p.len() as i32).to_be_bytes());
+        buf.extend_from_slice(&offset.to_be_bytes());
+        buf.extend_from_slice(&z.to_be_bytes());
+        offset += p.len() as i32;
+    }
+    for p in &payloads {
+        buf.extend_from_slice(p);
+    }
+    pad_to_block(&mut buf, 0);
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::CompressedImage(c) = f.hdu(1).unwrap() else {
+        panic!("expected compressed image");
+    };
+    let raw = c.decompress().unwrap();
+    let decoded: Vec<f32> = raw
+        .chunks_exact(4)
+        .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    assert_eq!(decoded.len(), 4);
+    assert!((decoded[0] - 120.0).abs() < 1e-5, "got {}", decoded[0]);
+    assert!(decoded[1].is_nan(), "tile 0 sentinel -5 must read as NaN");
+    assert!((decoded[2] - 100.0).abs() < 1e-5, "got {}", decoded[2]);
+    assert!(decoded[3].is_nan(), "tile 1 sentinel 7 must read as NaN");
+}
+
+/// A null cell in the `ZBLANK` column means the tile holds no
+/// undefined pixel. Every pixel of that tile stays defined.
+#[test]
+fn fz_zblank_column_null_cell_blanks_nothing() {
+    let nx: usize = 2;
+    let ny: usize = 1;
+    let q: [i32; 2] = [10, -5];
+
+    let mut be = Vec::new();
+    for v in q {
+        be.extend_from_slice(&v.to_be_bytes());
+    }
+    let mut e = GzEncoder::new(Vec::new(), Compression::default());
+    e.write_all(&be).unwrap();
+    let payload = e.finish().unwrap();
+
+    let row_size: usize = 12;
+    let n_rows: usize = 1;
+    let heap = payload.len();
+    let header_cards: Vec<String> = vec![
+        "XTENSION= 'BINTABLE'".into(),
+        "BITPIX  =                    8".into(),
+        "NAXIS   =                    2".into(),
+        format!("NAXIS1  = {row_size:>20}"),
+        format!("NAXIS2  = {n_rows:>20}"),
+        format!("PCOUNT  = {heap:>20}"),
+        "GCOUNT  =                    1".into(),
+        "TFIELDS =                    2".into(),
+        "TTYPE1  = 'COMPRESSED_DATA'".into(),
+        "TFORM1  = '1PB     '".into(),
+        "TTYPE2  = 'ZBLANK  '".into(),
+        "TFORM2  = '1J      '".into(),
+        // The null marker for the ZBLANK column.
+        "TNULL2  =            -32768".into(),
+        format!("THEAP   = {:>20}", row_size * n_rows),
+        "ZIMAGE  =                    T".into(),
+        "ZBITPIX =                  -32".into(),
+        "ZNAXIS  =                    2".into(),
+        format!("ZNAXIS1 = {nx:>20}"),
+        format!("ZNAXIS2 = {ny:>20}"),
+        format!("ZTILE1  = {nx:>20}"),
+        "ZTILE2  =                    1".into(),
+        "ZCMPTYPE= 'GZIP_1  '".into(),
+        "ZQUANTIZ= 'NO_DITHER'".into(),
+        "ZSCALE  =                  2.0".into(),
+        "ZZERO   =                100.0".into(),
+        "END".into(),
+    ];
+    let mut buf = empty_primary();
+    for c in &header_cards {
+        buf.extend_from_slice(&pad_card(c));
+    }
+    pad_to_block(&mut buf, b' ');
+    buf.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+    buf.extend_from_slice(&0_i32.to_be_bytes());
+    buf.extend_from_slice(&(-32768_i32).to_be_bytes());
+    buf.extend_from_slice(&payload);
+    pad_to_block(&mut buf, 0);
+
+    let f = FitsFile::from_bytes(buf).unwrap();
+    let Hdu::CompressedImage(c) = f.hdu(1).unwrap() else {
+        panic!("expected compressed image");
+    };
+    let raw = c.decompress().unwrap();
+    let decoded: Vec<f32> = raw
+        .chunks_exact(4)
+        .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!((decoded[0] - 120.0).abs() < 1e-5, "got {}", decoded[0]);
+    assert!((decoded[1] - 90.0).abs() < 1e-5, "got {}", decoded[1]);
+}

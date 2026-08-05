@@ -302,6 +302,8 @@ struct ColSpec {
     repeat: usize,
     unit: Option<String>,
     tdim: Option<String>,
+    /// `TDISPn`, the recommended display format. Presentation only.
+    tdisp: Option<String>,
     /// For VLA columns (`kind == P` or `kind == Q`), the element type
     /// stored in the heap (e.g. `I32` for `1PJ`). `None` for fixed
     /// columns.
@@ -389,6 +391,7 @@ impl BinTableBuilder {
             repeat,
             unit: unit.map(ToString::to_string),
             tdim: tdim.map(ToString::to_string),
+            tdisp: None,
             vla_element: None,
             vla_max: None,
         });
@@ -439,6 +442,7 @@ impl BinTableBuilder {
             repeat: 1,
             unit: unit.map(ToString::to_string),
             tdim: None,
+            tdisp: None,
             vla_element: Some(element),
             vla_max: max,
         });
@@ -516,6 +520,31 @@ impl BinTableBuilder {
             .last_mut()
             .ok_or_else(|| FitsError::Data("no column added yet".into()))?;
         last.unit = Some(unit.into());
+        Ok(self)
+    }
+
+    /// Set the `TDISPn` of the most recently added column, replacing
+    /// any earlier value.
+    ///
+    /// `TDISPn` names the recommended format for an ASCII rendering of
+    /// the field (Standard Sec.7.3.4). It describes presentation only.
+    /// It changes no stored byte.
+    ///
+    /// The `format` argument is a Fortran edit descriptor of Table 20,
+    /// such as `"I6.4"` or `"E12.5E3"`. The builder writes it as
+    /// given. It checks neither the text nor its pairing with
+    /// `TFORMn`. Sec.7.3.4 permits an integer column to declare a real
+    /// display format.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when no column has been added yet.
+    pub fn display(&mut self, format: impl Into<String>) -> Result<&mut Self> {
+        let last = self
+            .columns
+            .last_mut()
+            .ok_or_else(|| FitsError::Data("no column added yet".into()))?;
+        last.tdisp = Some(format.into());
         Ok(self)
     }
 
@@ -613,6 +642,9 @@ impl BinTableBuilder {
             if let Some(d) = &c.tdim {
                 h.push(format!("TDIM{n}"), Value::String(d.clone()), None)?;
             }
+            if let Some(d) = &c.tdisp {
+                h.push(format!("TDISP{n}"), Value::String(d.clone()), None)?;
+            }
         }
         if pcount > 0 {
             // Sec.7.3.5: THEAP defaults to the row-area size; emit it
@@ -671,6 +703,8 @@ struct AsciiColSpec {
     format: crate::hdu::ascii_table::AsciiFormat,
     data: AsciiColumnData,
     unit: Option<String>,
+    /// `TDISPn`, the recommended display format. Presentation only.
+    tdisp: Option<String>,
     /// Required for `I` columns that contain `None` cells; rendered
     /// into the row whenever the value is missing. The string is
     /// padded/truncated to the field width.
@@ -772,6 +806,7 @@ impl AsciiTableBuilder {
             format,
             data,
             unit: None,
+            tdisp: None,
             tnull: None,
         });
         Ok(self)
@@ -784,6 +819,24 @@ impl AsciiTableBuilder {
     /// [`FitsError::Data`] when no column has been added yet.
     pub fn unit(&mut self, unit: impl Into<String>) -> Result<&mut Self> {
         self.last_mut("unit")?.unit = Some(unit.into());
+        Ok(self)
+    }
+
+    /// Set `TDISPn` on the most recently added column.
+    ///
+    /// `TDISPn` names the recommended format for an ASCII rendering of
+    /// the field (Standard Sec.7.2.5). It describes presentation only.
+    /// It changes no stored byte, and it does not have to match
+    /// `TFORMn`.
+    ///
+    /// The `format` argument is a Fortran edit descriptor of Table 20,
+    /// such as `"F8.3"`. The builder writes it as given.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Data`] when no column has been added yet.
+    pub fn display(&mut self, format: impl Into<String>) -> Result<&mut Self> {
+        self.last_mut("display")?.tdisp = Some(format.into());
         Ok(self)
     }
 
@@ -929,6 +982,9 @@ impl AsciiTableBuilder {
             }
             if let Some(tn) = &c.tnull {
                 h.push(format!("TNULL{n}"), Value::String(tn.clone()), None)?;
+            }
+            if let Some(d) = &c.tdisp {
+                h.push(format!("TDISP{n}"), Value::String(d.clone()), None)?;
             }
         }
         if let Some(name) = &self.extname {
