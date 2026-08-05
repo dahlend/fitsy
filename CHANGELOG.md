@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cached sine and cosine cannot fall out of step with it.
 - Breaking: `TabAxis` becomes `TabGroup`, owning every axis that
   shares a coordinate array; `Wcs` gains `celestial_pair`.
+- Breaking: a Python `wcs()` accessor raises when a `-TAB` axis has
+  no file to resolve against; `fitsy.Wcs(header)` stays header-only.
 - Breaking: `Grism` is exhaustive again -- Paper III Table 7
   fixes the disperser at exactly seven parameters.
 - Breaking: `Wcs` keeps only keywords its description uses; the
@@ -67,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: new `BinValue::StrArray` for `A` columns with `TDIMn`.
 - `Wcs::from_header` rejects an alternate code outside `' '` and
   `'A'`-`'Z'`.
+- `ImageHdu.wcs()` (Python) and `FitsFile::wcs_inherited` resolve
+  `-TAB` lookup axes, as `FitsFile::wcs` does.
 - `Wcs::to_header` round-trips: it writes the projection parameters,
   pole conventions, TPV, TNX/ZPX, DSS, spectral and `-TAB` cards.
 - Batch WCS transforms yield `NaN` outside the projection's domain

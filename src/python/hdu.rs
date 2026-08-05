@@ -133,6 +133,15 @@ pub struct PyImageHdu {
     /// `__exit__` know to rewrite the file. Pure pixel-patch
     /// writes via ``pwrite`` leave the bit alone.
     pub(crate) dirty: Option<Arc<super::file::DirtyFlags>>,
+    /// Backing file that `wcs()` reads a `-TAB` lookup table from.
+    /// `Some` for every HDU that comes from a `FitsFile`. This
+    /// includes a tile-compressed image, which leaves `read_binding`
+    /// `None`. This is a separate field from `read_binding` because
+    /// the two go stale at different times. A `data` reassignment
+    /// drops `read_binding`, because the on-disk pixel bytes no
+    /// longer match the image. The same edit leaves the sibling
+    /// `-TAB` table valid.
+    pub(crate) wcs_file: Option<Arc<crate::FitsFile>>,
 }
 
 impl PyImageHdu {
@@ -157,6 +166,7 @@ impl PyImageHdu {
             read_binding: None,
             update_binding: None,
             dirty: None,
+            wcs_file: None,
         }
     }
 
@@ -286,6 +296,7 @@ impl PyImageHdu {
             read_binding: None,
             update_binding: None,
             dirty: None,
+            wcs_file: None,
         })
     }
 
@@ -617,6 +628,7 @@ impl PyImageHdu {
             read_binding: None,
             update_binding: None,
             dirty: None,
+            wcs_file: None,
         })
     }
 
@@ -867,17 +879,41 @@ impl PyImageHdu {
     /// Raises
     /// ------
     /// FitsError
-    ///   If `alt` is not ``' '`` or one of ``'A'``-``'Z'``.
+    ///   If `alt` is not ``' '`` or one of ``'A'``-``'Z'``, if the
+    ///   header carries a malformed WCS, or if a ``-TAB`` axis
+    ///   cannot be resolved (see Notes).
     ///
     /// Notes
     /// -----
-    /// Only this HDU's header is consulted; ``-TAB`` axis tables
-    /// stored in sibling HDUs are not resolved.
+    /// A ``-TAB`` axis (Paper III Sec.6) stores its coordinate
+    /// array in a sibling BINTABLE. The ``PSi_0`` / ``PVi_1`` cards
+    /// name that table. An HDU from :func:`fitsy.open` keeps a
+    /// handle to its file. This method resolves the lookup through
+    /// that handle, exactly as :meth:`fitsy.FitsFile.wcs` does. An
+    /// HDU built in memory has no file to search. A ``-TAB`` axis
+    /// then raises here, not later at transform time. Use
+    /// ``fitsy.Wcs(hdu.header)`` to inspect such a header without
+    /// the lookup table.
     #[pyo3(signature = (alt=' '))]
     fn wcs(&self, alt: char) -> PyResult<Option<PyWcs>> {
-        let header = self.header.lock();
-        let wcs = crate::wcs::Wcs::from_header(&header, alt).into_py_result()?;
-        Ok(wcs.map(PyWcs::from))
+        let wcs = {
+            let header = self.header.lock();
+            crate::wcs::Wcs::from_header(&header, alt).into_py_result()?
+        };
+        let Some(mut wcs) = wcs else { return Ok(None) };
+        if !wcs.tab_specs.is_empty() {
+            let Some(file) = self.wcs_file.as_ref() else {
+                return Err(super::err_to_py(crate::error::FitsError::Wcs(
+                    "WCS has a -TAB axis, but this HDU carries no file to \
+                     load the lookup table from; read the HDU from \
+                     fitsy.open, or use fitsy.Wcs(hdu.header) for \
+                     header-only inspection"
+                        .into(),
+                )));
+            };
+            wcs.resolve_tab(file).into_py_result()?;
+        }
+        Ok(Some(PyWcs::from(wcs)))
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {

@@ -1793,6 +1793,11 @@ fn wave_tab_axis_resolved_from_bintable() {
     assert_eq!(wcs.tab_specs.len(), 1);
     assert_eq!(wcs.tab.len(), 1, "TAB axis should have been resolved");
 
+    // `wcs_inherited` reads the same file, so it resolves the
+    // lookup too.
+    let inherited = file.wcs_inherited(0, ' ').unwrap().expect("WCS present");
+    assert_eq!(inherited.tab.len(), 1, "wcs_inherited left -TAB unresolved");
+
     // Pixel 1 (1-based) -> 4000 Angstrom, etc. The Wcs API is 0-based,
     // so we evaluate at pixels 0, 2, 4 to hit table indices 1, 3, 5.
     let w1 = wcs.pixel_to_world(&[0.0, 0.0, 0.0]).unwrap();

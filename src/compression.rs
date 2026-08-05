@@ -561,6 +561,11 @@ impl OwnedImage {
     }
     /// Read the WCS of this image for alternate descriptor `alt`.
     ///
+    /// This function reads the recovered image header alone. It
+    /// resolves no `-TAB` lookup extension, because that needs the
+    /// whole file. Call [`FitsFile::wcs`](crate::FitsFile::wcs) for
+    /// that.
+    ///
     /// # Errors
     ///
     /// The conditions of

@@ -182,8 +182,9 @@ impl PyWcs {
     ///
     /// Notes
     /// -----
-    /// ``-TAB`` axes are *not* auto-resolved by this constructor;
-    /// use :meth:`FitsFile.wcs` for that.
+    /// This constructor does not resolve a ``-TAB`` axis, because a
+    /// header alone does not reach the table it names. Use
+    /// :meth:`FitsFile.wcs` or :meth:`ImageHdu.wcs` for that.
     #[new]
     #[pyo3(signature = (header, alt=' '))]
     fn py_new(header: &PyHeader, alt: char) -> PyResult<Self> {
@@ -299,9 +300,10 @@ impl PyWcs {
     /// -----
     /// This is a property of the algorithm, not of the coordinate, so
     /// it is independent of :meth:`axis_kinds`. A tabular axis needs
-    /// its binary table loaded before it can transform, which
-    /// :meth:`fitsy.FitsFile.wcs` does and :meth:`fitsy.ImageHdu.wcs`
-    /// does not.
+    /// its binary table loaded before it can transform.
+    /// :meth:`fitsy.FitsFile.wcs` and :meth:`fitsy.ImageHdu.wcs` load
+    /// it. ``fitsy.Wcs(header)`` cannot, because a header alone does
+    /// not reach the table.
     fn is_tabular(&self, axis: usize) -> bool {
         self.inner.is_tabular(axis)
     }

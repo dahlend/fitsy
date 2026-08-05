@@ -1,9 +1,10 @@
 """``-TAB`` lookup axes (FITS Paper III Sec.6).
 
-The coordinate array lives in a separate BINTABLE, so only
-:meth:`fitsy.FitsFile.wcs` -- which can reach sibling HDUs -- can
-resolve one. :meth:`fitsy.ImageHdu.wcs` sees just the header and
-must leave the axis unresolved.
+The coordinate array lives in a separate BINTABLE. Both
+:meth:`fitsy.FitsFile.wcs` and :meth:`fitsy.ImageHdu.wcs` resolve it
+through the file the HDU was opened from. A handle with no backing
+file cannot, and raises at ``wcs()`` time; ``fitsy.Wcs(header)`` is
+the header-only path and raises on first use of the axis instead.
 
 The fixture is built with fitsy's own writer rather than astropy's.
 astropy was only ever a convenient way to *produce* the input here --
@@ -105,13 +106,86 @@ def test_tab_axis_extrapolation_is_bounded(tmp_path):
                 wcs.pixel_to_world([0.0, 0.0, pixel])
 
 
-def test_imagehdu_wcs_leaves_tab_unresolved(tmp_path):
-    """Header-only access cannot reach the table extension."""
+def test_imagehdu_wcs_resolves_tab_axis(tmp_path):
+    """``f[i].wcs()`` resolves -TAB exactly as ``f.wcs(i)`` does."""
     path = _write_tab_file(tmp_path / "tab.fits")
     with fitsy.open(path) as f:
         wcs = f[0].wcs()
-        with pytest.raises(fitsy.FitsError, match="unresolved"):
-            wcs.pixel_to_world([0.0, 0.0, 0.0])
+        got = [wcs.pixel_to_world([0.0, 0.0, float(k)])[2] for k in range(5)]
+    np.testing.assert_allclose(got, WAVELENS, rtol=0, atol=1e-9)
+
+
+def test_compressed_imagehdu_wcs_resolves_tab_axis(tmp_path):
+    """The tile-compressed wrapper keeps the file handle too.
+
+    A compressed image materializes without a lazy-read binding, so
+    this exercises a separate construction path from the plain-image
+    test above.
+    """
+    plain = _write_tab_file(tmp_path / "tab.fits")
+    with fitsy.open(plain) as f:
+        header = {
+            k: v
+            for k, v in dict(f[0].header).items()
+            if not k.startswith(("NAXIS", "BITPIX", "SIMPLE", "EXTEND"))
+        }
+    k = len(WAVELENS)
+    fitsy.write(
+        str(tmp_path / "ctab.fits"),
+        [
+            fitsy.compressed_image(
+                np.zeros((k, 2, 2), dtype="f4"), header=header
+            ),
+            fitsy.bintable(
+                {"WAVELEN": np.asarray(WAVELENS, dtype=float).reshape(1, k)},
+                extname="WCS-TAB",
+            ),
+        ],
+        overwrite=True,
+    )
+    with fitsy.open(tmp_path / "ctab.fits") as f:
+        wcs = f[1].wcs()
+        got = [wcs.pixel_to_world([0.0, 0.0, float(p)])[2] for p in range(k)]
+    np.testing.assert_allclose(got, WAVELENS, rtol=0, atol=1e-9)
+
+
+def test_unbacked_imagehdu_wcs_raises_at_call(tmp_path):
+    """An HDU built in memory has no file to resolve -TAB against.
+
+    The accessor raises at ``wcs()`` time rather than returning a
+    WCS whose transforms fail later.
+    """
+    path = _write_tab_file(tmp_path / "tab.fits")
+    with fitsy.open(path) as f:
+        header = dict(f[0].header)
+    hdu = fitsy.ImageHdu(np.zeros((5, 2, 2), dtype="f4"), header=header)
+    with pytest.raises(fitsy.FitsError, match="-TAB"):
+        hdu.wcs()
+
+
+def test_unbacked_fitsfile_wcs_raises_at_call(tmp_path):
+    """An in-memory FitsFile has no file to resolve -TAB against."""
+    path = _write_tab_file(tmp_path / "tab.fits")
+    with fitsy.open(path) as f:
+        header = dict(f[0].header)
+    mem = fitsy.FitsFile()
+    mem.append(fitsy.ImageHdu(np.zeros((5, 2, 2), dtype="f4"), header=header))
+    with pytest.raises(fitsy.FitsError, match="-TAB"):
+        mem.wcs(0)
+
+
+def test_wcs_constructor_stays_header_only(tmp_path):
+    """``fitsy.Wcs(header)`` parses without the table.
+
+    It is the explicit header-only path: metadata reads work, and a
+    transform touching the unresolved axis raises.
+    """
+    path = _write_tab_file(tmp_path / "tab.fits")
+    with fitsy.open(path) as f:
+        wcs = fitsy.Wcs(f[0].header)
+    assert wcs.ctype[2] == "WAVE-TAB"
+    with pytest.raises(fitsy.FitsError, match="unresolved"):
+        wcs.pixel_to_world([0.0, 0.0, 0.0])
 
 
 # Reference lookups for the WAVELENS table above, from wcslib 8.6 via

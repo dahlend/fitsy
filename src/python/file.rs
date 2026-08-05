@@ -479,6 +479,7 @@ impl PyFitsFile {
             }),
             update_binding: None,
             dirty: dirty_flag,
+            wcs_file: Some(file.clone()),
         };
         if let Some(u) = self.updater.as_ref() {
             let generation = u.lock().map_or(u64::MAX, |g| g.generation());
@@ -1110,18 +1111,20 @@ impl PyFitsFile {
     /// ValueError
     ///   If `alt` is not exactly one character.
     /// FitsError
-    ///   If `alt` is not ``' '`` or one of ``'A'``-``'Z'``, or if the
-    ///   header carries a malformed WCS.
+    ///   If `alt` is not ``' '`` or one of ``'A'``-``'Z'``, if the
+    ///   header carries a malformed WCS, or if a ``-TAB`` axis
+    ///   cannot be resolved (see Notes).
     ///
     /// Notes
     /// -----
-    /// ``-TAB`` axes (Paper III Sec.6) are resolved against the
-    /// binary table their ``PSi_0`` / ``PVi_1`` cards name, which is
-    /// what :meth:`ImageHdu.wcs` -- header-only -- cannot do. The
-    /// lookup runs against the file this handle was opened from; a
-    /// handle built in memory, or one whose table extension was
-    /// added after opening, has nothing to resolve against and the
-    /// axis stays unresolved (using it then raises).
+    /// A ``-TAB`` axis (Paper III Sec.6) stores its coordinate
+    /// array in a sibling BINTABLE. The ``PSi_0`` / ``PVi_1`` cards
+    /// name that table. This method loads the table from the file
+    /// this handle was opened from. A handle built in memory (the
+    /// ``FitsFile()`` constructor) has no file to search. A
+    /// ``-TAB`` axis then raises here, not later at transform time.
+    /// Use ``fitsy.Wcs(f[i].header)`` to inspect such a header
+    /// without the lookup table.
     #[pyo3(signature = (i=0, alt=' '))]
     fn wcs(&self, py: Python<'_>, i: usize, alt: char) -> PyResult<Option<PyWcs>> {
         let hdu = self.hdu(py, i)?;
@@ -1129,10 +1132,18 @@ impl PyFitsFile {
         let header: PyHeader = bound.getattr("header")?.extract()?;
         let wcs = crate::wcs::Wcs::from_header(&header.lock(), alt).into_py_result()?;
         let Some(mut wcs) = wcs else { return Ok(None) };
-        // `hdu()` above took and released the state lock; safe to
-        // re-take it here.
-        let backing = self.lock_state().file.clone();
-        if let Some(file) = backing {
+        if !wcs.tab_specs.is_empty() {
+            // `hdu()` above took and released the state lock; safe to
+            // re-take it here.
+            let Some(file) = self.lock_state().file.clone() else {
+                return Err(super::err_to_py(crate::error::FitsError::Wcs(
+                    "WCS has a -TAB axis, but this FitsFile carries no file \
+                     to load the lookup table from; open the file with \
+                     fitsy.open, or use fitsy.Wcs(f[i].header) for \
+                     header-only inspection"
+                        .into(),
+                )));
+            };
             wcs.resolve_tab(&file).into_py_result()?;
         }
         Ok(Some(PyWcs::from(wcs)))
@@ -1871,10 +1882,11 @@ fn wrap_hdu(
             // would force the only path to be eager `from_image`
             // materialization (which we removed).
             py_img.read_binding = Some(super::hdu::ReadBinding {
-                file,
+                file: file.clone(),
                 hdu_idx: i,
                 axes: img.axes().to_vec(),
             });
+            py_img.wcs_file = Some(file);
             py_img.dirty.clone_from(&dirty_flag);
             if let Some(u) = updater {
                 let generation = u.lock().map_or(u64::MAX, |g| g.generation());
@@ -1911,6 +1923,10 @@ fn wrap_hdu(
             // patched in place. Mutations fall through the cache +
             // dirty path so `flush()` rewrites the file.
             py_img.dirty = dirty_flag;
+            // The decode above already read the pixels, so this path
+            // sets no `read_binding`. `wcs()` still needs the file to
+            // resolve a `-TAB` axis against a sibling BINTABLE.
+            py_img.wcs_file = Some(file);
             Ok(Py::new(py, py_img)?.into_any())
         }
         Hdu::RandomGroups(rg) => {

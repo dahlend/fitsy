@@ -890,20 +890,26 @@ impl FitsFile {
     ///
     /// Pass `' '` for `alt` to select the primary description. The
     /// result is `Ok(None)` when the merged header carries no WCS for
-    /// that descriptor. The call is equivalent to
-    /// `Wcs::from_header(&self.header_inherited(i)?, alt)`.
-    ///
-    /// This function does not resolve a `-TAB` lookup table. Use
-    /// [`FitsFile::wcs`] when the description needs one.
+    /// that descriptor. This function loads any `-TAB` lookup
+    /// extension from the same file, as [`FitsFile::wcs`] does, so
+    /// the returned [`Wcs`](crate::wcs::Wcs) needs no further setup.
     ///
     /// # Errors
     ///
     /// - The conditions of [`FitsFile::header_inherited`].
     /// - [`FitsError::Wcs`] when the header declares a WCS that the
-    ///   parser rejects, such as an unknown projection code.
+    ///   parser rejects (such as an unknown projection code), or when
+    ///   a `-TAB` extension named by the header is absent or has the
+    ///   wrong shape.
     pub fn wcs_inherited(&self, i: usize, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         let header = self.header_inherited(i)?;
-        crate::wcs::Wcs::from_header(&header, alt)
+        let Some(mut wcs) = crate::wcs::Wcs::from_header(&header, alt)? else {
+            return Ok(None);
+        };
+        if !wcs.tab_specs.is_empty() {
+            wcs.resolve_tab(self)?;
+        }
+        Ok(Some(wcs))
     }
 
     /// Look up an extension by `EXTNAME` and return the first match.

@@ -1,21 +1,32 @@
 World coordinates
 =================
 
-Python
-------
+A World Coordinate System turns a pixel position into a world
+coordinate, and back. The common case is a celestial image: pixel to
+right ascension and declination.
 
-Every :class:`fitsy.ImageHdu` exposes a :meth:`~fitsy.ImageHdu.wcs`
-helper that returns a :class:`fitsy.Wcs` instance (or ``None`` if the
-header carries no WCS). The same parser is reachable from
-:meth:`fitsy.FitsFile.wcs`, which additionally resolves ``-TAB``
-look-up axes -- their coordinate array lives in a separate BINTABLE,
-which a header alone cannot reach, so ``ImageHdu.wcs()`` leaves such
-an axis unresolved and using it raises.
+Getting a WCS
+-------------
 
-A ``-TAB`` axis is defined over its table plus half a sample step at
-each end (FITS Paper III Sec.6.1.2, covering the outer halves of the
-boundary pixels). A pixel beyond that range has no coordinate. A
-single-point call raises there, and a batch method returns ``nan``.
+:meth:`fitsy.ImageHdu.wcs` and :meth:`fitsy.FitsFile.wcs` return the
+same :class:`fitsy.Wcs`, so ``f[i].wcs()`` and ``f.wcs(i)`` are
+equivalent. Both return ``None`` when the header carries no WCS.
+
+.. code-block:: python
+
+   with fitsy.open("image.fits") as f:
+       wcs = f[0].wcs()
+       ra, dec = wcs.pixel_to_world([256.0, 128.0])
+       px, py = wcs.world_to_pixel([ra, dec])
+
+A single point goes in as a length-``naxis`` sequence and comes back
+as a list. ``print(wcs)`` summarizes the keywords the description
+uses.
+
+fitsy applies the distortion a header declares, on every transform,
+with no extra call: SIP (``RA---TAN-SIP``), TPV, TNX/ZPX, and DSS
+plate solutions. The bundled NGC 2403 scan carries ``TAN`` with SIP,
+so the example below exercises that path.
 
 .. literalinclude:: ../../examples/python/wcs.py
    :language: python
@@ -23,9 +34,8 @@ single-point call raises there, and a batch method returns ``nan``.
 Rust
 ----
 
-``FitsFile::wcs`` resolves ``-TAB`` axes automatically;
-``ImageHdu::wcs`` is a lighter-weight alternative when you already
-have the HDU in hand and know there are no tabular axes.
+``FitsFile::wcs`` takes the HDU index and the alternate-description
+letter. ``Wcs::from_header`` parses a header you already hold.
 
 .. literalinclude:: ../../examples/wcs.rs
    :language: rust
@@ -63,9 +73,6 @@ array. One path serves every axis kind, celestial or not:
 
    sky = wcs.pixel_to_world(np.array([[31.0, 23.0], [10.0, 40.0]]))
 
-Pair it with :meth:`~fitsy.Wcs.axis_kinds` to read a column by meaning
-rather than by position; see `Finding an axis by meaning`_ below.
-
 The column count must be exactly ``naxis``. An ``(naxis, N)`` array is
 the transpose of a batch, not a batch of ``N`` points. Such an array
 raises a ``ValueError`` instead of pairing the wrong values together.
@@ -94,40 +101,38 @@ with ``numpy.isfinite`` to drop them:
    sky = wcs.pixel_to_world(pixels)
    good = numpy.isfinite(sky).all(axis=1)
 
-A batch call raises only when the *whole* WCS cannot transform, which
-means unresolved ``-TAB`` axes or a malformed point count. Passing a
-single point instead raises for an out-of-domain coordinate, which is
-where to go for a diagnostic message explaining *why* that point
-failed.
+A batch call raises only when the *whole* WCS cannot transform: a
+malformed point count, or an unresolved lookup table (see
+`Lookup-table axes`_). Passing a single point instead raises for an
+out-of-domain coordinate, which is where to go for a diagnostic
+message explaining *why* that point failed.
 
-Finding an axis by meaning
---------------------------
+Celestial images
+----------------
 
-:meth:`~fitsy.Wcs.pixel_to_world` returns one value per axis, in axis
-order. :meth:`~fitsy.Wcs.axis_kinds` says what each of those values is,
-so a caller locates an axis by what it carries rather than by where it
-sits:
+:attr:`~fitsy.Wcs.is_celestial` reports whether the description
+declares a longitude and latitude pair, and
+:meth:`~fitsy.Wcs.celestial_axes` gives their zero-based indices.
+A plain sky image puts them at ``(0, 1)``:
 
 .. code-block:: python
 
-   with fitsy.open("cube.fits") as f:
-       wcs = f[0].wcs()
-       kinds = wcs.axis_kinds()      # ['longitude', 'latitude', 'spectral']
-       world = wcs.pixel_to_world([31.0, 23.0, 4.0])
-       freq = world[kinds.index("spectral")]
+   wcs.is_celestial          # True
+   wcs.celestial_axes()      # (0, 1)
 
-Each entry is one of ``'longitude'``, ``'latitude'``, ``'spectral'``,
-``'time'``, ``'phase'``, ``'stokes'`` or ``'linear'``. Reading by
-meaning matters because axis order is not fixed: FITS permits
-``CTYPE1 = 'DEC--TAN'`` with ``CTYPE2 = 'RA---TAN'``, and real archives
-hold such headers. On one, ``axis_kinds()`` reports
-``['latitude', 'longitude']``, while indexing position 0 for right
-ascension returns declination.
+:meth:`~fitsy.Wcs.pixel_scale_at` measures the local scale in
+arcseconds per pixel, one value per celestial axis:
 
-The kind names the type half of ``CTYPEia``, the part before the
-algorithm code. ``RA---TAN`` and ``RA---TAB`` are both ``'longitude'``.
-For the ``-TAB`` case, which needs its lookup table loaded before the
-axis can transform, ask :meth:`~fitsy.Wcs.is_tabular`.
+.. code-block:: python
+
+   sx, sy = wcs.pixel_scale_at(724.0, 1086.0)   # (0.9725, 0.9731)
+
+fitsy measures this by finite difference on the sphere, so the result
+carries the projection distortion and any local skew at that pixel. It
+is a great-circle distance, always positive, not the signed ``CDELT``
+value. An image with flipped ``RA`` still reports a positive scale.
+The scale of a wide field varies across the image, so measure it where
+you need it. The call raises when the WCS declares no celestial pair.
 
 Image extent and footprint
 --------------------------
@@ -178,6 +183,49 @@ coordinate description. It is ``None`` for a WCS from
 it; and nothing revalidates it, so after cropping or rebinning it
 still describes the original image.
 
+Alternate descriptions
+----------------------
+
+A header may carry up to 26 more descriptions of the same pixels,
+each tagged with a letter from ``A`` to ``Z`` (Standard Sec.8.2).
+A survey image often uses one to publish a second astrometric
+solution. Pass the letter to select it; ``' '`` (the default) selects
+the primary description:
+
+.. code-block:: python
+
+   wcs = f[0].wcs("A")       # or f.wcs(0, "A")
+
+The result is ``None`` when the header carries no description for
+that letter, which is how to test for one.
+
+Finding an axis by meaning
+--------------------------
+
+:meth:`~fitsy.Wcs.pixel_to_world` returns one value per axis, in axis
+order. :meth:`~fitsy.Wcs.axis_kinds` says what each of those values is,
+so a caller locates an axis by what it carries rather than by where it
+sits:
+
+.. code-block:: python
+
+   with fitsy.open("cube.fits") as f:
+       wcs = f[0].wcs()
+       kinds = wcs.axis_kinds()      # ['longitude', 'latitude', 'spectral']
+       world = wcs.pixel_to_world([31.0, 23.0, 4.0])
+       freq = world[kinds.index("spectral")]
+
+Each entry is one of ``'longitude'``, ``'latitude'``, ``'spectral'``,
+``'time'``, ``'phase'``, ``'stokes'`` or ``'linear'``. Reading by
+meaning matters because axis order is not fixed: FITS permits
+``CTYPE1 = 'DEC--TAN'`` with ``CTYPE2 = 'RA---TAN'``, and real archives
+hold such headers. On one, ``axis_kinds()`` reports
+``['latitude', 'longitude']``, while indexing position 0 for right
+ascension returns declination.
+
+The kind names the type half of ``CTYPEia``, the part before the
+algorithm code. ``RA---TAN`` and ``RA---TAB`` are both ``'longitude'``.
+
 Fitting a WCS
 -------------
 
@@ -189,12 +237,10 @@ WCS -- back into a :class:`fitsy.Header` you can merge into an HDU.
 It writes everything the reader understands, so parsing the output
 reproduces the original transform: the linear pipeline, ``LONPOLE`` /
 ``LATPOLE`` and the projection's ``PVi_m`` parameters, SIP, TPV,
-TNX/ZPX, DSS plate solutions, spectral rest quantities, and ``-TAB``
-pointer cards.
+TNX/ZPX, DSS plate solutions, and spectral rest quantities.
 
-Two things a bare header cannot carry: ``NAXISn`` (emitted as zero
-placeholders, since a WCS has no image attached) and the BINTABLE a
-``-TAB`` axis points at, which must be written as its own extension.
+One thing a bare header cannot carry is ``NAXISn``, emitted as zero
+placeholders, since a WCS has no image attached.
 
 .. literalinclude:: ../../examples/python/fit_wcs.py
    :language: python
@@ -202,3 +248,30 @@ placeholders, since a WCS has no image attached) and the BINTABLE a
 .. literalinclude:: ../../examples/fit_wcs.rs
    :language: rust
 
+Lookup-table axes
+-----------------
+
+A ``-TAB`` axis reads its coordinates from an array in a separate
+BINTABLE rather than from a formula (FITS Paper III Sec.6). Nothing
+above changes for one, except where the table comes from.
+
+Both :meth:`fitsy.ImageHdu.wcs` and :meth:`fitsy.FitsFile.wcs` load
+the table from the file the HDU was opened from, so a ``-TAB`` axis
+transforms like any other. An HDU or ``FitsFile`` built in memory has
+no file to search, and raises at the ``wcs()`` call.
+``fitsy.Wcs(header)`` parses a header alone, without the table; its
+transforms raise on the unresolved axis. In Rust, ``FitsFile::wcs``
+and ``FitsFile::wcs_inherited`` load the table, ``Wcs::from_header``
+does not, and ``Wcs::resolve_tab`` loads it after the fact.
+
+:meth:`~fitsy.Wcs.is_tabular` reports whether a given axis takes this
+path.
+
+A ``-TAB`` axis is defined over its table plus half a sample step at
+each end (Paper III Sec.6.1.2, covering the outer halves of the
+boundary pixels). A pixel beyond that range has no coordinate. A
+single-point call raises there, and a batch method returns ``nan``.
+
+:meth:`~fitsy.Wcs.to_header` writes the ``PSi_m`` / ``PVi_m`` pointer
+cards, but not the table they name. Write that BINTABLE as its own
+extension.
