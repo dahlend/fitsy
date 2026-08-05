@@ -133,9 +133,7 @@ def test_compressed_imagehdu_wcs_resolves_tab_axis(tmp_path):
     fitsy.write(
         str(tmp_path / "ctab.fits"),
         [
-            fitsy.compressed_image(
-                np.zeros((k, 2, 2), dtype="f4"), header=header
-            ),
+            fitsy.compressed_image(np.zeros((k, 2, 2), dtype="f4"), header=header),
             fitsy.bintable(
                 {"WAVELEN": np.asarray(WAVELENS, dtype=float).reshape(1, k)},
                 extname="WCS-TAB",
