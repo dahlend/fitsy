@@ -26,13 +26,13 @@ and Python 3.10+.
    $ pip install maturin
    $ git clone https://github.com/dahlend/fitsy
    $ cd fitsy
-   $ maturin develop --release --features python
+   $ maturin develop --release
 
 To build a wheel instead of installing in-place:
 
 .. code-block:: console
 
-   $ maturin build --release --features python
+   $ maturin build --release
    $ pip install target/wheels/fitsy-*.whl
 
 Documentation extras

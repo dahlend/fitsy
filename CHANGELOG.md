@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.3.0]
+
+This release centers on world coordinates. It restructures the WCS API
+and removes the celestial-only transforms. The parser now reads
+binary-table, time and grism axes. Transforms accept a batch of points
+and run faster. The release fixes many projection, pole, spectral and
+time defects. It also fixes defects in the table, compression and
+update paths.
 
 ### Added
 

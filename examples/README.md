@@ -46,7 +46,7 @@ cargo run --example ascii_table
 ## Python examples
 
 Install the package first, with either `pip install fitsy` or
-`maturin develop --features python` in this repository. Then run these
+`maturin develop` in this repository. Then run these
 from the repository root:
 
 ```sh

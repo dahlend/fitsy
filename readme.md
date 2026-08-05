@@ -62,14 +62,14 @@ fitsy.write("out.fits", [img])
 ```bash
 maturin build --release
 # or for local development:
-maturin develop --features python
+maturin develop
 ```
 
 ## Rust
 
 ```toml
 [dependencies]
-fitsy = { version = "0.2", features = ["compression"] }
+fitsy = { version = "0.3", features = ["compression"] }
 ```
 
 ```rust
@@ -104,7 +104,7 @@ cargo install fitsy
 ```
 
 ```
-fitsy info <file>                        # one line per HDU, with WCS details
+fitsy info <file>                        # one line per HDU, plus WCS details
 fitsy header <file> [--hdu N] [filter]   # dump parsed header cards
 fitsy checksum <file>                    # verify CHECKSUM / DATASUM
 fitsy stats <file> [--hdu N]             # pixel statistics for image HDUs

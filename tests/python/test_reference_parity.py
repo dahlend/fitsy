@@ -15,8 +15,7 @@ the largest thing in the Python tests and ran nowhere except a
 developer's machine that happened to have astropy installed -- CI
 installs only pytest and numpy, so all of it silently skipped. Frozen,
 it runs everywhere, and re-auditing against a newer astropy is a
-regeneration plus a diff. The Rust suite has used the same arrangement
-for ``wcs_standard.csv`` since v0.2.0.
+regeneration plus a diff.
 
 What is lost by freezing: this no longer notices astropy *changing*.
 That is what regenerating is for, and a change there deserves a human
