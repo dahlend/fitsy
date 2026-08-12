@@ -201,6 +201,76 @@ CASES = [
             "PV1_4": -1.077e6,
         },
     ),
+    # --- the six vacuum/velocity codes of Paper III Table 25 ---
+    # These need a rest frequency or wavelength, so they are grouped
+    # apart from the air cases above. Together with the air codes they
+    # cover all twelve non-linear algorithms.
+    (
+        "wave_f2w",
+        {
+            "CTYPE1": "WAVE-F2W",
+            "CRVAL1": 2.1e-1,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-5,
+            "CUNIT1": "m",
+            "RESTFRQ": 1.420405752e9,
+        },
+    ),
+    (
+        "velo_f2v",
+        {
+            "CTYPE1": "VELO-F2V",
+            "CRVAL1": 0.0,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e3,
+            "CUNIT1": "m/s",
+            "RESTFRQ": 1.420405752e9,
+        },
+    ),
+    (
+        "freq_w2f",
+        {
+            "CTYPE1": "FREQ-W2F",
+            "CRVAL1": 1.420405752e9,
+            "CRPIX1": 1.0,
+            "CDELT1": -1.0e5,
+            "CUNIT1": "Hz",
+            "RESTWAV": 2.11061140542e-1,
+        },
+    ),
+    (
+        "velo_w2v",
+        {
+            "CTYPE1": "VELO-W2V",
+            "CRVAL1": 0.0,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e3,
+            "CUNIT1": "m/s",
+            "RESTWAV": 2.11061140542e-1,
+        },
+    ),
+    (
+        "freq_v2f",
+        {
+            "CTYPE1": "FREQ-V2F",
+            "CRVAL1": 1.420405752e9,
+            "CRPIX1": 1.0,
+            "CDELT1": -1.0e5,
+            "CUNIT1": "Hz",
+            "RESTFRQ": 1.420405752e9,
+        },
+    ),
+    (
+        "wave_v2w",
+        {
+            "CTYPE1": "WAVE-V2W",
+            "CRVAL1": 2.1e-1,
+            "CRPIX1": 1.0,
+            "CDELT1": 1.0e-5,
+            "CUNIT1": "m",
+            "RESTWAV": 2.11061140542e-1,
+        },
+    ),
 ]
 
 PIXELS = [0.0, 1.0, 200.0, 500.0, 1000.0, 1500.0, 2047.0]
