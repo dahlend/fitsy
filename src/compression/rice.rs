@@ -1,5 +1,4 @@
-//! `RICE_1` tile decompressor (and a matching encoder used only by
-//! the test suite).
+//! `RICE_1` tile codec.
 //!
 //! Implements the algorithm described in Pence, Seaman &
 //! White 2010 Sec.3.1 and adopted into the FITS standard (2016) Sec.10.4.
@@ -290,11 +289,10 @@ fn unzigzag(d: u32) -> u32 {
     if d & 1 == 0 { d >> 1 } else { !(d >> 1) }
 }
 
-// -- Encoder (test-only) ---------------------------------------------
+// -- Encoder ---------------------------------------------------------
 
 /// Map a signed difference onto an unsigned code, so that a small
 /// magnitude of either sign becomes a small code.
-#[cfg(test)]
 #[inline]
 fn zigzag(d: i64) -> u32 {
     if d < 0 {
@@ -304,16 +302,13 @@ fn zigzag(d: i64) -> u32 {
     }
 }
 
-/// Writes a bit stream, most significant bit first. Used by the
-/// test-only encoder.
-#[cfg(test)]
+/// Writes a bit stream, most significant bit first.
 struct BitWriter {
     out: Vec<u8>,
     bitbuffer: u32,
     bits_to_go: i32,
 }
 
-#[cfg(test)]
 impl BitWriter {
     /// An empty writer, positioned at the first bit of the first byte.
     fn new() -> Self {
@@ -328,7 +323,10 @@ impl BitWriter {
     /// `[0, 32]`. All shifts are wrapping to keep the function safe
     /// at the boundary.
     fn output_nbits(&mut self, bits: u32, n: i32) {
-        debug_assert!((0..=32).contains(&n));
+        debug_assert!(
+            (0..=32).contains(&n),
+            "bit count {n} outside the 0..=32 range the shifts support"
+        );
         if n == 0 {
             return;
         }
@@ -364,9 +362,14 @@ impl BitWriter {
 
 /// Encode `pixels` with the Rice coder, mirroring [`decode_blocks`].
 ///
-/// This exists so the tests can round-trip a tile. The crate writes no
-/// `RICE_1` tile in production.
-#[cfg(test)]
+/// This takes differences at the pixel width, with wrapping
+/// arithmetic. A reader that reconstructs with the same wrap recovers
+/// the original pixels. [`decode_blocks`] reconstructs that way.
+///
+/// # Panics
+///
+/// Panics when `pixels` is empty or `bytepix` is not 1, 2 or 4, and
+/// loops forever when `nblock` is 0. [`compress`] validates all three.
 fn encode_inner(pixels: &[i64], bytepix: u32, nblock: usize, first_bits: i32) -> Vec<u8> {
     let p = RiceParams::for_bytepix(bytepix).unwrap();
     let mut w = BitWriter::new();
@@ -430,6 +433,58 @@ fn encode_inner(pixels: &[i64], bytepix: u32, nblock: usize, first_bits: i32) ->
         i += thisblock;
     }
     w.finish()
+}
+
+/// Rice-compress one tile of big-endian pixels.
+///
+/// The `bytepix` argument is the pixel width in bytes: 1, 2 or 4. The
+/// `blocksize` argument is the number of pixels per Rice block. A
+/// reader assumes 32 when the file names no `BLOCKSIZE`. The
+/// `tile_be` argument holds the tile's big-endian pixel bytes, as
+/// [`compress_image_to_hdu`](crate::compression::compress_image_to_hdu)
+/// gathers them.
+///
+/// # Errors
+///
+/// - [`FitsError::Value`] when `bytepix` is not 1, 2 or 4, or when
+///   `blocksize` is 0.
+/// - [`FitsError::Data`] when `tile_be` is empty or its length is not
+///   a multiple of `bytepix`.
+pub(super) fn compress(bytepix: u32, blocksize: u32, tile_be: &[u8]) -> Result<Vec<u8>> {
+    let params = RiceParams::for_bytepix(bytepix)?;
+    // A zero block size would leave `encode_inner` unable to advance
+    // through the tile. The decoder rejects it too, so such a stream
+    // could never be read back.
+    if blocksize == 0 {
+        return Err(FitsError::Value {
+            keyword: "ZVAL_BLOCKSIZE".into(),
+            msg: "RICE BLOCKSIZE must be > 0".into(),
+        });
+    }
+    let bp = bytepix as usize;
+    if tile_be.is_empty() || !tile_be.len().is_multiple_of(bp) {
+        return Err(FitsError::Data(format!(
+            "RICE_1 tile size {} is not a positive multiple of BYTEPIX {bytepix}",
+            tile_be.len()
+        )));
+    }
+    let pixels: Vec<i64> = match bytepix {
+        1 => tile_be.iter().map(|&b| i64::from(b as i8)).collect(),
+        2 => tile_be
+            .chunks_exact(2)
+            .map(|c| i64::from(i16::from_be_bytes([c[0], c[1]])))
+            .collect(),
+        _ => tile_be
+            .chunks_exact(4)
+            .map(|c| i64::from(i32::from_be_bytes([c[0], c[1], c[2], c[3]])))
+            .collect(),
+    };
+    Ok(encode_inner(
+        &pixels,
+        bytepix,
+        blocksize as usize,
+        params.bbits as i32,
+    ))
 }
 
 /// [`encode_inner`] for 1-byte pixels.

@@ -183,7 +183,8 @@
 //!
 //! - `compression` *(default)* -- decodes `RICE_1`, `HCOMPRESS_1`,
 //!   `PLIO_1`, `GZIP_1`, `GZIP_2`, and `NOCOMPRESS` tiles, and decodes
-//!   quantized float tiles. Encodes `GZIP_1` tiles through
+//!   quantized float tiles. Encodes `RICE_1`, `GZIP_1` and `GZIP_2`
+//!   tiles, with opt-in quantization, through
 //!   [`compress_image_to_hdu`] and
 //!   [`FitsWriter::write_hdu_compressed`](FitsWriter::write_hdu_compressed).
 //!   Also inflates a whole-file gzip.
@@ -246,4 +247,6 @@ pub use io::{FitsWriter, write};
 pub use wcs::{AxisKind, Wcs};
 
 #[cfg(feature = "compression")]
-pub use compression::{CompressedImageHdu, OwnedImage, TileOpts, compress_image_to_hdu};
+pub use compression::{
+    Codec, CompressedImageHdu, DitherMethod, OwnedImage, Quantize, TileOpts, compress_image_to_hdu,
+};

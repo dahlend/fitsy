@@ -137,7 +137,17 @@ impl Card {
             return parse_hierarch(bytes, offset);
         }
 
-        let has_value_indicator = bytes[KEYWORD_LEN] == b'=' && bytes[KEYWORD_LEN + 1] == b' ';
+        // Sec.4.1.2.2: `= ` in bytes 9 and 10 marks a value field,
+        // "unless it is one of the commentary keywords ... which by
+        // definition have no value". Sec.4.4.2 repeats the rule: a
+        // commentary keyword "shall have no associated value even if
+        // the value indicator characters appear in bytes 9 and 10",
+        // and bytes 9 through 80 are its text. So the test below must
+        // not reach `COMMENT`, `HISTORY` or a blank keyword; for those
+        // the `= ` is part of the commentary.
+        let is_commentary_keyword = matches!(keyword.as_str(), "COMMENT" | "HISTORY" | "");
+        let has_value_indicator =
+            !is_commentary_keyword && bytes[KEYWORD_LEN] == b'=' && bytes[KEYWORD_LEN + 1] == b' ';
 
         let kind = if has_value_indicator {
             CardKind::Value
@@ -477,6 +487,47 @@ mod tests {
         let raw = make_card("HIERARCH ESO   TEL  ALT  = 1.0");
         let c = Card::parse(&raw, 0).unwrap();
         assert_eq!(c.keyword, "HIERARCH ESO TEL ALT");
+    }
+
+    /// Sec.4.1.2.2 and Sec.4.4.2: a commentary keyword has no value
+    /// even when `= ` sits in bytes 9 and 10, and those bytes are then
+    /// part of its text. Reading such a card as a value card made a
+    /// strict parse fail outright, and hid the card from
+    /// `Header::history` / `comments` in lenient mode.
+    #[test]
+    fn commentary_keyword_with_value_indicator_stays_commentary() {
+        for (raw, keyword, text) in [
+            (
+                "HISTORY = looks like a value",
+                "HISTORY",
+                "= looks like a value",
+            ),
+            ("HISTORY = 'quoted text'", "HISTORY", "= 'quoted text'"),
+            (
+                "COMMENT = also value-shaped",
+                "COMMENT",
+                "= also value-shaped",
+            ),
+            (
+                "        = blank keyword shaped",
+                "",
+                "= blank keyword shaped",
+            ),
+        ] {
+            let c = Card::parse(&make_card(raw), 0).unwrap();
+            assert_eq!(c.kind, CardKind::Commentary, "{raw}");
+            assert_eq!(c.keyword, keyword, "{raw}");
+            let body = String::from_utf8(c.body.clone()).unwrap();
+            assert_eq!(body.trim_end(), text, "{raw}");
+        }
+    }
+
+    /// The rule must not swallow a genuine value card whose keyword
+    /// merely starts like a commentary one.
+    #[test]
+    fn non_commentary_keyword_keeps_its_value_indicator() {
+        let c = Card::parse(&make_card("HISTORYX=                    1"), 0).unwrap();
+        assert_eq!(c.kind, CardKind::Value);
     }
 
     #[test]

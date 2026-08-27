@@ -1,6 +1,6 @@
 //! The `fitsy` command-line tool.
 //!
-//! This binary wraps the `fitsy` library. It offers five subcommands:
+//! This binary wraps the `fitsy` library. It offers six subcommands:
 //!
 //! * `fitsy info <file>` -- one summary line per HDU, with WCS
 //!   details.
@@ -10,6 +10,8 @@
 //!   keywords.
 //! * `fitsy stats <file> [--hdu N]` -- pixel statistics for each image
 //!   HDU.
+//! * `fitsy fpack <input> [-o out]` -- write a tile-compressed copy
+//!   of the input.
 //! * `fitsy funpack <input> [-o out]` -- write a tile-decompressed
 //!   copy of the input.
 //!
@@ -20,9 +22,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[cfg(feature = "compression")]
-use fitsy::FitsWriter;
+use fitsy::header::{CardKind, CommentaryKind};
 use fitsy::header::{HeaderEntry, Value};
 use fitsy::wcs::celestial::CelestialFrame;
+#[cfg(feature = "compression")]
+use fitsy::{Codec, FitsWriter, TileOpts, compression::Quantize};
 use fitsy::{FitsFile, Hdu, Header};
 #[cfg(feature = "compression")]
 use std::fs::File;
@@ -39,6 +43,7 @@ fn main() -> ExitCode {
         "header" => cmd_header(&rest),
         "checksum" => cmd_checksum(&rest),
         "stats" => cmd_stats(&rest),
+        "fpack" => cmd_fpack(&rest),
         "funpack" => cmd_funpack(&rest),
         "-h" | "--help" | "help" => {
             print_top_usage();
@@ -74,6 +79,7 @@ fn print_top_usage() {
              header    Print parsed header cards\n    \
              checksum  Verify CHECKSUM / DATASUM keywords\n    \
              stats     Pixel statistics for image HDUs\n    \
+             fpack     Tile-compress a FITS file (.fz)\n    \
              funpack   Decompress a tile-compressed (.fz) file\n    \
              help      Show this message\n\n\
          Run `fitsy <SUBCOMMAND> --help` for subcommand details.",
@@ -434,6 +440,295 @@ fn string_card(h: &Header, key: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// fpack
+// ---------------------------------------------------------------------------
+
+/// Codec requested on the `fpack` command line.
+#[cfg(feature = "compression")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodecArg {
+    /// No `-c` flag: `RICE_1` where it applies, `GZIP_1` elsewhere.
+    Auto,
+    Rice,
+    Gzip,
+    Gzip2,
+}
+
+/// Resolve the codec for one image HDU.
+///
+/// `RICE_1` takes integer pixels of 1, 2 or 4 bytes only. Both the
+/// automatic choice and an explicit `rice` request fall back to
+/// `GZIP_1` on any other `BITPIX`. An explicit request also notes the
+/// fallback on stderr.
+#[cfg(feature = "compression")]
+fn resolve_codec(arg: CodecArg, bitpix: i64, hdu_index: usize) -> Codec {
+    let rice_ok = matches!(bitpix, 8 | 16 | 32);
+    match arg {
+        CodecArg::Auto => {
+            if rice_ok {
+                Codec::rice()
+            } else {
+                Codec::Gzip1
+            }
+        }
+        CodecArg::Rice => {
+            if rice_ok {
+                Codec::rice()
+            } else {
+                eprintln!(
+                    "HDU {hdu_index}: RICE_1 does not apply to BITPIX {bitpix}; using GZIP_1"
+                );
+                Codec::Gzip1
+            }
+        }
+        CodecArg::Gzip => Codec::Gzip1,
+        CodecArg::Gzip2 => Codec::Gzip2,
+    }
+}
+
+#[cfg(feature = "compression")]
+fn cmd_fpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!(
+            "fitsy fpack <input> [-o <output>] [-c <codec>] [-t <tile>]\n\
+             [-q <level>] [-C]\n\n\
+             Tile-compress every image HDU in `input` and write the\n\
+             result to `output`. If `-o` is omitted, `.fz` is appended\n\
+             to the input name.\n\n\
+             -c, --codec    rice | gzip | gzip2. Without the flag,\n\
+                            RICE_1 is used for integer images of 1, 2\n\
+                            or 4 bytes per pixel and GZIP_1 for\n\
+                            everything else. Float images compress\n\
+                            losslessly unless -q is given.\n\
+             -t, --tile     Tile shape, comma separated, FITS axis\n\
+                            order (e.g. 100,100). Default: one row\n\
+                            per tile.\n\
+             -q, --quantize <level>  Quantize float images before\n\
+                            compression. LOSSY: the quantization step\n\
+                            is the per-tile noise divided by <level>\n\
+                            (4 matches the fpack default). Integer\n\
+                            images are not affected.\n\
+             -C, --no-checksum  Skip CHECKSUM / DATASUM.\n\n\
+             A primary array moves behind an empty primary HDU,\n\
+             because a compressed image is a BINTABLE extension.\n\
+             `fitsy funpack` restores the original layout.\n\n\
+             The output is written in full before it replaces anything\n\
+             at that path, so a failure leaves an existing file as it\n\
+             was.\n\n\
+             Non-image HDUs and already-compressed HDUs are copied\n\
+             through unchanged."
+        );
+        return Ok(());
+    }
+    let mut input: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut codec = CodecArg::Auto;
+    let mut tile: Option<Vec<u64>> = None;
+    let mut quantize: Option<Quantize> = None;
+    let mut checksums = true;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-o" | "--output" => {
+                let p = it.next().ok_or("`-o` requires a path argument")?;
+                output = Some(PathBuf::from(p));
+            }
+            s if s.starts_with("--output=") => {
+                output = Some(PathBuf::from(&s["--output=".len()..]));
+            }
+            "-c" | "--codec" => {
+                let c = it.next().ok_or("`-c` requires a codec argument")?;
+                codec = parse_codec_arg(c)?;
+            }
+            s if s.starts_with("--codec=") => {
+                codec = parse_codec_arg(&s["--codec=".len()..])?;
+            }
+            "-t" | "--tile" => {
+                let t = it.next().ok_or("`-t` requires a tile argument")?;
+                tile = Some(parse_tile_arg(t)?);
+            }
+            s if s.starts_with("--tile=") => {
+                tile = Some(parse_tile_arg(&s["--tile=".len()..])?);
+            }
+            "-q" | "--quantize" => {
+                let q = it.next().ok_or("`-q` requires a level argument")?;
+                quantize = Some(parse_quantize_arg(q)?);
+            }
+            s if s.starts_with("--quantize=") => {
+                quantize = Some(parse_quantize_arg(&s["--quantize=".len()..])?);
+            }
+            "-C" | "--no-checksum" => checksums = false,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown flag `{other}`").into());
+            }
+            other => {
+                if input.is_some() {
+                    return Err(format!("unexpected extra argument `{other}`").into());
+                }
+                input = Some(PathBuf::from(other));
+            }
+        }
+    }
+    let input = input.ok_or("`fpack` requires an input path")?;
+    let output = output.unwrap_or_else(|| default_fpack_output(&input));
+    if output == input {
+        return Err("refusing to write output on top of input; pass -o explicitly".into());
+    }
+    let file = open_fits(&input)?;
+    let compressed = write_via_temp(&output, |tmp| {
+        fpack_into(&file, tmp, codec, tile.as_deref(), quantize, checksums)
+    })?;
+    eprintln!(
+        "wrote {} (compressed {compressed} HDU{})",
+        output.display(),
+        if compressed == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+/// Run `build` against a hidden sibling of `output`, then rename that
+/// file into place.
+///
+/// The `build` argument receives the temporary path and writes the
+/// whole file. A failure part-way through leaves any existing
+/// `output` untouched. It also removes the temporary file. Both
+/// `fpack` and `funpack` write this way, because each can fail on a
+/// later HDU after it has written earlier ones.
+#[cfg(feature = "compression")]
+fn write_via_temp<T>(
+    output: &Path,
+    build: impl FnOnce(&Path) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let name = output
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("fitsy.out");
+    let tmp = output.with_file_name(format!(".{name}.tmp{}", std::process::id()));
+    match build(&tmp) {
+        Ok(v) => {
+            std::fs::rename(&tmp, output).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Compress every image HDU of `file` into a new FITS file at `dest`,
+/// and report how many HDUs were compressed.
+#[cfg(feature = "compression")]
+fn fpack_into(
+    file: &FitsFile,
+    dest: &Path,
+    codec: CodecArg,
+    tile: Option<&[u64]>,
+    quantize: Option<Quantize>,
+    checksums: bool,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut sink = File::create(dest)?;
+    let mut writer = FitsWriter::new(&mut sink);
+    if checksums {
+        writer = writer.with_checksums();
+    }
+    let mut compressed = 0_usize;
+    for i in 0..file.len() {
+        let hdu = file.hdu(i)?;
+        let is_plain_image = matches!(hdu, Hdu::Image(_));
+        if !is_plain_image {
+            writer.write_hdu(hdu.header(), hdu.data_bytes())?;
+            continue;
+        }
+        let header = hdu.header();
+        let axes = header.axes()?;
+        if axes.is_empty() || axes.iter().product::<u64>() == 0 {
+            // Nothing to compress; keep the HDU as it is.
+            writer.write_hdu(header, hdu.data_bytes())?;
+            continue;
+        }
+        if i == 0 {
+            // A compressed image is a BINTABLE extension, so the
+            // primary array moves to extension 1 behind this stub.
+            // The compressed header records the move as ZSIMPLE = T.
+            let mut stub = Header::empty();
+            stub.push("SIMPLE", Value::Logical(true), Some("conforming FITS file"))?;
+            stub.push("BITPIX", Value::Integer(8), None)?;
+            stub.push("NAXIS", Value::Integer(0), None)?;
+            stub.push(
+                "EXTEND",
+                Value::Logical(true),
+                Some("FITS dataset may contain extensions"),
+            )?;
+            writer.write_hdu(&stub, &[])?;
+        }
+        let bitpix = header.bitpix()?;
+        let hdu_quantize = if bitpix < 0 { quantize } else { None };
+        // Quantized tiles hold i32 samples, so RICE_1 applies.
+        let codec_bitpix = if hdu_quantize.is_some() { 32 } else { bitpix };
+        let mut opts = TileOpts::new().codec(resolve_codec(codec, codec_bitpix, i));
+        opts.tile = tile.map(<[u64]>::to_vec);
+        opts.quantize = hdu_quantize;
+        writer.write_hdu_compressed(header, hdu.data_bytes(), &opts)?;
+        compressed += 1;
+    }
+    writer.finish()?;
+    Ok(compressed)
+}
+
+#[cfg(not(feature = "compression"))]
+fn cmd_fpack(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    Err("`fpack` requires the `compression` feature (enabled by default)".into())
+}
+
+#[cfg(feature = "compression")]
+fn parse_codec_arg(s: &str) -> Result<CodecArg, Box<dyn std::error::Error>> {
+    match s {
+        "rice" => Ok(CodecArg::Rice),
+        "gzip" => Ok(CodecArg::Gzip),
+        "gzip2" => Ok(CodecArg::Gzip2),
+        other => Err(format!("unknown codec `{other}` (expected rice, gzip or gzip2)").into()),
+    }
+}
+
+#[cfg(feature = "compression")]
+fn parse_quantize_arg(s: &str) -> Result<Quantize, Box<dyn std::error::Error>> {
+    let level: f64 = s
+        .parse()
+        .map_err(|_| format!("quantize level `{s}` is not a number"))?;
+    if !level.is_finite() || level <= 0.0 {
+        return Err(format!("quantize level `{s}` must be a positive number").into());
+    }
+    Ok(Quantize::level(level))
+}
+
+#[cfg(feature = "compression")]
+fn parse_tile_arg(s: &str) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    let dims: Vec<u64> = s
+        .split(',')
+        .map(|d| d.trim().parse::<u64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("tile `{s}` is not a comma-separated list of integers"))?;
+    if dims.is_empty() || dims.contains(&0) {
+        return Err(format!("tile `{s}` must hold dimensions of 1 or more").into());
+    }
+    Ok(dims)
+}
+
+#[cfg(feature = "compression")]
+fn default_fpack_output(input: &Path) -> PathBuf {
+    let mut out = input.to_path_buf();
+    let new_name = match input.file_name().and_then(|s| s.to_str()) {
+        Some(name) => format!("{name}.fz"),
+        None => "packed.fits.fz".to_string(),
+    };
+    out.set_file_name(new_name);
+    out
+}
+
+// ---------------------------------------------------------------------------
 // funpack
 // ---------------------------------------------------------------------------
 
@@ -449,7 +744,10 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
              Non-compressed HDUs are copied through unchanged.\n\n\
              CHECKSUM and DATASUM are recomputed per HDU, as cfitsio's\n\
              funpack does; the `.fz` sums are not carried over because\n\
-             tile compression may be lossy. Pass -C to skip."
+             tile compression may be lossy. Pass -C to skip.\n\n\
+             The output is written in full before it replaces anything\n\
+             at that path, so a failure leaves an existing file as it\n\
+             was."
         );
         return Ok(());
     }
@@ -484,25 +782,7 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("refusing to write output on top of input; pass -o explicitly".into());
     }
     let file = open_fits(&input)?;
-    let mut sink = File::create(&output)?;
-    let mut writer = FitsWriter::new(&mut sink);
-    if checksums {
-        writer = writer.with_checksums();
-    }
-    let mut decompressed = 0_usize;
-    for i in 0..file.len() {
-        let hdu = file.hdu(i)?;
-        match hdu {
-            Hdu::CompressedImage(c) => {
-                let img = c.as_image()?;
-                writer.write_hdu(img.header(), img.raw_bytes())?;
-                decompressed += 1;
-            }
-            other => {
-                writer.write_hdu(other.header(), other.data_bytes())?;
-            }
-        }
-    }
+    let decompressed = write_via_temp(&output, |tmp| funpack_into(&file, tmp, checksums))?;
     eprintln!(
         "wrote {} (decompressed {decompressed} HDU{})",
         output.display(),
@@ -511,9 +791,127 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Decompress every tile-compressed image HDU of `file` into a new
+/// FITS file at `dest`, and report how many HDUs were decompressed.
+#[cfg(feature = "compression")]
+fn funpack_into(
+    file: &FitsFile,
+    dest: &Path,
+    checksums: bool,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    // fpack moves a primary array behind an empty stub primary,
+    // because a compressed image is a BINTABLE extension. When the
+    // first extension restores to a primary array (ZSIMPLE = T), drop
+    // the stub so the output matches the original layout.
+    let skip_stub = file.len() >= 2
+        && {
+            let first = file.hdu(0)?;
+            matches!(first, Hdu::Image(_))
+                && first.data_bytes().is_empty()
+                && is_bare_stub(first.header())
+        }
+        && matches!(file.hdu(1)?, Hdu::CompressedImage(ref c) if c.was_primary());
+    let mut sink = File::create(dest)?;
+    let mut writer = FitsWriter::new(&mut sink);
+    if checksums {
+        writer = writer.with_checksums();
+    }
+    let mut decompressed = 0_usize;
+    for i in 0..file.len() {
+        if i == 0 && skip_stub {
+            continue;
+        }
+        let hdu = file.hdu(i)?;
+        match hdu {
+            Hdu::CompressedImage(c) => {
+                let img = c.as_image()?;
+                // `as_image` yields an IMAGE extension header, which
+                // is what this HDU is. Only an image that fpack moved
+                // out of the primary slot, and that is landing back in
+                // that slot, becomes a primary header again.
+                if c.was_primary() && writer.hdu_count() == 0 {
+                    let promoted = promote_to_primary(img.header())?;
+                    writer.write_hdu(&promoted, img.raw_bytes())?;
+                } else {
+                    writer.write_hdu(img.header(), img.raw_bytes())?;
+                }
+                decompressed += 1;
+            }
+            other => {
+                writer.write_hdu(other.header(), other.data_bytes())?;
+            }
+        }
+    }
+    writer.finish()?;
+    Ok(decompressed)
+}
+
 #[cfg(not(feature = "compression"))]
 fn cmd_funpack(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Err("`funpack` requires the `compression` feature (enabled by default)".into())
+}
+
+/// Whether `h` is the empty primary header that `fpack` inserts, and
+/// nothing more.
+///
+/// `fpack` writes `SIMPLE`, `BITPIX`, `NAXIS` and `EXTEND`, plus
+/// `CHECKSUM` and `DATASUM` unless the caller passed `-C`. A stub
+/// that carries any other card holds metadata a caller added, so
+/// `funpack` keeps the HDU rather than dropping it.
+#[cfg(feature = "compression")]
+fn is_bare_stub(h: &Header) -> bool {
+    h.entries().iter().all(|e| {
+        matches!(
+            e.keyword.as_str(),
+            "SIMPLE" | "BITPIX" | "NAXIS" | "EXTEND" | "CHECKSUM" | "DATASUM"
+        )
+    })
+}
+
+/// Rebuild an IMAGE extension header as a primary header, for a
+/// decompressed array that `fpack` moved out of the primary slot.
+#[cfg(feature = "compression")]
+fn promote_to_primary(h: &Header) -> Result<Header, Box<dyn std::error::Error>> {
+    let mut out = Header::empty();
+    out.push("SIMPLE", Value::Logical(true), Some("conforming FITS file"))?;
+    out.push("BITPIX", Value::Integer(h.bitpix()?), None)?;
+    let axes = h.axes()?;
+    out.push("NAXIS", Value::Integer(axes.len() as i64), None)?;
+    for (i, n) in axes.iter().enumerate() {
+        out.push(format!("NAXIS{}", i + 1), Value::Integer(*n as i64), None)?;
+    }
+    // Standard Sec.4.4.1.1: EXTEND follows the last NAXISn card.
+    out.push(
+        "EXTEND",
+        Value::Logical(true),
+        Some("FITS dataset may contain extensions"),
+    )?;
+    for entry in h.entries() {
+        let kw = entry.keyword.as_str();
+        if matches!(entry.kind, CardKind::Commentary) {
+            if let Some(text) = entry.commentary.as_deref() {
+                let kind = match kw {
+                    "COMMENT" => CommentaryKind::Comment,
+                    "HISTORY" => CommentaryKind::History,
+                    _ => CommentaryKind::Blank,
+                };
+                out.push_commentary(kind, text);
+            }
+            continue;
+        }
+        let structural = matches!(
+            kw,
+            "XTENSION" | "SIMPLE" | "EXTEND" | "BITPIX" | "NAXIS" | "PCOUNT" | "GCOUNT"
+        ) || (kw.starts_with("NAXIS")
+            && kw[5..].chars().all(|c| c.is_ascii_digit()));
+        if structural {
+            continue;
+        }
+        if let Some(v) = entry.value.clone() {
+            out.push(kw.to_string(), v, entry.comment.as_deref())?;
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(feature = "compression")]

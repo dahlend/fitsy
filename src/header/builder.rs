@@ -50,6 +50,37 @@ pub enum CommentaryKind {
     Blank,
 }
 
+/// The [`CommentaryKind`] for a keyword the Standard defines as
+/// commentary, or `None` for a keyword that carries a value.
+///
+/// Sec.4.4.2 names three: `COMMENT`, `HISTORY` and the blank keyword.
+fn commentary_kind_of(keyword: &str) -> Option<CommentaryKind> {
+    match keyword {
+        "COMMENT" => Some(CommentaryKind::Comment),
+        "HISTORY" => Some(CommentaryKind::History),
+        "" => Some(CommentaryKind::Blank),
+        _ => None,
+    }
+}
+
+/// Render `value` as the text body of a commentary card.
+///
+/// A string contributes its own characters, without the quotes a
+/// value card would add. Any other type contributes a readable
+/// rendering, because a commentary card carries free text rather
+/// than a typed value.
+fn commentary_text(value: &Value) -> String {
+    match value {
+        Value::String(s) | Value::Unparsed(s) => s.clone(),
+        Value::Undefined => String::new(),
+        Value::Logical(b) => if *b { "T" } else { "F" }.to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(r) => r.to_string(),
+        Value::ComplexInteger(re, im) => format!("({re}, {im})"),
+        Value::ComplexReal(re, im) => format!("({re}, {im})"),
+    }
+}
+
 impl CommentaryKind {
     fn keyword(self) -> &'static str {
         match self {
@@ -99,6 +130,15 @@ impl Header {
     ) -> Result<&mut Self> {
         let keyword = keyword.into();
         validate_keyword(&keyword)?;
+        // Sec.4.4.2: a commentary keyword has no value. Emitting
+        // `COMMENT = 'text'` writes a card the Standard forbids, and
+        // one that reads back as the commentary text `= 'text'`.
+        // Route the value to a commentary card instead.
+        if let Some(kind) = commentary_kind_of(&keyword) {
+            let text = commentary_text(&value.into());
+            self.push_commentary(kind, &text);
+            return Ok(self);
+        }
         let entry = HeaderEntry {
             keyword,
             kind: crate::header::card::CardKind::Value,
@@ -153,6 +193,10 @@ impl Header {
     ) -> Result<bool> {
         validate_keyword(keyword)?;
         let value = value.into();
+        if commentary_kind_of(keyword).is_some() {
+            self.push(keyword.to_string(), value, comment)?;
+            return Ok(false);
+        }
         if let Some(entry) = self.first_value_entry_mut(keyword) {
             entry.value = Some(value);
             if let Some(c) = comment {

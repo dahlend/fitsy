@@ -8,7 +8,7 @@ Read and write astronomical FITS files with WCS coordinates.
 
 - Reads and writes fits files of all image types, and tables (bin and ascii).
 - Query subsets of images without loading the whole thing.
-- Reads `.fz` compressed images.
+- Read and write `.fz` compressed images.
 - Parses all WCS Projections, including spectral (if we are missing one let me know!)
 - SIP, TPV, TNX, and DSS distortion support.
 - Support for fitting WCS as well.
@@ -108,6 +108,7 @@ fitsy info <file>                        # one line per HDU, plus WCS details
 fitsy header <file> [--hdu N] [filter]   # dump parsed header cards
 fitsy checksum <file>                    # verify CHECKSUM / DATASUM
 fitsy stats <file> [--hdu N]             # pixel statistics for image HDUs
+fitsy fpack <input> [-o out]             # write a tile-compressed (.fz) copy
 fitsy funpack <input> [-o out]           # write a tile-decompressed copy
 ```
 

@@ -35,8 +35,10 @@
 //! `SUBTRACTIVE_DITHER_2` quantization, and losslessly through
 //! `GZIP_1`, `GZIP_2` or `NOCOMPRESS`.
 //!
-//! The write path emits `GZIP_1` tiles only. It is lossless for every
-//! `BITPIX`, so it needs no quantization step.
+//! The write path emits `GZIP_1`, `GZIP_2` or `RICE_1` tiles,
+//! chosen through [`TileOpts`]. It writes a float image losslessly
+//! by default. [`Quantize`] turns on lossy quantization, which
+//! `RICE_1` requires before it can compress a float image.
 
 mod hcompress;
 mod plio;
@@ -50,10 +52,11 @@ use flate2::read::GzDecoder;
 use crate::data::encoding::Bitpix;
 use crate::error::{FitsError, Result};
 use crate::hdu::bintable::{BinColumn, BinFieldKind, BinTableHdu, BinValue};
-use crate::header::Header;
 use crate::header::value::Value;
+use crate::header::{CardKind, CommentaryKind, Header};
 
-use self::quantize::{DitherMethod, NULL_VALUE};
+pub use self::quantize::DitherMethod;
+use self::quantize::NULL_VALUE;
 
 /// gzip RFC 1952 magic bytes.
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -364,6 +367,19 @@ impl<'a> CompressedImageHdu<'a> {
     pub fn as_bintable(&self) -> &BinTableHdu<'a> {
         &self.inner
     }
+    /// Whether the original image was a primary array, from
+    /// `ZSIMPLE` (Sec.10.2).
+    ///
+    /// A compressed image is a `BINTABLE`, so it sits in an extension
+    /// slot. [`as_image`](Self::as_image) therefore yields an `IMAGE`
+    /// extension header for every compressed HDU. This function
+    /// reports the slot the image came from. A tool that rebuilds the
+    /// original file layout needs it, as `fitsy funpack` does.
+    #[must_use]
+    pub fn was_primary(&self) -> bool {
+        matches!(self.header().first("ZSIMPLE"), Some(Value::Logical(true)))
+    }
+
     #[must_use]
     /// Pixel encoding of the *decompressed* image, from `ZBITPIX`.
     pub fn bitpix(&self) -> Bitpix {
@@ -927,6 +943,19 @@ fn unshuffle(buf: &mut [u8], bpp: usize) -> Result<()> {
     Ok(())
 }
 
+/// Split `buf` into `bpp` byte planes, most significant plane first.
+/// The write-side inverse of [`unshuffle`], for `GZIP_2` tiles.
+fn shuffle(buf: &[u8], bpp: usize) -> Vec<u8> {
+    let n = buf.len() / bpp;
+    let mut out = vec![0_u8; buf.len()];
+    for (i, chunk) in buf.chunks_exact(bpp).enumerate() {
+        for (plane, &b) in chunk.iter().enumerate() {
+            out[plane * n + i] = b;
+        }
+    }
+    out
+}
+
 /// Walk the `ZNAMEn`/`ZVALn` pairs to extract the Rice block size.
 /// Pence et al. 2010 Sec.3.1: `BLOCKSIZE` defaults to 32. `BYTEPIX`
 /// must equal `|inner_bitpix|/8`; for quantized floats the inner
@@ -1066,7 +1095,81 @@ fn scatter_tile(
     Ok(())
 }
 
+/// Append one tile of the full image buffer to `out`, row by row.
+/// The write-side inverse of [`scatter_tile`].
+///
+/// The caller validates the geometry. `img` spans `axes` at `bpp`
+/// bytes per pixel. `extent` fits inside the image at the position
+/// `tile_idx` names.
+///
+/// # Panics
+///
+/// Panics when the geometry runs past the end of `img`.
+fn gather_tile(
+    img: &[u8],
+    bpp: usize,
+    axes: &[u64],
+    tile_full: &[u64],
+    extent: &[u64],
+    tile_idx: &[u64],
+    out: &mut Vec<u8>,
+) {
+    let ndim = axes.len();
+    if ndim == 0 {
+        return;
+    }
+    let mut origin = vec![0_u64; ndim];
+    for i in 0..ndim {
+        origin[i] = tile_idx[i] * effective_tile(axes[i], tile_full[i]);
+    }
+    // Image strides (bytes), fastest-varying axis first.
+    let mut img_stride = vec![0_u64; ndim];
+    let mut s: u64 = bpp as u64;
+    for i in 0..ndim {
+        img_stride[i] = s;
+        s = s.saturating_mul(axes[i]);
+    }
+    let row_bytes = (extent[0] as usize) * bpp;
+    let mut coord = vec![0_u64; ndim];
+    loop {
+        let mut src: u64 = 0;
+        for i in 0..ndim {
+            src += (origin[i] + coord[i]) * img_stride[i];
+        }
+        let src = src as usize;
+        out.extend_from_slice(&img[src..src + row_bytes]);
+        let mut carry = true;
+        for i in 1..ndim {
+            coord[i] += 1;
+            if coord[i] < extent[i] {
+                carry = false;
+                break;
+            }
+            coord[i] = 0;
+        }
+        if carry {
+            break;
+        }
+    }
+}
+
 // -- Synthetic image header ----------------------------------------
+
+/// Indexed table-structure keywords owned by the BINTABLE layer.
+const T_PREFIXES: &[&str] = &[
+    "TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP", "TBCOL",
+];
+
+/// Indexed compression keywords reserved by Sec.10.2.
+const Z_INDEXED: &[&str] = &["ZNAME", "ZVAL", "ZTILE", "ZNAXIS"];
+
+/// True when `k` is one of `prefixes` followed by one or more digits.
+fn is_indexed(k: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| {
+        k.strip_prefix(p)
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    })
+}
 
 /// Map a compressed-BINTABLE keyword to its synthetic-IMAGE form, or
 /// `None` to drop it.
@@ -1076,10 +1179,6 @@ fn scatter_tile(
 /// `ZP` and `ZD` pass through. The reserved names are either re-emitted
 /// by `synthesize_image_header` or bookkeeping, so this only drops them.
 fn z_to_image_keyword(k: &str) -> Option<String> {
-    const T_PREFIXES: &[&str] = &[
-        "TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP", "TBCOL",
-    ];
-    const Z_INDEXED: &[&str] = &["ZNAME", "ZVAL", "ZTILE", "ZNAXIS"];
     // Checksums cover the *compressed* bytes; ZHECKSUM/ZDATASUM cover a
     // pre-compression image that lossy tiles need not reproduce. Neither
     // survives -- callers recompute (`FitsWriter::with_checksums`).
@@ -1092,19 +1191,55 @@ fn z_to_image_keyword(k: &str) -> Option<String> {
     if drop.contains(&k) {
         return None;
     }
-    if Z_INDEXED.iter().chain(T_PREFIXES).any(|p| {
-        k.strip_prefix(p)
-            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
-    }) {
+    if is_indexed(k, Z_INDEXED) || is_indexed(k, T_PREFIXES) {
         return None;
     }
     Some(k.to_string())
+}
+
+/// Map a source-image keyword to its compressed-table form, or `None`
+/// to drop it. The write-side inverse of [`z_to_image_keyword`].
+///
+/// Sec.10.2 renames the structural keywords to `Z` forms. It copies
+/// every other card verbatim. [`build_zimage_header`] re-emits the
+/// dropped names from validated values. The rest are checksums, which
+/// the writer recomputes.
+fn image_to_z_keyword(k: &str) -> Option<&str> {
+    match k {
+        "SIMPLE" => return Some("ZSIMPLE"),
+        "XTENSION" => return Some("ZTENSION"),
+        "EXTEND" => return Some("ZEXTEND"),
+        "BLOCKED" => return Some("ZBLOCKED"),
+        "PCOUNT" => return Some("ZPCOUNT"),
+        "GCOUNT" => return Some("ZGCOUNT"),
+        "BLANK" => return Some("ZBLANK"),
+        _ => {}
+    }
+    let drop = [
+        "BITPIX", "NAXIS", "CHECKSUM", "DATASUM", "TFIELDS", "THEAP", "ZIMAGE", "ZCMPTYPE",
+        "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSCALE", "ZZERO", "ZBLANK", "ZBITPIX", "ZNAXIS",
+        "ZSIMPLE", "ZTENSION", "ZEXTEND", "ZBLOCKED", "ZPCOUNT", "ZGCOUNT", "ZHECKSUM", "ZDATASUM",
+    ];
+    if drop.contains(&k) {
+        return None;
+    }
+    if is_indexed(k, &["NAXIS"]) || is_indexed(k, Z_INDEXED) || is_indexed(k, T_PREFIXES) {
+        return None;
+    }
+    Some(k)
 }
 
 fn synthesize_image_header(bt: &Header) -> Result<Header> {
     let mut out = Header::empty();
     let bitpix = bt.optional_int("ZBITPIX").unwrap_or(8);
     let znaxis = bt.optional_int("ZNAXIS").unwrap_or(0);
+    // The decompressed view describes the HDU where it sits, which is
+    // always an IMAGE extension: a compressed image is a BINTABLE, so
+    // it can never occupy the primary slot. `ZSIMPLE = T` says the
+    // *original* was a primary array, and
+    // [`CompressedImageHdu::was_primary`] reports that separately.
+    // Emitting `SIMPLE` here instead would hand every caller a header
+    // that `FitsWriter::write_hdu` rejects in the slot it came from.
     out.push("XTENSION", Value::String("IMAGE".into()), None)?;
     out.push("BITPIX", Value::Integer(bitpix), None)?;
     out.push("NAXIS", Value::Integer(znaxis), None)?;
@@ -1113,6 +1248,8 @@ fn synthesize_image_header(bt: &Header) -> Result<Header> {
             out.push(format!("NAXIS{i}"), Value::Integer(n), None)?;
         }
     }
+    // Sec.7.1: an IMAGE extension always carries PCOUNT = 0 and
+    // GCOUNT = 1, whatever ZPCOUNT/ZGCOUNT hold.
     out.push("PCOUNT", Value::Integer(0), None)?;
     out.push("GCOUNT", Value::Integer(1), None)?;
 
@@ -1138,6 +1275,14 @@ fn synthesize_image_header(bt: &Header) -> Result<Header> {
             || (kw.starts_with("NAXIS") && kw[5..].chars().all(|c| c.is_ascii_digit()))
     };
     for entry in bt.entries() {
+        // Commentary cards copy verbatim, so COMMENT and HISTORY
+        // survive a compression round trip.
+        if matches!(entry.kind, CardKind::Commentary) {
+            if let Some(text) = entry.commentary.as_deref() {
+                out.push_commentary(commentary_kind(&entry.keyword), text);
+            }
+            continue;
+        }
         let Some(mapped) = z_to_image_keyword(&entry.keyword) else {
             continue;
         };
@@ -1159,60 +1304,79 @@ fn synthesize_image_header(bt: &Header) -> Result<Header> {
     Ok(out)
 }
 
+/// The [`CommentaryKind`] for a commentary card's keyword field.
+fn commentary_kind(keyword: &str) -> CommentaryKind {
+    match keyword {
+        "COMMENT" => CommentaryKind::Comment,
+        "HISTORY" => CommentaryKind::History,
+        _ => CommentaryKind::Blank,
+    }
+}
+
 /// Tile-compress an image HDU into a `(Header, data)` pair describing
 /// a tile-compressed `BINTABLE` (Pence & Seaman 2010, Standard
 /// Sec.7.4).
 ///
-/// This emits `GZIP_1` tiles.
+/// The `header` and `data` arguments describe the uncompressed image,
+/// as [`ImageBuilder`](crate::ImageBuilder) emits them. `data` holds
+/// the big-endian byte payload. The structural cards move to their
+/// `Z` forms, such as `BITPIX` to `ZBITPIX` and `SIMPLE` to
+/// `ZSIMPLE`. Every other card copies into the table header. The
+/// image that [`CompressedImageHdu::as_image`] restores therefore
+/// keeps its WCS and the rest of its metadata.
 ///
-/// * `bitpix` and `axes` describe the source image. `axes[0]` is
-///   `NAXIS1`, the fastest-varying axis.
-/// * `raw` holds the big-endian byte payload of the source image. Its
-///   length must equal `bytes_per_pixel(bitpix) * product(axes)`.
-/// * `tile` gives the tile shape in FITS axis order. `None` defaults
-///   to `(NAXIS1, 1, 1, ...)`, per Pence & Seaman Sec.3.
-/// * `extname` becomes the `EXTNAME` card of the resulting table.
+/// The `opts` argument selects the codec, the tile shape and the
+/// `EXTNAME` of the resulting table. Pass `&TileOpts::default()` for
+/// `GZIP_1` with the default tile shape.
 ///
 /// # Errors
 ///
-/// - [`FitsError::Value`] when `bitpix` is not one of the six legal
-///   values.
-/// - [`FitsError::Data`] when `raw.len()` does not match the size that
-///   `bitpix` and `axes` imply, when `tile` has the wrong length, or
-///   when a tile dimension is 0.
-/// - [`FitsError::Header`] when the generated header holds an illegal
-///   keyword.
+/// - [`FitsError::MissingMandatory`] when `header` omits `BITPIX`,
+///   `NAXIS` or a `NAXISn` card.
+/// - [`FitsError::Data`] when `data.len()` does not match the size the
+///   header implies, when the image has no axes, when `opts.tile` has
+///   the wrong length or a zero entry, or when the compressed heap
+///   exceeds the `P` descriptor range.
+/// - [`FitsError::NonStandard`] when the codec does not apply to the
+///   image, such as `RICE_1` on a floating-point or 64-bit image.
+/// - [`FitsError::Header`] when a generated keyword is illegal.
+/// - [`FitsError::Io`] when a tile fails to compress.
 pub fn compress_image_to_hdu(
-    bitpix: i64,
-    axes: &[u64],
-    raw: &[u8],
-    tile: Option<&[u64]>,
-    extname: Option<&str>,
+    header: &Header,
+    data: &[u8],
+    opts: &TileOpts,
 ) -> Result<(Header, Vec<u8>)> {
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::Write;
-
-    let bytes_per = (bitpix.unsigned_abs() / 8) as usize;
-    let n_pixels: u64 = if axes.is_empty() {
-        0
-    } else {
-        axes.iter().product()
-    };
-    if raw.len() != bytes_per * n_pixels as usize {
-        return Err(FitsError::Data(format!(
-            "compress_image_to_hdu: raw is {} bytes; expected {} (BITPIX={bitpix}, n_pixels={n_pixels})",
-            raw.len(),
-            bytes_per * n_pixels as usize,
-        )));
-    }
-
+    let bitpix = header.bitpix()?;
+    let axes = header.axes()?;
     if axes.is_empty() {
         return Err(FitsError::Data(
             "compress_image_to_hdu: cannot compress a 0-axis image".into(),
         ));
     }
-    let tile: Vec<u64> = if let Some(t) = tile {
+    let bytes_per = (bitpix.unsigned_abs() / 8) as usize;
+    let n_pixels: u64 = axes.iter().product();
+    if data.len() != bytes_per * n_pixels as usize {
+        return Err(FitsError::Data(format!(
+            "compress_image_to_hdu: data is {} bytes; expected {} (BITPIX={bitpix}, n_pixels={n_pixels})",
+            data.len(),
+            bytes_per * n_pixels as usize,
+        )));
+    }
+    if opts.quantize.is_some() && bitpix > 0 {
+        return Err(FitsError::NonStandard(format!(
+            "quantization applies to floating-point images; got BITPIX={bitpix}"
+        )));
+    }
+    // Quantized tiles hold i32 samples whatever the source BITPIX,
+    // which makes a quantized float image eligible for RICE_1.
+    let rice_ok = opts.quantize.is_some() || matches!(bitpix, 8 | 16 | 32);
+    if matches!(opts.codec, Codec::Rice1 { .. }) && !rice_ok {
+        return Err(FitsError::NonStandard(format!(
+            "RICE_1 writes integer images of 1, 2 or 4 bytes per pixel; got BITPIX={bitpix} \
+             (quantization makes a float image eligible)"
+        )));
+    }
+    let tile: Vec<u64> = if let Some(t) = &opts.tile {
         if t.len() != axes.len() {
             return Err(FitsError::Data(format!(
                 "compress_image_to_hdu: tile rank {} does not match NAXIS {}",
@@ -1225,162 +1389,252 @@ pub fn compress_image_to_hdu(
                 "compress_image_to_hdu: tile dimensions must be >= 1".into(),
             ));
         }
-        t.to_vec()
+        t.clone()
     } else {
+        // Default tile shape (Pence & Seaman Sec.3): the full first
+        // axis, 1 along every other axis.
         let mut t = vec![1_u64; axes.len()];
         t[0] = axes[0];
         t
     };
-    // Number of tiles per axis.
-    let n_tiles_per_axis: Vec<u64> = axes
+
+    let total_tiles = expected_tile_count(&axes, &tile);
+    let mut tiles: Vec<TileOut> = Vec::with_capacity(total_tiles);
+    let mut scales: Vec<(f64, f64)> = Vec::new();
+    let mut indices = vec![0_u64; axes.len()];
+    let mut extent = vec![0_u64; axes.len()];
+    let mut tile_buf: Vec<u8> = Vec::new();
+    for row in 0..total_tiles {
+        tile_index_from_row(row as u64, &axes, &tile, &mut indices);
+        for i in 0..axes.len() {
+            let t = effective_tile(axes[i], tile[i]);
+            extent[i] = t.min(axes[i].saturating_sub(indices[i] * t));
+        }
+        tile_buf.clear();
+        gather_tile(
+            data,
+            bytes_per,
+            &axes,
+            &tile,
+            &extent,
+            &indices,
+            &mut tile_buf,
+        );
+        if let Some(q) = &opts.quantize {
+            let (out, scale) = quantize_and_compress(&tile_buf, bitpix, q, row, opts.codec)?;
+            tiles.push(out);
+            scales.push(scale);
+        } else {
+            tiles.push(TileOut::Primary(compress_tile(
+                &tile_buf, opts.codec, bytes_per,
+            )?));
+        }
+    }
+
+    // One row per tile: a P descriptor per payload column, then the
+    // per-tile ZSCALE / ZZERO under quantization. Payloads land in
+    // the heap in row order, directly after the rows.
+    let any_fallback = tiles.iter().any(|t| matches!(t, TileOut::Fallback(_)));
+    let heap_size: usize = tiles.iter().map(|t| t.bytes().len()).sum();
+    let max_primary = tiles
         .iter()
-        .zip(tile.iter())
-        .map(|(&a, &t)| a.div_ceil(t))
-        .collect();
-    let total_tiles: u64 = n_tiles_per_axis.iter().copied().product();
-
-    // Strides (in elements) of the source image, FITS order.
-    let mut strides = Vec::with_capacity(axes.len());
-    let mut s: u64 = 1;
-    for &a in axes {
-        strides.push(s);
-        s = s.saturating_mul(a);
+        .filter_map(|t| match t {
+            TileOut::Primary(b) => Some(b.len()),
+            TileOut::Fallback(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let max_fallback = tiles
+        .iter()
+        .filter_map(|t| match t {
+            TileOut::Fallback(b) => Some(b.len()),
+            TileOut::Primary(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if heap_size > i32::MAX as usize {
+        return Err(FitsError::Data(format!(
+            "compressed heap is {heap_size} bytes, which exceeds the P descriptor \
+             range; use smaller tiles or split the image"
+        )));
     }
-
-    // Walk tiles in FITS order (axis 0 fastest).
-    let mut row_data: Vec<u8> = Vec::with_capacity(total_tiles as usize * 8);
-    let mut heap: Vec<u8> = Vec::new();
-    let mut tile_index = vec![0_u64; axes.len()];
-    let mut max_compressed: u32 = 0;
-
-    loop {
-        // Compute this tile's start and shape (clipped to image).
-        let mut tile_start: Vec<u64> = Vec::with_capacity(axes.len());
-        let mut tile_shape: Vec<u64> = Vec::with_capacity(axes.len());
-        for ax in 0..axes.len() {
-            let start = tile_index[ax] * tile[ax];
-            let end = (start + tile[ax]).min(axes[ax]);
-            tile_start.push(start);
-            tile_shape.push(end - start);
+    let quantized = opts.quantize.is_some();
+    let row_bytes = 8 + if any_fallback { 8 } else { 0 } + if quantized { 16 } else { 0 };
+    let mut out = Vec::with_capacity(tiles.len() * row_bytes + heap_size);
+    let mut offset: usize = 0;
+    for (row, t) in tiles.iter().enumerate() {
+        let descriptor = |len: usize, off: usize| {
+            let mut d = [0_u8; 8];
+            d[..4].copy_from_slice(&(len as i32).to_be_bytes());
+            d[4..].copy_from_slice(&(off as i32).to_be_bytes());
+            d
+        };
+        let (primary, fallback) = match t {
+            TileOut::Primary(b) => (descriptor(b.len(), offset), descriptor(0, 0)),
+            TileOut::Fallback(b) => (descriptor(0, 0), descriptor(b.len(), offset)),
+        };
+        out.extend_from_slice(&primary);
+        if any_fallback {
+            out.extend_from_slice(&fallback);
         }
-
-        // Extract tile bytes by walking outer axes.
-        let n0 = tile_shape[0] as usize;
-        let row_bytes = n0 * bytes_per;
-        let tile_pixels: usize = tile_shape.iter().copied().product::<u64>() as usize;
-        let mut tile_buf: Vec<u8> = Vec::with_capacity(tile_pixels * bytes_per);
-
-        let mut idx = vec![0_u64; axes.len()];
-        let outer = axes.len();
-        'inner: loop {
-            let mut elem_off: u64 = tile_start[0];
-            for ax in 1..outer {
-                elem_off += (tile_start[ax] + idx[ax]) * strides[ax];
-            }
-            let byte_off = (elem_off as usize) * bytes_per;
-            tile_buf.extend_from_slice(&raw[byte_off..byte_off + row_bytes]);
-            if outer == 1 {
-                break 'inner;
-            }
-            let mut ax = 1;
-            loop {
-                idx[ax] += 1;
-                if idx[ax] < tile_shape[ax] {
-                    break;
-                }
-                idx[ax] = 0;
-                ax += 1;
-                if ax == outer {
-                    break 'inner;
-                }
-            }
+        if quantized {
+            let (scale, zero) = scales[row];
+            out.extend_from_slice(&scale.to_be_bytes());
+            out.extend_from_slice(&zero.to_be_bytes());
         }
-
-        // Gzip the tile.
-        let mut e = GzEncoder::new(Vec::new(), Compression::default());
-        e.write_all(&tile_buf).map_err(FitsError::Io)?;
-        let compressed = e.finish().map_err(FitsError::Io)?;
-        let count = compressed.len() as u32;
-        let offset = heap.len() as u32;
-        row_data.extend_from_slice(&(count as i32).to_be_bytes());
-        row_data.extend_from_slice(&(offset as i32).to_be_bytes());
-        heap.extend_from_slice(&compressed);
-        if count > max_compressed {
-            max_compressed = count;
-        }
-
-        // Advance tile index.
-        if outer == 1 {
-            tile_index[0] += 1;
-            if tile_index[0] >= n_tiles_per_axis[0] {
-                break;
-            }
-            continue;
-        }
-        let mut ax = 0;
-        loop {
-            tile_index[ax] += 1;
-            if tile_index[ax] < n_tiles_per_axis[ax] {
-                break;
-            }
-            tile_index[ax] = 0;
-            ax += 1;
-            if ax == outer {
-                let mut h = Header::empty();
-                finalize_zimage_header(
-                    &mut h,
-                    bitpix,
-                    axes,
-                    &tile,
-                    total_tiles,
-                    heap.len(),
-                    max_compressed,
-                    extname,
-                )?;
-                return Ok((h, concat(row_data, &heap)));
-            }
-        }
+        offset += t.bytes().len();
     }
-    let mut h = Header::empty();
-    finalize_zimage_header(
-        &mut h,
+    for t in &tiles {
+        out.extend_from_slice(t.bytes());
+    }
+    let h = build_zimage_header(
+        header,
         bitpix,
-        axes,
+        &axes,
         &tile,
-        total_tiles,
-        heap.len(),
-        max_compressed,
-        extname,
+        opts,
+        total_tiles as u64,
+        heap_size,
+        TableColumnWidths {
+            max_primary,
+            max_fallback: any_fallback.then_some(max_fallback),
+        },
     )?;
-    Ok((h, concat(row_data, &heap)))
+    Ok((h, out))
 }
 
-fn concat(mut a: Vec<u8>, b: &[u8]) -> Vec<u8> {
-    a.extend_from_slice(b);
-    a
+/// One compressed tile, keyed to the column that stores it.
+enum TileOut {
+    /// `COMPRESSED_DATA` -- the codec's output.
+    Primary(Vec<u8>),
+    /// `GZIP_COMPRESSED_DATA` -- lossless gzip of the original tile
+    /// bytes, for a tile that could not be quantized.
+    Fallback(Vec<u8>),
 }
 
+impl TileOut {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Primary(b) | Self::Fallback(b) => b,
+        }
+    }
+}
+
+/// Maximum payload length per column, for the `TFORMn` descriptors.
+#[derive(Clone, Copy)]
+struct TableColumnWidths {
+    max_primary: usize,
+    /// `Some` when any tile fell back to `GZIP_COMPRESSED_DATA`.
+    max_fallback: Option<usize>,
+}
+
+/// Quantize one float tile and compress the samples, or fall back to
+/// lossless gzip when the tile cannot be quantized.
+///
+/// The result pairs the payload with the tile's `(ZSCALE, ZZERO)`.
+/// A fallback tile reports `(1.0, 0.0)`. The reader ignores that
+/// pair, because a fallback tile holds unquantized pixels.
+///
+/// # Errors
+///
+/// The conditions of [`compress_tile`].
+fn quantize_and_compress(
+    tile_be: &[u8],
+    bitpix: i64,
+    q: &Quantize,
+    row: usize,
+    codec: Codec,
+) -> Result<(TileOut, (f64, f64))> {
+    let values: Vec<f64> = if bitpix == -32 {
+        tile_be
+            .chunks_exact(4)
+            .map(|c| f64::from(f32::from_be_bytes([c[0], c[1], c[2], c[3]])))
+            .collect()
+    } else {
+        tile_be
+            .chunks_exact(8)
+            .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect()
+    };
+    // The same per-tile seed rule the decoder applies: ZDITHER0 plus
+    // the 0-based row number.
+    let dither_arg = match q.dither {
+        DitherMethod::NoDither => None,
+        other => Some((other, u64::from(q.seed) + row as u64)),
+    };
+    match quantize::quantize_tile(&values, q.level, dither_arg) {
+        Some((ints, scale, zero)) => {
+            let be: Vec<u8> = ints.iter().flat_map(|v| v.to_be_bytes()).collect();
+            Ok((
+                TileOut::Primary(compress_tile(&be, codec, 4)?),
+                (scale, zero),
+            ))
+        }
+        None => Ok((
+            TileOut::Fallback(compress_tile(tile_be, Codec::Gzip1, 1)?),
+            (1.0, 0.0),
+        )),
+    }
+}
+
+/// Compress one tile's big-endian pixel bytes with `codec`.
+///
+/// # Errors
+///
+/// - [`FitsError::Io`] when a gzip stream fails to write.
+/// - The conditions of [`rice::compress`] for [`Codec::Rice1`];
+///   `compress_image_to_hdu` rejects an illegal pixel width up front.
+fn compress_tile(tile_be: &[u8], codec: Codec, bytes_per: usize) -> Result<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let gzip = |bytes: &[u8]| -> Result<Vec<u8>> {
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(bytes).map_err(FitsError::Io)?;
+        e.finish().map_err(FitsError::Io)
+    };
+    match codec {
+        Codec::Gzip1 => gzip(tile_be),
+        Codec::Gzip2 => gzip(&shuffle(tile_be, bytes_per)),
+        Codec::Rice1 { blocksize } => rice::compress(bytes_per as u32, blocksize, tile_be),
+    }
+}
+
+/// Build the complete BINTABLE header for a tile-compressed image:
+/// the table structure, the `Z` geometry cards, then every card of
+/// `src` carried through [`image_to_z_keyword`].
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when a generated keyword is illegal.
 #[allow(
     clippy::too_many_arguments,
     reason = "all parameters are required to build the tile-compressed FITS extension header"
 )]
-fn finalize_zimage_header(
-    h: &mut Header,
+fn build_zimage_header(
+    src: &Header,
     bitpix: i64,
     axes: &[u64],
     tile: &[u64],
+    opts: &TileOpts,
     n_tiles: u64,
     heap_size: usize,
-    max_compressed: u32,
-    extname: Option<&str>,
-) -> Result<()> {
+    widths: TableColumnWidths,
+) -> Result<Header> {
+    let quantized = opts.quantize.is_some();
+    // Column layout: COMPRESSED_DATA, then GZIP_COMPRESSED_DATA when
+    // any tile fell back, then the per-tile ZSCALE / ZZERO scalars.
+    let n_fields = 1 + i64::from(widths.max_fallback.is_some()) + if quantized { 2 } else { 0 };
+    let row_bytes =
+        8 + if widths.max_fallback.is_some() { 8 } else { 0 } + if quantized { 16 } else { 0 };
+    let mut h = Header::empty();
     h.push("XTENSION", Value::String("BINTABLE".into()), None)?;
     h.push("BITPIX", Value::Integer(8), None)?;
     h.push("NAXIS", Value::Integer(2), None)?;
     h.push(
         "NAXIS1",
-        Value::Integer(8),
-        Some("8 = sizeof(P descriptor)"),
+        Value::Integer(row_bytes),
+        Some("bytes per table row"),
     )?;
     h.push(
         "NAXIS2",
@@ -1389,64 +1643,253 @@ fn finalize_zimage_header(
     )?;
     h.push("PCOUNT", Value::Integer(heap_size as i64), None)?;
     h.push("GCOUNT", Value::Integer(1), None)?;
-    h.push("TFIELDS", Value::Integer(1), None)?;
-    h.push("TTYPE1", Value::String("COMPRESSED_DATA".into()), None)?;
-    h.push(
-        "TFORM1",
-        Value::String(format!("1PB({max_compressed})")),
-        None,
+    h.push("TFIELDS", Value::Integer(n_fields), None)?;
+    let mut field = 0;
+    let mut push_field = |h: &mut Header, name: &str, form: String| -> Result<()> {
+        field += 1;
+        h.push(format!("TTYPE{field}"), Value::String(name.into()), None)?;
+        h.push(format!("TFORM{field}"), Value::String(form), None)?;
+        Ok(())
+    };
+    push_field(
+        &mut h,
+        "COMPRESSED_DATA",
+        format!("1PB({})", widths.max_primary),
     )?;
+    if let Some(max_fallback) = widths.max_fallback {
+        push_field(
+            &mut h,
+            "GZIP_COMPRESSED_DATA",
+            format!("1PB({max_fallback})"),
+        )?;
+    }
+    if quantized {
+        push_field(&mut h, "ZSCALE", "1D".to_string())?;
+        push_field(&mut h, "ZZERO", "1D".to_string())?;
+    }
     h.push("ZIMAGE", Value::Logical(true), None)?;
+    let cmp_comment = match opts.codec {
+        Codec::Gzip1 => "gzip RFC 1952",
+        Codec::Gzip2 => "gzip RFC 1952, byte planes shuffled",
+        Codec::Rice1 { .. } => "Rice coding",
+    };
     h.push(
         "ZCMPTYPE",
-        Value::String("GZIP_1".into()),
-        Some("gzip RFC 1952"),
+        Value::String(opts.codec.zcmptype().into()),
+        Some(cmp_comment),
     )?;
     h.push("ZBITPIX", Value::Integer(bitpix), None)?;
     h.push("ZNAXIS", Value::Integer(axes.len() as i64), None)?;
-    // For floating-point images we gzip the raw IEEE bytes directly
-    // (no quantization). Without ZQUANTIZ, readers default to
-    // NO_DITHER and demand ZSCALE/ZZERO; ZQUANTIZ='NONE' tells them
-    // the tile bytes are raw float pixels.
-    if matches!(bitpix, -32 | -64) {
-        h.push(
-            "ZQUANTIZ",
-            Value::String("NONE".into()),
-            Some("no quantization (raw IEEE bytes)"),
-        )?;
-    }
     for (i, &n) in axes.iter().enumerate() {
         h.push(format!("ZNAXIS{}", i + 1), Value::Integer(n as i64), None)?;
     }
     for (i, &t) in tile.iter().enumerate() {
         h.push(format!("ZTILE{}", i + 1), Value::Integer(t as i64), None)?;
     }
-    if let Some(name) = extname {
-        h.push("EXTNAME", Value::String(name.to_string()), None)?;
+    if let Codec::Rice1 { blocksize } = opts.codec {
+        // Quantized tiles hold i32 samples whatever the source BITPIX.
+        let bytepix = if quantized {
+            4
+        } else {
+            bitpix.unsigned_abs() as i64 / 8
+        };
+        h.push(
+            "ZNAME1",
+            Value::String("BLOCKSIZE".into()),
+            Some("pixels per Rice block"),
+        )?;
+        h.push("ZVAL1", Value::Integer(i64::from(blocksize)), None)?;
+        h.push(
+            "ZNAME2",
+            Value::String("BYTEPIX".into()),
+            Some("bytes per pixel"),
+        )?;
+        h.push("ZVAL2", Value::Integer(bytepix), None)?;
     }
-    Ok(())
+    if let Some(q) = &opts.quantize {
+        h.push(
+            "ZQUANTIZ",
+            Value::String(q.dither.zquantiz().into()),
+            Some("quantization dither method"),
+        )?;
+        h.push(
+            "ZDITHER0",
+            Value::Integer(i64::from(q.seed)),
+            Some("dither seed offset"),
+        )?;
+        h.push(
+            "ZBLANK",
+            Value::Integer(i64::from(NULL_VALUE)),
+            Some("undefined-pixel sentinel"),
+        )?;
+    } else if matches!(bitpix, -32 | -64) {
+        // A lossless float image gzips the raw IEEE bytes directly.
+        // Without ZQUANTIZ, readers default to NO_DITHER and demand
+        // ZSCALE/ZZERO; ZQUANTIZ='NONE' says the tile bytes are raw
+        // float pixels.
+        h.push(
+            "ZQUANTIZ",
+            Value::String("NONE".into()),
+            Some("no quantization (raw IEEE bytes)"),
+        )?;
+    }
+    if let Some(name) = &opts.extname {
+        h.push("EXTNAME", Value::String(name.clone()), None)?;
+    }
+    // Carry every other card of the source image, per Sec.10.2.
+    for entry in src.entries() {
+        if matches!(entry.kind, CardKind::Commentary) {
+            if let Some(text) = entry.commentary.as_deref() {
+                h.push_commentary(commentary_kind(&entry.keyword), text);
+            }
+            continue;
+        }
+        let Some(mapped) = image_to_z_keyword(&entry.keyword) else {
+            continue;
+        };
+        // First writer wins: the structural cards above, and
+        // `opts.extname` over a source EXTNAME card.
+        if h.first(mapped).is_some() {
+            continue;
+        }
+        if let Some(v) = entry.value.clone() {
+            // A per-keyword failure is not fatal. The builder drops a
+            // leniently parsed source card whose keyword it rejects,
+            // rather than aborting the whole header.
+            let _ = h.push(mapped, v, entry.comment.as_deref());
+        }
+    }
+    Ok(h)
 }
 
-/// Per-call options for [`write_hdu_compressed`].
+/// Tile compression codec for the write path.
+///
+/// The read path is independent of this type and decodes every
+/// algorithm of Standard Sec.10 Table 10.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    /// `GZIP_1` -- gzip over the big-endian pixel bytes. Lossless for
+    /// every `BITPIX`. The default.
+    #[default]
+    Gzip1,
+    /// `GZIP_2` -- gzip over byte-plane-shuffled pixel bytes.
+    /// Lossless for every `BITPIX`. Often smaller than `GZIP_1` on
+    /// floating-point data, because the exponent bytes group
+    /// together.
+    Gzip2,
+    /// `RICE_1` -- Rice coding (Pence et al. 2010 Sec.3.1). Integer
+    /// images with 1, 2 or 4 bytes per pixel only.
+    Rice1 {
+        /// Pixels per Rice block. A reader assumes 32 when the file
+        /// names no `BLOCKSIZE`, so 32 is the portable choice.
+        blocksize: u32,
+    },
+}
+
+impl Codec {
+    /// The `ZCMPTYPE` value this codec writes.
+    #[must_use]
+    pub fn zcmptype(&self) -> &'static str {
+        match self {
+            Self::Gzip1 => "GZIP_1",
+            Self::Gzip2 => "GZIP_2",
+            Self::Rice1 { .. } => "RICE_1",
+        }
+    }
+
+    /// A `RICE_1` codec with a block size of 32, the value a reader
+    /// assumes when `BLOCKSIZE` is absent.
+    #[must_use]
+    pub fn rice() -> Self {
+        Self::Rice1 { blocksize: 32 }
+    }
+}
+
+/// Opt-in lossy quantization of a floating-point image
+/// (Sec.10.4.4).
+///
+/// Quantization maps each tile's float pixels to 32-bit integers so
+/// an integer codec such as `RICE_1` can compress them. The mapping
+/// discards precision below the quantization step, which is the
+/// estimated per-tile noise divided by [`level`](Self::level). A tile
+/// with no measurable noise, or with a value range too wide for the
+/// step, falls back to lossless gzip in a `GZIP_COMPRESSED_DATA`
+/// column.
+///
+/// A non-finite pixel is recorded through `ZBLANK` and reads back as
+/// NaN. Under [`DitherMethod::Subtractive2`] an exact zero reads back
+/// as exact zero.
+#[derive(Debug, Clone, Copy)]
+pub struct Quantize {
+    /// Quantization level `q`. The step is the estimated tile noise
+    /// divided by `q`, so a larger level keeps more precision. The
+    /// default is 4.
+    pub level: f64,
+    /// Dither method, written to `ZQUANTIZ`.
+    /// [`DitherMethod::Subtractive1`] by default.
+    pub dither: DitherMethod,
+    /// `ZDITHER0` seed offset. 1 by default, so output is
+    /// deterministic.
+    pub seed: u32,
+}
+
+impl Default for Quantize {
+    fn default() -> Self {
+        Self {
+            level: 4.0,
+            dither: DitherMethod::Subtractive1,
+            seed: 1,
+        }
+    }
+}
+
+impl Quantize {
+    /// A quantization at `level` with the default dither and seed.
+    #[must_use]
+    pub fn level(level: f64) -> Self {
+        Self {
+            level,
+            ..Self::default()
+        }
+    }
+}
+
+/// Per-call options for [`compress_image_to_hdu`] and
+/// [`write_hdu_compressed`].
 ///
 /// [`write_hdu_compressed`]: crate::FitsWriter::write_hdu_compressed
 ///
-/// All fields are optional. The default value tiles by `NAXIS1` rows
-/// (per Pence & Seaman Sec.3) and emits no `EXTNAME` card.
+/// All fields are optional. The default value emits `GZIP_1` tiles,
+/// tiles by `NAXIS1` rows (per Pence & Seaman Sec.3), and emits no
+/// `EXTNAME` card.
 #[derive(Debug, Default, Clone)]
 pub struct TileOpts {
+    /// Compression codec. [`Codec::Gzip1`] by default.
+    pub codec: Codec,
     /// Tile shape in FITS axis order (`tile[0]` = `NAXIS1` direction).
     /// Length must equal `NAXIS`. `None` selects `(NAXIS1, 1, 1, ...)`.
     pub tile: Option<Vec<u64>>,
-    /// `EXTNAME` to stamp on the resulting BINTABLE.
+    /// `EXTNAME` to stamp on the resulting BINTABLE. A source-header
+    /// `EXTNAME` card carries through when this is `None`.
     pub extname: Option<String>,
+    /// Lossy quantization for a floating-point image. `None`, the
+    /// default, compresses floats losslessly.
+    pub quantize: Option<Quantize>,
 }
 
 impl TileOpts {
-    /// Construct an options bag with default tiling and no `EXTNAME`.
+    /// Construct an options bag with the default codec and tiling and
+    /// no `EXTNAME`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select the compression codec.
+    #[must_use]
+    pub fn codec(mut self, codec: Codec) -> Self {
+        self.codec = codec;
+        self
     }
 
     /// Override the tile shape.
@@ -1462,6 +1905,13 @@ impl TileOpts {
         self.extname = Some(name.into());
         self
     }
+
+    /// Quantize a floating-point image before compression. Lossy.
+    #[must_use]
+    pub fn quantize(mut self, quantize: Quantize) -> Self {
+        self.quantize = Some(quantize);
+        self
+    }
 }
 
 impl<W: std::io::Write> crate::io::writer::FitsWriter<W> {
@@ -1472,11 +1922,9 @@ impl<W: std::io::Write> crate::io::writer::FitsWriter<W> {
     /// re-encodes them per Sec.7.4 and writes them through
     /// [`write_hdu`](Self::write_hdu).
     ///
-    /// The `opts` argument sets the tile shape and the `EXTNAME` of
-    /// the resulting table. Pass `&TileOpts::default()` for the
-    /// default tile shape.
-    ///
-    /// This emits `GZIP_1` tiles.
+    /// The `opts` argument sets the codec, the tile shape and the
+    /// `EXTNAME` of the resulting table. Pass `&TileOpts::default()`
+    /// for `GZIP_1` with the default tile shape.
     ///
     /// # Errors
     ///
@@ -1488,15 +1936,7 @@ impl<W: std::io::Write> crate::io::writer::FitsWriter<W> {
         data: &[u8],
         opts: &TileOpts,
     ) -> Result<()> {
-        let bitpix = header.bitpix()?;
-        let axes = header.axes()?;
-        let (cz_h, cz_data) = compress_image_to_hdu(
-            bitpix,
-            &axes,
-            data,
-            opts.tile.as_deref(),
-            opts.extname.as_deref(),
-        )?;
+        let (cz_h, cz_data) = compress_image_to_hdu(header, data, opts)?;
         self.write_hdu(&cz_h, &cz_data)
     }
 }

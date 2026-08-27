@@ -360,3 +360,95 @@ fn keyword_fallback_is_one_directional() {
     assert!(h.first("MJD-OBS").is_some(), "MJD-OBS should find MJD_OBS");
     assert!(h.first("CD1_1").is_none(), "CD1_1 must not find CD1-1");
 }
+
+/// Standard Sec. 4.1.2.2: `= ` in bytes 9 and 10 marks a value field
+/// "unless it is one of the commentary keywords ... which by
+/// definition have no value". Sec. 4.4.2 repeats it: a commentary
+/// keyword "shall have no associated value even if the value
+/// indicator characters appear in bytes 9 and 10".
+///
+/// Regression: fitsy applied the value-indicator test to commentary
+/// keywords, so `HISTORY = text` parsed as a value card. A strict
+/// parse then failed outright on a file astropy reads without
+/// complaint, and a lenient parse hid the card from
+/// [`Header::history`], silently dropping provenance a caller asked
+/// for by name.
+#[test]
+fn commentary_keywords_ignore_a_value_indicator() {
+    let h = header_of(&[
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "HISTORY = looks like a value",
+        "HISTORY plain entry",
+        "COMMENT = also value-shaped",
+    ]);
+    // Bytes 9 through 80 are the text, so the `= ` belongs to it.
+    let history: Vec<&str> = h.history().collect();
+    assert_eq!(history, vec!["= looks like a value", "plain entry"]);
+    let comments: Vec<&str> = h.comments().collect();
+    assert_eq!(comments, vec!["= also value-shaped"]);
+    // No commentary card leaks into the value namespace.
+    assert!(h.first("HISTORY").is_none());
+    assert!(h.first("COMMENT").is_none());
+}
+
+/// Commentary text longer than one card is split at 72 characters,
+/// which is bytes 9 through 80, and rejoins on read.
+#[test]
+fn long_commentary_splits_on_the_card_boundary() {
+    use fitsy::header::CommentaryKind;
+    let text = "z".repeat(200);
+    let mut h = header_of(&[
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+    ]);
+    h.push_commentary(CommentaryKind::History, &text);
+    let bytes = h.to_bytes().unwrap();
+    let (re, _) = Header::parse(&bytes, 0).unwrap();
+    let parts: Vec<&str> = re.history().collect();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].len(), 72);
+    assert_eq!(parts[1].len(), 72);
+    assert_eq!(parts.concat(), text);
+}
+
+/// Standard Sec. 4.4.2: a commentary keyword has no associated value.
+/// Writing `COMMENT = 'text'` emits a card the Standard forbids, and
+/// one that reads back as the commentary text `= 'text'`.
+///
+/// Regression: `Header::push` and `Header::set` built a value card for
+/// `COMMENT`, `HISTORY` and the blank keyword. The card did not
+/// round-trip, and in Python `header["COMMENT"] = "x"` then
+/// `header["COMMENT"]` raised `KeyError`.
+#[test]
+fn commentary_keywords_write_commentary_cards() {
+    use fitsy::header::Value;
+    let mut h = Header::empty();
+    h.push("SIMPLE", Value::Logical(true), None).unwrap();
+    h.push("BITPIX", Value::Integer(8), None).unwrap();
+    h.push("NAXIS", Value::Integer(0), None).unwrap();
+    h.push("COMMENT", Value::String("note".into()), None)
+        .unwrap();
+    h.set("HISTORY", Value::String("step".into()), None)
+        .unwrap();
+
+    // The emitted cards carry no value indicator.
+    let bytes = h.to_bytes().unwrap();
+    let cards: Vec<String> = bytes
+        .chunks(80)
+        .map(|c| String::from_utf8_lossy(c).trim_end().to_string())
+        .collect();
+    assert!(cards.contains(&"COMMENT note".to_string()), "{cards:?}");
+    assert!(cards.contains(&"HISTORY step".to_string()), "{cards:?}");
+
+    // And they survive a round trip as commentary.
+    let (re, _) = Header::parse(&bytes, 0).unwrap();
+    assert_eq!(re.comments().collect::<Vec<_>>(), vec!["note"]);
+    assert_eq!(re.history().collect::<Vec<_>>(), vec!["step"]);
+    // A commentary card holds no value, so it stays out of the value
+    // namespace.
+    assert!(re.first("COMMENT").is_none());
+    assert!(re.first("HISTORY").is_none());
+}

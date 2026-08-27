@@ -175,3 +175,71 @@ fn nocompress_f32_matches_reference() {
         "NOCOMPRESS f32 decode differs from the reference fixture"
     );
 }
+
+/// The `RICE_1` encoder reproduces the reference streams byte for
+/// byte. Measured over the i16 fixture (15 tiles), the i32 fixture
+/// (4 tiles, values near +-2^30) and an astropy-written full-range
+/// byte image: every tile matched. This test pins the two fixtures.
+///
+/// Byte identity is stronger than the format requires -- any stream
+/// that decodes to the same pixels is valid -- so a failure here
+/// after an encoder change means "re-verify against astropy", not
+/// necessarily "wrong".
+#[test]
+fn rice_encoder_matches_reference_streams() {
+    use fitsy::header::Value;
+    use fitsy::{Header, TileOpts, compress_image_to_hdu};
+
+    // (fixture, BITPIX, tile shape, pixel builder)
+    let cases: [(&str, i64, [u64; 2], Vec<u8>); 2] = [
+        (
+            "ref_rice_i16.fits",
+            16,
+            [16, 4],
+            lcg(33 * 17)
+                .iter()
+                .flat_map(|v| ((v.rem_euclid(1000) - 500) as i16).to_be_bytes())
+                .collect(),
+        ),
+        (
+            "ref_rice_i32.fits",
+            32,
+            [40, 3],
+            lcg(40 * 12)
+                .iter()
+                .flat_map(|v| ((v - (1 << 30)) as i32).to_be_bytes())
+                .collect(),
+        ),
+    ];
+    for (name, bitpix, tile, data) in cases {
+        let f = FitsFile::open(test_data(name)).unwrap();
+        let Hdu::CompressedImage(c) = f.hdu(1).unwrap() else {
+            panic!("{name}: HDU 1 is not a compressed image");
+        };
+        let mut h = Header::empty();
+        h.push("XTENSION", Value::String("IMAGE".into()), None)
+            .unwrap();
+        h.push("BITPIX", Value::Integer(bitpix), None).unwrap();
+        h.push("NAXIS", Value::Integer(2), None).unwrap();
+        for (i, n) in c.axes().iter().enumerate() {
+            h.push(format!("NAXIS{}", i + 1), Value::Integer(*n as i64), None)
+                .unwrap();
+        }
+        h.push("PCOUNT", Value::Integer(0), None).unwrap();
+        h.push("GCOUNT", Value::Integer(1), None).unwrap();
+        let opts = TileOpts::new()
+            .codec(fitsy::Codec::rice())
+            .tile(tile.to_vec());
+        let (bh, bytes) = compress_image_to_hdu(&h, &data, &opts).unwrap();
+
+        // The heap holds the tile payloads in row order in both
+        // files, so heap equality is stream equality.
+        let heap_start = bh.optional_int("NAXIS1").unwrap() as usize
+            * bh.optional_int("NAXIS2").unwrap() as usize;
+        assert_eq!(
+            &bytes[heap_start..],
+            c.as_bintable().heap_bytes(),
+            "{name}: RICE_1 stream differs from the reference"
+        );
+    }
+}

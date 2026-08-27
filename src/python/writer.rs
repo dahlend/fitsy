@@ -161,12 +161,15 @@ pub fn image(
 ///
 /// Notes
 /// -----
-/// fitsy emits only ``ZCMPTYPE = 'GZIP_1'`` compressed tiles.
+/// This function emits ``ZCMPTYPE = 'GZIP_1'`` compressed tiles.
+/// ``GZIP_1`` is lossless for every dtype listed above.
 ///
-/// fitsy ignores a structural keyword (such as ``BITPIX``), a
-/// ``Z*`` keyword, and ``EXTNAME``, in `header`, keeping the value
-/// it computes for the compressed HDU instead. Set ``EXTNAME``
-/// through `extname`.
+/// fitsy computes the structural cards of the compressed HDU itself.
+/// It therefore ignores a structural card, such as ``BITPIX``, and a
+/// reserved ``Z`` card, such as ``ZBITPIX``, in `header`. Set
+/// ``EXTNAME`` through `extname`. Every other value card carries into
+/// the compressed HDU and survives decompression. A ``COMMENT``,
+/// ``HISTORY`` or blank-keyword card in `header` does not carry.
 #[pyfunction]
 #[pyo3(signature = (data, header=None, *, tile_shape=None, extname=None))]
 pub fn compressed_image(
@@ -175,78 +178,21 @@ pub fn compressed_image(
     tile_shape: Option<Vec<u64>>,
     extname: Option<String>,
 ) -> PyResult<PyBinTableBuilder> {
-    use crate::Value;
-    use crate::compression::compress_image_to_hdu;
+    use crate::compression::{TileOpts, compress_image_to_hdu};
     let extra = match header.as_ref() {
         Some(d) => header_from_py(d)?,
         None => Header::empty(),
     };
     // Build the uncompressed image first so we get correct BITPIX
-    // and big-endian raw bytes; then hand off to the Rust compressor.
+    // and big-endian raw bytes; then hand off to the Rust compressor,
+    // which maps the structural cards to their Z forms and carries
+    // every other card into the table header.
     let (img_header, raw) = build_image(&data, false, extra)?;
-    let bitpix = match img_header.first("BITPIX") {
-        Some(Value::Integer(i)) => *i,
-        _ => {
-            return Err(PyValueError::new_err(
-                "compressed_image: BITPIX missing from synthesized image header",
-            ));
-        }
-    };
-    let naxis: i64 = match img_header.first("NAXIS") {
-        Some(Value::Integer(i)) => *i,
-        _ => 0,
-    };
-    let mut axes: Vec<u64> = Vec::with_capacity(naxis.max(0) as usize);
-    for k in 1..=naxis {
-        let key = format!("NAXIS{k}");
-        let n = match img_header.first(&key) {
-            Some(Value::Integer(i)) => *i,
-            _ => 0,
-        };
-        axes.push(n.max(0) as u64);
-    }
-    let extname = extname.unwrap_or_else(|| "COMPRESSED_IMAGE".to_string());
-    let (mut bin_header, bin_bytes) = compress_image_to_hdu(
-        bitpix,
-        &axes,
-        &raw,
-        tile_shape.as_deref(),
-        Some(extname.as_str()),
-    )
-    .into_py_result()?;
-    // Merge user-supplied non-structural cards into the BINTABLE
-    // header so end users still see their EXPTIME, OBSERVER, etc.
-    for entry in img_header.entries() {
-        if let Some(v) = entry.value.as_ref() {
-            let kw = entry.keyword.to_ascii_uppercase();
-            if matches!(
-                kw.as_str(),
-                "SIMPLE"
-                    | "BITPIX"
-                    | "NAXIS"
-                    | "EXTEND"
-                    | "PCOUNT"
-                    | "GCOUNT"
-                    | "XTENSION"
-                    | "ZIMAGE"
-                    | "ZBITPIX"
-                    | "ZNAXIS"
-                    | "ZCMPTYPE"
-                    | "ZTILE1"
-                    | "ZTILE2"
-                    | "ZTILE3"
-                    | "ZTILE4"
-                    | "EXTNAME"
-            ) || (kw.starts_with("NAXIS") && kw[5..].chars().all(|c| c.is_ascii_digit()))
-                || (kw.starts_with("ZNAXIS") && kw[6..].chars().all(|c| c.is_ascii_digit()))
-                || (kw.starts_with("ZTILE") && kw[5..].chars().all(|c| c.is_ascii_digit()))
-                || bin_header.first(&entry.keyword).is_some()
-            {
-                continue;
-            }
-            let _ = bin_header.set(&entry.keyword, v.clone(), entry.comment.as_deref());
-        }
-    }
+    let mut opts = TileOpts::new();
+    opts.tile = tile_shape;
+    opts.extname = Some(extname.unwrap_or_else(|| "COMPRESSED_IMAGE".to_string()));
+    let (bin_header, bin_bytes) =
+        compress_image_to_hdu(&img_header, &raw, &opts).into_py_result()?;
     Ok(PyBinTableBuilder {
         header: bin_header,
         data: bin_bytes,

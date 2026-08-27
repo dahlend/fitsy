@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Tile-compressed writes cover `RICE_1` and `GZIP_2` beside `GZIP_1`,
+  through `TileOpts::codec`.
+- Opt-in lossy float quantization via `TileOpts::quantize`; float
+  images stay lossless by default.
+- `fitsy fpack`: tile-compress a file, with `-c` (codec), `-t` (tile
+  shape), `-q` (quantize level) and `-C` (skip checksums).
+- `CompressedImageHdu::was_primary`, reporting `ZSIMPLE`.
+
+### Fixed
+
+- A commentary keyword keeps its text when bytes 9 and 10 hold `= `
+  (Sec. 4.1.2.2).
+- `Header::push` and `Header::set` write a commentary card for
+  `COMMENT`, `HISTORY` and the blank keyword, not a value card.
+- `fitsy fpack` and `funpack` rename their output into place, so a
+  failure leaves the destination untouched.
+- `fitsy funpack` keeps an empty primary HDU that carries a card of
+  its own.
+
+### Changed
+
+- Breaking: `compress_image_to_hdu` takes `(header, data, opts)`.
+- Compressing an image carries its header through: structural cards as
+  `Z` forms, every other card verbatim.
+- A decompressed image header is an `IMAGE` extension, the slot a
+  compressed image occupies.
+
 ## [v0.3.0]
 
 This release centers on world coordinates. It restructures the WCS API
