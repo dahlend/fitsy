@@ -56,7 +56,11 @@ def image_hdus(hdul: fits.HDUList) -> list[tuple[int, np.ndarray]]:
 def equal(a: np.ndarray, b: np.ndarray) -> bool:
     # Byte order differs between a freshly parsed array and a
     # decompressed one; only kind and width matter.
-    if a.shape != b.shape or a.dtype.kind != b.dtype.kind or a.dtype.itemsize != b.dtype.itemsize:
+    if (
+        a.shape != b.shape
+        or a.dtype.kind != b.dtype.kind
+        or a.dtype.itemsize != b.dtype.itemsize
+    ):
         return False
     if a.dtype.kind == "f":
         return bool(((a == b) | (np.isnan(a) & np.isnan(b))).all())
@@ -82,9 +86,7 @@ def check(src: Path, codec: str, workdir: Path) -> list[str]:
         print(f"skip {src.name}: astropy cannot open the input ({e})")
         return []
     with orig, fits.open(packed) as fz:
-        decoded = [
-            hdu.data for hdu in fz if isinstance(hdu, fits.CompImageHDU)
-        ]
+        decoded = [hdu.data for hdu in fz if isinstance(hdu, fits.CompImageHDU)]
         if len(decoded) != len(originals):
             failures.append(
                 f"{src.name} [{codec}]: {len(originals)} image HDUs in, "
@@ -109,7 +111,9 @@ def check_quantized(workdir: Path) -> list[str]:
     within the quantization step of the input.
     """
     rng = np.random.default_rng(7)
-    data = (rng.normal(0.0, 1.0, (129, 200)) + np.linspace(0, 50, 200)).astype(np.float32)
+    data = (rng.normal(0.0, 1.0, (129, 200)) + np.linspace(0, 50, 200)).astype(
+        np.float32
+    )
     data[3, 5] = np.nan
     data[100, 150] = np.nan
     src = workdir / "quant_src.fits"
