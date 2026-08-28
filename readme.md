@@ -45,15 +45,14 @@ import numpy as np
 
 # Read
 with fitsy.open("image.fits") as f:
-    hdu = f[0]                             # ImageHdu
-    data = hdu.data                        # full array in RAM, native byte order
-    tile = hdu.section[0:256, 0:256]       # decode only this slice (large files)
+    hdu = f[0]  # ImageHdu
+    data = hdu.data  # full array in RAM, native byte order
+    tile = hdu.section[0:256, 0:256]  # decode only this slice (large files)
     wcs = hdu.wcs()
     ra, dec = wcs.pixel_to_world([512.0, 512.0])
 
 # Write
-img = fitsy.image(np.zeros((512, 512), dtype=np.float32),
-                  header={"OBJECT": "test"})
+img = fitsy.image(np.zeros((512, 512), dtype=np.float32), header={"OBJECT": "test"})
 fitsy.write("out.fits", [img])
 ```
 
