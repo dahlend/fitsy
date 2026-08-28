@@ -1547,13 +1547,17 @@ fn quantize_and_compress(
 ) -> Result<(TileOut, (f64, f64))> {
     let values: Vec<f64> = if bitpix == -32 {
         tile_be
-            .chunks_exact(4)
-            .map(|c| f64::from(f32::from_be_bytes([c[0], c[1], c[2], c[3]])))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f64::from(f32::from_be_bytes(*c)))
             .collect()
     } else {
         tile_be
-            .chunks_exact(8)
-            .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| f64::from_be_bytes(*c))
             .collect()
     };
     // The same per-tile seed rule the decoder applies: ZDITHER0 plus

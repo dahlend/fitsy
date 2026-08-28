@@ -195,7 +195,7 @@ impl Ait {
         let p = phi * D2R;
         let t = theta * D2R;
         let cos_t = t.cos();
-        let denom = (0.5 * (1.0 + cos_t * (p / 2.0).cos())).sqrt();
+        let denom = 1.0_f64.midpoint(cos_t * (p / 2.0).cos()).sqrt();
         if denom == 0.0 {
             return Err(FitsError::Wcs("AIT: denominator = 0".into()));
         }

@@ -404,6 +404,14 @@ pub(super) fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
 
 /// Decode big-endian raw pixel bytes into a numpy array.
 fn decode_be_to_array(py: Python<'_>, bitpix: Bitpix, bytes: &[u8], shape: &[usize]) -> Py<PyAny> {
+    // `as_chunks::<N>` needs a literal const generic. Deriving `N`
+    // from `T` needs `generic_const_exprs`, and passing it beside `T`
+    // lets the width desync from the type it decodes, which is the
+    // one error this function must not admit.
+    #[expect(
+        clippy::chunks_exact_to_as_chunks,
+        reason = "the chunk width is generic over T, so as_chunks cannot express it"
+    )]
     fn dec<T: crate::data::Pixel>(bytes: &[u8]) -> Vec<T> {
         bytes
             .chunks_exact(size_of::<T>())
@@ -1875,36 +1883,46 @@ fn write_patch_be(
         Bitpix::U8 => updater.write_image_subarray::<u8>(hdu_idx, fits_start, fits_shape, raw),
         Bitpix::I16 => {
             let pix: Vec<i16> = raw
-                .chunks_exact(2)
-                .map(|c| i16::from_ne_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_ne_bytes(*c))
                 .collect();
             updater.write_image_subarray::<i16>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::I32 => {
             let pix: Vec<i32> = raw
-                .chunks_exact(4)
-                .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_ne_bytes(*c))
                 .collect();
             updater.write_image_subarray::<i32>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::I64 => {
             let pix: Vec<i64> = raw
-                .chunks_exact(8)
-                .map(|c| i64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_ne_bytes(*c))
                 .collect();
             updater.write_image_subarray::<i64>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::F32 => {
             let pix: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_ne_bytes(*c))
                 .collect();
             updater.write_image_subarray::<f32>(hdu_idx, fits_start, fits_shape, &pix)
         }
         Bitpix::F64 => {
             let pix: Vec<f64> = raw
-                .chunks_exact(8)
-                .map(|c| f64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| f64::from_ne_bytes(*c))
                 .collect();
             updater.write_image_subarray::<f64>(hdu_idx, fits_start, fits_shape, &pix)
         }

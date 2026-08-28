@@ -546,7 +546,12 @@ impl FastCelestial<'_> {
         }
         let mut out = vec![0.0; world.len()];
         let lat = 1 - self.lon;
-        for (src, dst) in world.chunks_exact(2).zip(out.chunks_exact_mut(2)) {
+        for (src, dst) in world
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(out.as_chunks_mut::<2>().0.iter_mut())
+        {
             match self.inverse_point(src[self.lon], src[lat]) {
                 Some((px, py)) => {
                     dst[0] = px;
@@ -572,7 +577,12 @@ impl FastCelestial<'_> {
         }
         let mut out = vec![0.0; pix.len()];
         let lat = 1 - self.lon;
-        for (src, dst) in pix.chunks_exact(2).zip(out.chunks_exact_mut(2)) {
+        for (src, dst) in pix
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(out.as_chunks_mut::<2>().0.iter_mut())
+        {
             match self.point(src[0], src[1]) {
                 Some((alpha, delta)) => {
                     dst[self.lon] = alpha;

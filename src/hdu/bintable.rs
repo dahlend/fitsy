@@ -818,34 +818,36 @@ fn decode_cell(col: &BinColumn, raw: &[u8], heap: &[u8]) -> Result<BinValue> {
         }
         BinFieldKind::F32 => {
             let mut out = Vec::with_capacity(col.format.repeat);
-            for c in raw.chunks_exact(4) {
-                let v = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+            for c in raw.as_chunks::<4>().0 {
+                let v = f32::from_be_bytes(*c);
                 out.push((col.tzero as f32) + (col.tscal as f32) * v);
             }
             Ok(BinValue::F32(out))
         }
         BinFieldKind::F64 => {
             let mut out = Vec::with_capacity(col.format.repeat);
-            for c in raw.chunks_exact(8) {
-                let v = f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+            for c in raw.as_chunks::<8>().0 {
+                let v = f64::from_be_bytes(*c);
                 out.push(col.tzero + col.tscal * v);
             }
             Ok(BinValue::F64(out))
         }
         BinFieldKind::C64 => {
             let mut out = Vec::with_capacity(col.format.repeat);
-            for c in raw.chunks_exact(8) {
-                let re = f32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-                let im = f32::from_be_bytes([c[4], c[5], c[6], c[7]]);
+            for c in raw.as_chunks::<8>().0 {
+                let (re, im) = c.split_at(4);
+                let re = f32::from_be_bytes(re.try_into().unwrap());
+                let im = f32::from_be_bytes(im.try_into().unwrap());
                 out.push((re, im));
             }
             Ok(BinValue::C64(out))
         }
         BinFieldKind::C128 => {
             let mut out = Vec::with_capacity(col.format.repeat);
-            for c in raw.chunks_exact(16) {
-                let re = f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-                let im = f64::from_be_bytes([c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]]);
+            for c in raw.as_chunks::<16>().0 {
+                let (re, im) = c.split_at(8);
+                let re = f64::from_be_bytes(re.try_into().unwrap());
+                let im = f64::from_be_bytes(im.try_into().unwrap());
                 out.push((re, im));
             }
             Ok(BinValue::C128(out))

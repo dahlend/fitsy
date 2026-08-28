@@ -885,7 +885,9 @@ mod tests {
         let bytes = h.to_bytes().unwrap();
         // At least one CONTINUE card present.
         let n_continue = bytes
-            .chunks_exact(CARD_SIZE)
+            .as_chunks::<CARD_SIZE>()
+            .0
+            .iter()
             .filter(|c| c.starts_with(b"CONTINUE"))
             .count();
         assert!(
@@ -907,7 +909,9 @@ mod tests {
         h.push_commentary(CommentaryKind::History, &long);
         let bytes = h.to_bytes().unwrap();
         let n_history = bytes
-            .chunks_exact(CARD_SIZE)
+            .as_chunks::<CARD_SIZE>()
+            .0
+            .iter()
             .filter(|c| c.starts_with(b"HISTORY "))
             .count();
         assert_eq!(n_history, 3);

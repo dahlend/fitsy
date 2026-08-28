@@ -290,27 +290,37 @@ impl<'a> ImageHdu<'a> {
                 .collect(),
             Bitpix::I16 => self
                 .data
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| cast(scaling.apply_int(i64::from(<i16 as Pixel>::from_be_bytes(c)))))
                 .collect(),
             Bitpix::I32 => self
                 .data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| cast(scaling.apply_int(i64::from(<i32 as Pixel>::from_be_bytes(c)))))
                 .collect(),
             Bitpix::I64 => self
                 .data
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|c| cast(scaling.apply_int(<i64 as Pixel>::from_be_bytes(c))))
                 .collect(),
             Bitpix::F32 => self
                 .data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| cast(scaling.apply_real(f64::from(<f32 as Pixel>::from_be_bytes(c)))))
                 .collect(),
             Bitpix::F64 => self
                 .data
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|c| cast(scaling.apply_real(<f64 as Pixel>::from_be_bytes(c))))
                 .collect(),
         }

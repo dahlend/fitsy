@@ -1442,7 +1442,9 @@ fn block_contains_end(block: &[u8], lenient: bool) -> bool {
     // purposes of this scan; its error, if any, surfaces during the full
     // parse of the header buffer.
     block
-        .chunks_exact(CARD_SIZE)
+        .as_chunks::<CARD_SIZE>()
+        .0
+        .iter()
         .any(|c| Card::parse_with(c, 0, lenient).is_ok_and(|card| card.is_end()))
 }
 

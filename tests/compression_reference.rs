@@ -47,7 +47,9 @@ fn rice_i16_matches_reference() {
         .collect();
     assert_eq!(raw.len(), expected.len() * 2, "decoded byte length");
     let decoded: Vec<i16> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(
@@ -65,7 +67,9 @@ fn rice_i32_matches_reference() {
         .collect();
     assert_eq!(raw.len(), expected.len() * 4, "decoded byte length");
     let decoded: Vec<i32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert_eq!(
@@ -85,7 +89,9 @@ fn hcompress_i32_large_values_matches_reference() {
         .collect();
     assert_eq!(raw.len(), expected.len() * 4, "decoded byte length");
     let decoded: Vec<i32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert_eq!(
@@ -106,7 +112,9 @@ fn subtractive_dither_f32_matches_reference() {
     };
     let raw = c.decompress().unwrap();
     let decoded: Vec<u32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
@@ -115,7 +123,9 @@ fn subtractive_dither_f32_matches_reference() {
     };
     let expected: Vec<u32> = exp
         .raw_bytes()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
@@ -144,7 +154,9 @@ fn nocompress_i16_matches_reference() {
     let expected: Vec<i16> = (0..6 * 8_i16).map(|v| v * 37 - 500).collect();
     assert_eq!(raw.len(), expected.len() * 2, "decoded byte length");
     let decoded: Vec<i16> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(
@@ -167,7 +179,9 @@ fn nocompress_f32_matches_reference() {
     let expected: Vec<f32> = (0..6 * 8).map(|v| (v as f32) * 0.25 - 3.5).collect();
     assert_eq!(raw.len(), expected.len() * 4, "decoded byte length");
     let decoded: Vec<f32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert_eq!(

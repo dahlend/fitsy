@@ -47,7 +47,12 @@ fn main() -> Result<(), fitsy::FitsError> {
     let pairs = [(0.0_f64, 0.0_f64), (1447.0, 2171.0), (724.0, 1086.0)];
     let flat: Vec<f64> = pairs.iter().flat_map(|&(x, y)| [x, y]).collect();
     let out = wcs.pixel_to_world_many(&flat)?;
-    let sky: Vec<(f64, f64)> = out.chunks_exact(2).map(|c| (c[lon], c[lat])).collect();
+    let sky: Vec<(f64, f64)> = out
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| (c[lon], c[lat]))
+        .collect();
     println!("corners + center:");
     for ((px, py), (ra, dec)) in pairs.iter().zip(&sky) {
         println!("  ({px:.0}, {py:.0}) -> RA={ra:.4}  Dec={dec:.4}");
@@ -72,7 +77,7 @@ fn main() -> Result<(), fitsy::FitsError> {
     // form changes the layout, not the meaning of a slot.
     let flat = [0.0, 0.0, 724.0, 1086.0, 1447.0, 2171.0];
     let many = wcs.pixel_to_world_many(&flat)?;
-    for point in many.chunks_exact(2) {
+    for point in many.as_chunks::<2>().0 {
         println!("batch:  lon={:.4} lat={:.4}", point[lon], point[lat]);
     }
 

@@ -36,7 +36,9 @@ fn gzip1_compressed_image_round_trips() {
     assert_eq!(img.axes(), &[8_u64, 6]);
     let got: Vec<i16> = img
         .raw_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(got, pixels);
@@ -70,7 +72,9 @@ fn gzip1_3d_with_custom_tiles() {
     assert_eq!(img.axes(), &[4_u64, 4, 2]);
     let got: Vec<i32> = img
         .raw_bytes()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert_eq!(got, pixels);
@@ -397,7 +401,9 @@ fn quantized_f32_round_trips_within_step() {
     let img = round_trip(&h, &data, &opts);
     let decoded: Vec<f32> = img
         .raw_bytes()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     // The quantization step is the tile noise over the level; with
@@ -455,7 +461,9 @@ fn quantized_nan_and_zero_survive() {
     let img = round_trip(&h, &data, &opts);
     let decoded: Vec<f32> = img
         .raw_bytes()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert!(decoded[5].is_nan());

@@ -144,8 +144,13 @@ pub(super) fn unquantize_to_f32_be(
     );
     let mut walker = dither.map(|(_, seed)| DitherWalker::new(seed));
     let method = dither.map(|(m, _)| m);
-    for (chunk_in, chunk_out) in input_be.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-        let v = i32::from_be_bytes([chunk_in[0], chunk_in[1], chunk_in[2], chunk_in[3]]);
+    for (chunk_in, chunk_out) in input_be
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
+        let v = i32::from_be_bytes(*chunk_in);
         let f = decode_one(v, scale, zero, blank, method, walker.as_mut());
         let out = f.map_or(f32::NAN, |x| x as f32);
         chunk_out.copy_from_slice(&out.to_be_bytes());
@@ -176,8 +181,13 @@ pub(super) fn unquantize_to_f64_be(
     );
     let mut walker = dither.map(|(_, seed)| DitherWalker::new(seed));
     let method = dither.map(|(m, _)| m);
-    for (chunk_in, chunk_out) in input_be.chunks_exact(4).zip(dst.chunks_exact_mut(8)) {
-        let v = i32::from_be_bytes([chunk_in[0], chunk_in[1], chunk_in[2], chunk_in[3]]);
+    for (chunk_in, chunk_out) in input_be
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<8>().0.iter_mut())
+    {
+        let v = i32::from_be_bytes(*chunk_in);
         let f = decode_one(v, scale, zero, blank, method, walker.as_mut());
         let out = f.unwrap_or(f64::NAN);
         chunk_out.copy_from_slice(&out.to_be_bytes());
@@ -368,8 +378,10 @@ mod tests {
         let mut out = vec![0_u8; 12];
         unquantize_to_f32_be(&input, &mut out, 2.0, 100.0, NULL_VALUE, None);
         let vals: Vec<f32> = out
-            .chunks_exact(4)
-            .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_be_bytes(*c))
             .collect();
         assert_eq!(vals, vec![120.0, 90.0, 100.0]);
     }
@@ -390,8 +402,8 @@ mod tests {
         let input: Vec<u8> = ints.iter().flat_map(|v| v.to_be_bytes()).collect();
         let mut out = vec![0_u8; values.len() * 8];
         unquantize_to_f64_be(&input, &mut out, scale, zero, NULL_VALUE, dither);
-        for (v, chunk) in values.iter().zip(out.chunks_exact(8)) {
-            let d = f64::from_be_bytes(chunk.try_into().unwrap());
+        for (v, chunk) in values.iter().zip(out.as_chunks::<8>().0) {
+            let d = f64::from_be_bytes(*chunk);
             if v.is_finite() {
                 assert!(
                     (d - v).abs() <= scale * 0.5 + 1e-12,

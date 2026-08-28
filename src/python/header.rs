@@ -205,7 +205,9 @@ impl PyHeader {
         // The parser requires an END card to delimit the header; append
         // one when the caller's text has none (e.g. a single-card snippet).
         let has_end = buf
-            .chunks_exact(CARD_SIZE)
+            .as_chunks::<CARD_SIZE>()
+            .0
+            .iter()
             .any(|card| is_end_card(card, lenient));
         if !has_end {
             let mut end = [b' '; CARD_SIZE];

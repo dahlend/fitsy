@@ -989,7 +989,7 @@ impl Air {
                 // Sign change in `(prev, xi)`: bisect for the zero.
                 let (mut lo, mut hi) = (prev, xi);
                 for _ in 0..80 {
-                    let mid = 0.5 * (lo + hi);
+                    let mid = lo.midpoint(hi);
                     if h(mid) > 0.0 { lo = mid } else { hi = mid }
                 }
                 return lo;
@@ -1124,10 +1124,10 @@ impl Air {
                 if cand >= lo && cand <= hi {
                     cand
                 } else {
-                    0.5 * (lo + hi)
+                    lo.midpoint(hi)
                 }
             } else {
-                0.5 * (lo + hi)
+                lo.midpoint(hi)
             };
             let delta = next - xi;
             xi = next;

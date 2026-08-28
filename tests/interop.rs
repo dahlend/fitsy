@@ -104,7 +104,9 @@ mod na {
         // pixel section without the 2880-byte block padding.
         assert_eq!(data.len(), 24);
         let pix: Vec<f32> = data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(pix, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -198,7 +200,9 @@ mod fa {
         // 6 pixels x 8 bytes; build() returns unpadded pixel bytes.
         assert_eq!(data.len(), 48);
         let pix: Vec<f64> = data
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
             .collect();
         assert_eq!(pix, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);

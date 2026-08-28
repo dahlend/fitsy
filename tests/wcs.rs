@@ -2290,7 +2290,12 @@ fn fast_path_matches_general() {
         }
         let batch = wcs.pixel_to_world_many(&flat).unwrap();
         let mut compared = 0;
-        for (point, got) in flat.chunks_exact(2).zip(batch.chunks_exact(2)) {
+        for (point, got) in flat
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(batch.as_chunks::<2>().0.iter())
+        {
             match wcs.pixel_to_world(point) {
                 Ok(want) => {
                     assert_eq!(
@@ -2328,7 +2333,12 @@ fn fast_path_matches_general() {
         let world = &world[..world.len() - world.len() % 2];
         let back = wcs.world_to_pixel_many(world).unwrap();
         let mut inv_compared = 0;
-        for (point, got) in world.chunks_exact(2).zip(back.chunks_exact(2)) {
+        for (point, got) in world
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(back.as_chunks::<2>().0.iter())
+        {
             match wcs.world_to_pixel(point) {
                 Ok(want) => {
                     assert_eq!(
@@ -2382,13 +2392,23 @@ fn fast_path_declines_what_it_cannot_handle() {
         let wcs = open_image(&cards);
         let flat = vec![0.0, 0.0, 31.0, 23.0, 63.0, 47.0, 10.5, 40.25];
         let batch = wcs.pixel_to_world_many(&flat).unwrap();
-        for (point, got) in flat.chunks_exact(2).zip(batch.chunks_exact(2)) {
+        for (point, got) in flat
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(batch.as_chunks::<2>().0.iter())
+        {
             let want = wcs.pixel_to_world(point).unwrap();
             assert_eq!(got[0].to_bits(), want[0].to_bits(), "{name} at {point:?}");
             assert_eq!(got[1].to_bits(), want[1].to_bits(), "{name} at {point:?}");
         }
         let back = wcs.world_to_pixel_many(&batch).unwrap();
-        for (point, got) in batch.chunks_exact(2).zip(back.chunks_exact(2)) {
+        for (point, got) in batch
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(back.as_chunks::<2>().0.iter())
+        {
             let want = wcs.world_to_pixel(point).unwrap();
             assert_eq!(
                 got[0].to_bits(),
@@ -2426,7 +2446,12 @@ fn fast_path_declines_what_it_cannot_handle() {
     let wcs = open_image_3d(&cube);
     let pts = vec![0.0, 0.0, 1.0, 31.0, 23.0, 4.0];
     let batch = wcs.pixel_to_world_many(&pts).unwrap();
-    for (point, got) in pts.chunks_exact(3).zip(batch.chunks_exact(3)) {
+    for (point, got) in pts
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(batch.as_chunks::<3>().0.iter())
+    {
         let want = wcs.pixel_to_world(point).unwrap();
         for k in 0..3 {
             assert_eq!(got[k].to_bits(), want[k].to_bits(), "cube axis {k}");
@@ -2593,7 +2618,9 @@ fn footprint_returns_corner_pixel_centers() {
     // the origin: (0,0), (99,0), (99,99), (0,99).
     assert_eq!(fp.len(), 4 * 2);
     for (got, (px, py)) in
-        fp.chunks_exact(2)
+        fp.as_chunks::<2>()
+            .0
+            .iter()
             .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
     {
         let want = wcs.pixel_to_world(&[px, py]).unwrap();
@@ -2623,7 +2650,9 @@ fn footprint_works_without_a_celestial_pair() {
     let fp = wcs.footprint().unwrap();
     assert_eq!(fp.len(), 4 * 2);
     for (got, (px, py)) in
-        fp.chunks_exact(2)
+        fp.as_chunks::<2>()
+            .0
+            .iter()
             .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
     {
         let want = wcs.pixel_to_world(&[px, py]).unwrap();
@@ -2658,7 +2687,7 @@ fn footprint_covers_every_axis_of_a_cube() {
     assert_eq!(fp.len(), 8 * 3, "2^3 corners of 3 values each");
     // The spectral axis must actually vary: a celestial-only footprint
     // would hold it at the reference plane for every corner.
-    let freqs: Vec<f64> = fp.chunks_exact(3).map(|c| c[2]).collect();
+    let freqs: Vec<f64> = fp.as_chunks::<3>().0.iter().map(|c| c[2]).collect();
     let lo = freqs.iter().copied().fold(f64::INFINITY, f64::min);
     let hi = freqs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(hi - lo > 0.0, "spectral axis is constant across corners");
@@ -2711,7 +2740,7 @@ fn footprint_holds_a_degenerate_axis_at_its_reference_pixel() {
     assert_eq!(fp.len(), 4 * 3);
     // The degenerate axis sits at CRVAL3 for every corner, which is
     // where its reference pixel lands.
-    for corner in fp.chunks_exact(3) {
+    for corner in fp.as_chunks::<3>().0 {
         assert!(
             near(corner[2], 1.4e9, 1e-6),
             "degenerate axis moved: {}",
@@ -2720,7 +2749,9 @@ fn footprint_holds_a_degenerate_axis_at_its_reference_pixel() {
     }
     // And the two covered axes still walk the image corners.
     for (got, (px, py)) in
-        fp.chunks_exact(3)
+        fp.as_chunks::<3>()
+            .0
+            .iter()
             .zip([(0.0, 0.0), (99.0, 0.0), (99.0, 99.0), (0.0, 99.0)])
     {
         let want = wcs.pixel_to_world(&[px, py, 4.0]).unwrap();
@@ -4535,7 +4566,12 @@ fn batch_matches_single_point_transform() {
     let batch = wcs.pixel_to_world_many(&flat).unwrap();
     assert_eq!(batch.len(), flat.len());
     let mut outside = 0;
-    for (point, got) in flat.chunks_exact(2).zip(batch.chunks_exact(2)) {
+    for (point, got) in flat
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(batch.as_chunks::<2>().0.iter())
+    {
         if let Ok(want) = wcs.pixel_to_world(point) {
             assert!(near(got[0], want[0], 1e-12), "lon {} {}", got[0], want[0]);
             assert!(near(got[1], want[1], 1e-12), "lat {} {}", got[1], want[1]);

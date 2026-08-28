@@ -471,12 +471,16 @@ pub(super) fn compress(bytepix: u32, blocksize: u32, tile_be: &[u8]) -> Result<V
     let pixels: Vec<i64> = match bytepix {
         1 => tile_be.iter().map(|&b| i64::from(b as i8)).collect(),
         2 => tile_be
-            .chunks_exact(2)
-            .map(|c| i64::from(i16::from_be_bytes([c[0], c[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i64::from(i16::from_be_bytes(*c)))
             .collect(),
         _ => tile_be
-            .chunks_exact(4)
-            .map(|c| i64::from(i32::from_be_bytes([c[0], c[1], c[2], c[3]])))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i64::from(i32::from_be_bytes(*c)))
             .collect(),
     };
     Ok(encode_inner(
@@ -514,8 +518,10 @@ mod tests {
         let enc = encode_short(pixels, nblock);
         let bytes = decompress(2, nblock as u32, pixels.len() as u32, &enc).unwrap();
         let decoded: Vec<i16> = bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_be_bytes(*c))
             .collect();
         assert_eq!(decoded, pixels);
     }
@@ -524,8 +530,10 @@ mod tests {
         let enc = encode_int(pixels, nblock);
         let bytes = decompress(4, nblock as u32, pixels.len() as u32, &enc).unwrap();
         let decoded: Vec<i32> = bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_be_bytes(*c))
             .collect();
         assert_eq!(decoded, pixels);
     }

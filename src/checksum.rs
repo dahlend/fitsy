@@ -33,7 +33,7 @@ pub fn checksum_bytes(bytes: &[u8]) -> u32 {
     // a wrong sum).
     let mut hi: u64 = 0;
     let mut lo: u64 = 0;
-    for w in bytes.chunks_exact(4) {
+    for w in bytes.as_chunks::<4>().0 {
         hi += u64::from(u16::from_be_bytes([w[0], w[1]]));
         lo += u64::from(u16::from_be_bytes([w[2], w[3]]));
     }

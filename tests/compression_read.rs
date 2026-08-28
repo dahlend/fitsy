@@ -126,7 +126,9 @@ fn fz_gzip1_single_tile_round_trip() {
     assert_eq!(raw.len(), nx * ny * 2);
     // Decode and compare.
     let decoded: Vec<i16> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(decoded, original);
@@ -196,7 +198,9 @@ fn fz_gzip2_byte_shuffled_round_trip() {
     };
     let raw = c.decompress().unwrap();
     let decoded: Vec<i32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert_eq!(decoded, original);
@@ -271,7 +275,9 @@ fn fz_multi_tile_row_strip_round_trip() {
     };
     let raw = c.decompress().unwrap();
     let decoded: Vec<i16> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(decoded, original);
@@ -379,7 +385,9 @@ fn fz_quantized_float_no_dither_round_trip() {
     assert_eq!(c.bitpix(), Bitpix::F32);
     let raw = c.decompress().unwrap();
     let decoded: Vec<f32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     for (got, want) in decoded.iter().zip(expected.iter()) {
@@ -457,7 +465,9 @@ fn fz_quantized_f64_gzip_fallback_round_trip() {
     assert_eq!(c.bitpix(), Bitpix::F64);
     let raw = c.decompress().unwrap();
     let decoded: Vec<f64> = raw
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect();
     for (got, want) in decoded.iter().zip(pixels.iter()) {
@@ -703,7 +713,9 @@ fn fz_zblank_column_overrides_keyword() {
     };
     let raw = c.decompress().unwrap();
     let decoded: Vec<f32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
@@ -779,7 +791,9 @@ fn fz_zblank_column_null_cell_blanks_nothing() {
     };
     let raw = c.decompress().unwrap();
     let decoded: Vec<f32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert!((decoded[0] - 120.0).abs() < 1e-5, "got {}", decoded[0]);
