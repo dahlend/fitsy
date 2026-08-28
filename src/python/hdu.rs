@@ -404,27 +404,25 @@ pub(super) fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
 
 /// Decode big-endian raw pixel bytes into a numpy array.
 fn decode_be_to_array(py: Python<'_>, bitpix: Bitpix, bytes: &[u8], shape: &[usize]) -> Py<PyAny> {
-    // `as_chunks::<N>` needs a literal const generic. Deriving `N`
-    // from `T` needs `generic_const_exprs`, and passing it beside `T`
-    // lets the width desync from the type it decodes, which is the
-    // one error this function must not admit.
-    #[expect(
-        clippy::chunks_exact_to_as_chunks,
-        reason = "the chunk width is generic over T, so as_chunks cannot express it"
-    )]
-    fn dec<T: crate::data::Pixel>(bytes: &[u8]) -> Vec<T> {
+    // `N` is the pixel width in bytes. The `const` block rejects an
+    // `N` that does not match `T` at compile time, so the width
+    // cannot desync from the type it decodes.
+    fn dec<const N: usize, T: crate::data::Pixel>(bytes: &[u8]) -> Vec<T> {
+        const { assert!(N == size_of::<T>(), "chunk width must equal the pixel size") };
         bytes
-            .chunks_exact(size_of::<T>())
-            .map(T::from_be_bytes)
+            .as_chunks::<N>()
+            .0
+            .iter()
+            .map(|c| T::from_be_bytes(c))
             .collect()
     }
     match bitpix {
-        Bitpix::U8 => to_array(py, dec::<u8>(bytes), shape),
-        Bitpix::I16 => to_array(py, dec::<i16>(bytes), shape),
-        Bitpix::I32 => to_array(py, dec::<i32>(bytes), shape),
-        Bitpix::I64 => to_array(py, dec::<i64>(bytes), shape),
-        Bitpix::F32 => to_array(py, dec::<f32>(bytes), shape),
-        Bitpix::F64 => to_array(py, dec::<f64>(bytes), shape),
+        Bitpix::U8 => to_array(py, dec::<1, u8>(bytes), shape),
+        Bitpix::I16 => to_array(py, dec::<2, i16>(bytes), shape),
+        Bitpix::I32 => to_array(py, dec::<4, i32>(bytes), shape),
+        Bitpix::I64 => to_array(py, dec::<8, i64>(bytes), shape),
+        Bitpix::F32 => to_array(py, dec::<4, f32>(bytes), shape),
+        Bitpix::F64 => to_array(py, dec::<8, f64>(bytes), shape),
     }
 }
 
