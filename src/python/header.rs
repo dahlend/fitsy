@@ -281,16 +281,9 @@ impl PyHeader {
         if let Ok(other_header) = other.extract::<PyRef<'_, Self>>() {
             let entries: Vec<(String, Value, Option<String>)> = other_header
                 .lock()
-                .entries()
-                .iter()
-                .filter(|e| e.value.is_some())
-                .map(|e| {
-                    (
-                        e.keyword.clone(),
-                        e.value.clone().unwrap(),
-                        e.comment.clone(),
-                    )
-                })
+                .cards()
+                .filter(|c| !c.is_commentary())
+                .filter_map(|c| c.value().map(|v| (c.keyword(), v, c.comment())))
                 .collect();
             let mut me = self.lock();
             for (k, v, c) in entries {
@@ -411,7 +404,6 @@ impl PyHeader {
     /// TypeError
     ///   If `key` is not a ``str`` or a 2-element tuple.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        use crate::header::CardKind;
         use pyo3::IntoPyObjectExt;
 
         // Resolve (key, n)-tuple form: return the n-th occurrence's
@@ -425,8 +417,8 @@ impl PyHeader {
             let n: isize = n_obj.extract()?;
             let k = norm_key(&kw_str);
             let header = self.lock();
-            let matches: Vec<&crate::header::HeaderEntry> =
-                header.entries().iter().filter(|e| e.keyword == k).collect();
+            let matches: Vec<crate::header::CardView<'_>> =
+                header.cards().filter(|c| c.has_keyword(&k)).collect();
             if matches.is_empty() {
                 return Err(PyKeyError::new_err(kw_str));
             }
@@ -438,11 +430,11 @@ impl PyHeader {
                 )));
             }
             let e = matches[idx as usize];
-            if matches!(e.kind, CardKind::Commentary) {
-                return e.commentary.clone().unwrap_or_default().into_py_any(py);
+            if e.is_commentary() {
+                return e.commentary().unwrap_or_default().into_py_any(py);
             }
-            return Ok(match e.value.as_ref() {
-                Some(v) => value_to_py(py, v),
+            return Ok(match e.value() {
+                Some(v) => value_to_py(py, &v),
                 None => py.None(),
             });
         }
@@ -457,10 +449,9 @@ impl PyHeader {
         // sharing that keyword.
         if matches!(k.as_str(), "COMMENT" | "HISTORY" | "") {
             let texts: Vec<String> = header
-                .entries()
-                .iter()
-                .filter(|e| matches!(e.kind, CardKind::Commentary) && e.keyword == k)
-                .map(|e| e.commentary.clone().unwrap_or_default())
+                .cards()
+                .filter(|c| c.is_commentary() && c.has_keyword(&k))
+                .map(|c| c.commentary().unwrap_or_default())
                 .collect();
             if texts.is_empty() {
                 return Err(PyKeyError::new_err(kw_str));
@@ -470,10 +461,10 @@ impl PyHeader {
 
         // Regular value cards: return the first occurrence's value.
         // Use ``header[(key, n)]`` or ``header.cards(key)`` for the rest.
-        match header.entries().iter().find(|e| e.keyword == k) {
+        match header.cards().find(|c| c.has_keyword(&k)) {
             None => Err(PyKeyError::new_err(kw_str)),
-            Some(e) => Ok(match e.value.as_ref() {
-                Some(v) => value_to_py(py, v),
+            Some(c) => Ok(match c.value() {
+                Some(v) => value_to_py(py, &v),
                 None => py.None(),
             }),
         }
@@ -595,7 +586,9 @@ impl PyHeader {
                 )));
             }
         };
-        self.lock().push_commentary(k, text);
+        self.lock()
+            .push_commentary(k, text)
+            .map_err(super::err_to_py)?;
         Ok(())
     }
 
@@ -671,7 +664,6 @@ impl PyHeader {
                 Some(v) => py_to_value(&v)?,
                 None => h
                     .first(&k)
-                    .cloned()
                     .ok_or_else(|| PyKeyError::new_err(keyword.to_string()))?,
             };
             h.set(&k, val, comment).map_err(super::err_to_py)?;
@@ -873,17 +865,12 @@ impl PyHeader {
     /// The trailing ``END`` card and blank padding cards are
     /// excluded.
     fn __len__(&self) -> usize {
-        self.lock().entries().len()
+        self.lock().len()
     }
 
     /// Iterate over keyword strings in declaration order.
     fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<HeaderKeyIter>> {
-        let keys: Vec<String> = slf
-            .lock()
-            .entries()
-            .iter()
-            .map(|e| e.keyword.clone())
-            .collect();
+        let keys: Vec<String> = slf.lock().cards().map(|c| c.keyword()).collect();
         Py::new(slf.py(), HeaderKeyIter { keys, pos: 0 })
     }
 
@@ -911,7 +898,7 @@ impl PyHeader {
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> Py<PyAny> {
         let k = norm_key(key);
         if let Some(v) = self.lock().first(&k) {
-            value_to_py(py, v)
+            value_to_py(py, &v)
         } else {
             default.unwrap_or_else(|| py.None())
         }
@@ -922,11 +909,7 @@ impl PyHeader {
     /// Duplicates are kept, matching FITS semantics where
     /// ``HISTORY`` and ``COMMENT`` cards repeat.
     fn keys(&self) -> Vec<String> {
-        self.lock()
-            .entries()
-            .iter()
-            .map(|e| e.keyword.clone())
-            .collect()
+        self.lock().cards().map(|c| c.keyword()).collect()
     }
 
     /// All ``(keyword, value)`` pairs in declaration order.
@@ -940,13 +923,10 @@ impl PyHeader {
     fn items(&self, py: Python<'_>) -> Py<PyList> {
         use pyo3::IntoPyObjectExt;
         let list = PyList::empty(py);
-        for e in self.lock().entries() {
-            let v = e
-                .value
-                .as_ref()
-                .map_or_else(|| py.None(), |v| value_to_py(py, v));
-            let tup = PyTuple::new(py, [e.keyword.clone().into_py_any(py).unwrap(), v])
-                .expect("PyTuple::new");
+        for e in self.lock().cards() {
+            let v = e.value().map_or_else(|| py.None(), |v| value_to_py(py, &v));
+            let tup =
+                PyTuple::new(py, [e.keyword().into_py_any(py).unwrap(), v]).expect("PyTuple::new");
             list.append(tup).expect("append");
         }
         list.into()
@@ -966,10 +946,9 @@ impl PyHeader {
     ///   the matching card has no inline comment.
     fn comment(&self, key: &str) -> Option<String> {
         self.lock()
-            .entries()
-            .iter()
-            .find(|e| e.keyword.eq_ignore_ascii_case(key))
-            .and_then(|e| e.comment.clone())
+            .cards()
+            .find(|c| c.keyword().eq_ignore_ascii_case(key))
+            .and_then(|c| c.comment())
     }
 
     /// Plain ``dict`` view of the header.
@@ -981,9 +960,9 @@ impl PyHeader {
     /// for ad-hoc work; round-trip fidelity requires :meth:`items`.
     fn to_dict(&self, py: Python<'_>) -> Py<PyDict> {
         let d = PyDict::new(py);
-        for e in self.lock().entries() {
-            if let Some(v) = e.value.as_ref() {
-                d.set_item(&e.keyword, value_to_py(py, v)).expect("set");
+        for e in self.lock().cards() {
+            if let Some(v) = e.value() {
+                d.set_item(e.keyword(), value_to_py(py, &v)).expect("set");
             }
         }
         d.into()
@@ -997,23 +976,22 @@ impl PyHeader {
     /// accessor only returns the first). Commentary cards yield
     /// ``(text, None)``. Returns an empty list if no match is found.
     fn cards(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyList>> {
-        use crate::header::CardKind;
         use pyo3::IntoPyObjectExt;
 
         let k = norm_key(key);
         let header = self.lock();
         let list = PyList::empty(py);
-        for e in header.entries().iter().filter(|e| e.keyword == k) {
-            let value: Py<PyAny> = if matches!(e.kind, CardKind::Commentary) {
-                e.commentary.clone().unwrap_or_default().into_py_any(py)?
+        for e in header.cards().filter(|c| c.has_keyword(&k)) {
+            let value: Py<PyAny> = if e.is_commentary() {
+                e.commentary().unwrap_or_default().into_py_any(py)?
             } else {
-                match e.value.as_ref() {
-                    Some(v) => value_to_py(py, v),
+                match e.value() {
+                    Some(v) => value_to_py(py, &v),
                     None => py.None(),
                 }
             };
-            let comment: Py<PyAny> = match e.comment.as_ref() {
-                Some(c) => c.clone().into_py_any(py)?,
+            let comment: Py<PyAny> = match e.comment() {
+                Some(c) => c.into_py_any(py)?,
                 None => py.None(),
             };
             let tup = PyTuple::new(py, [value, comment])?;
@@ -1042,9 +1020,7 @@ impl PyHeader {
     ///   :meth:`insert` and :meth:`add_commentary`, and rejected only
     ///   here.
     fn tostring(&self) -> PyResult<String> {
-        let bytes = self.lock().to_bytes().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("serialize header: {e}"))
-        })?;
+        let bytes = self.lock().to_bytes();
         String::from_utf8(bytes).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("non-ASCII header bytes: {e}"))
         })
@@ -1103,11 +1079,9 @@ impl PyHeader {
     /// ------
     /// ValueError
     ///   Under the same conditions as :meth:`tostring`.
-    fn __bytes__(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyBytes>> {
-        let bytes = self.lock().to_bytes().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("serialize header: {e}"))
-        })?;
-        Ok(pyo3::types::PyBytes::new(py, &bytes).unbind())
+    fn __bytes__(&self, py: Python<'_>) -> Py<pyo3::types::PyBytes> {
+        let bytes = self.lock().to_bytes();
+        pyo3::types::PyBytes::new(py, &bytes).unbind()
     }
 
     fn __repr__(&self) -> String {
@@ -1117,30 +1091,22 @@ impl PyHeader {
         // closing END card are omitted. Falls back to a one-line
         // summary if serialization fails (e.g. malformed values).
         let header = self.lock();
-        if let Ok(bytes) = header.to_bytes() {
-            let mut out = String::with_capacity(bytes.len() + bytes.len() / 80);
-            for chunk in bytes.chunks(80) {
-                let card = String::from_utf8_lossy(chunk);
-                let trimmed = card.trim_end();
-                if trimmed.is_empty() || trimmed == "END" {
-                    continue;
-                }
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                // Keep the 80-char card padded with trailing spaces;
-                // only a NUL fill byte (see Card::parse) is trimmed.
-                out.push_str(card.as_ref().trim_end_matches('\0'));
+        let bytes = header.to_bytes();
+        let mut out = String::with_capacity(bytes.len() + bytes.len() / 80);
+        for chunk in bytes.chunks(80) {
+            let card = String::from_utf8_lossy(chunk);
+            let trimmed = card.trim_end();
+            if trimmed.is_empty() || trimmed == "END" {
+                continue;
             }
-            out
-        } else {
-            let n = header.entries().len();
-            if self.read_only {
-                format!("Header(<{n} cards, read-only>)")
-            } else {
-                format!("Header(<{n} cards>)")
+            if !out.is_empty() {
+                out.push('\n');
             }
+            // Keep the 80-char card padded with trailing spaces;
+            // only a NUL fill byte (see Card::parse_with) is trimmed.
+            out.push_str(card.as_ref().trim_end_matches('\0'));
         }
+        out
     }
 
     fn __str__(&self) -> String {

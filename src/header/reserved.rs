@@ -145,9 +145,9 @@ impl Header {
 
     /// `BUNIT` (Sec.4.4.2.6). Returns `None` if absent.
     #[must_use]
-    pub fn bunit(&self) -> Option<&str> {
+    pub fn bunit(&self) -> Option<String> {
         self.first("BUNIT").and_then(|c| match c {
-            Value::String(s) => Some(s.as_str()),
+            Value::String(s) => Some(s),
             _ => None,
         })
     }
@@ -163,7 +163,7 @@ impl Header {
         match self.first(key).ok_or_else(|| FitsError::MissingMandatory {
             keyword: key.into(),
         })? {
-            Value::Integer(i) => Ok(*i),
+            Value::Integer(i) => Ok(i),
             other => Err(FitsError::Value {
                 keyword: key.into(),
                 msg: format!("expected integer, found {other:?}"),
@@ -182,14 +182,11 @@ impl Header {
     #[must_use]
     pub fn optional_int(&self, key: &str) -> Option<i64> {
         match self.first(key)? {
-            Value::Integer(i) => Some(*i),
+            Value::Integer(i) => Some(i),
             Value::Real(r) => {
-                if r.is_finite()
-                    && r.fract() == 0.0
-                    && *r >= i64::MIN as f64
-                    && *r <= i64::MAX as f64
+                if r.is_finite() && r.fract() == 0.0 && r >= i64::MIN as f64 && r <= i64::MAX as f64
                 {
-                    Some(*r as i64)
+                    Some(r as i64)
                 } else {
                     None
                 }
@@ -202,17 +199,17 @@ impl Header {
     #[must_use]
     pub fn optional_real(&self, key: &str) -> Option<f64> {
         match self.first(key)? {
-            Value::Integer(i) => Some(*i as f64),
-            Value::Real(r) => Some(*r),
+            Value::Integer(i) => Some(i as f64),
+            Value::Real(r) => Some(r),
             _ => None,
         }
     }
 
     /// Optional string keyword. Returns the unquoted, untrimmed value.
     #[must_use]
-    pub fn optional_string(&self, key: &str) -> Option<&str> {
+    pub fn optional_string(&self, key: &str) -> Option<String> {
         match self.first(key)? {
-            Value::String(s) => Some(s.as_str()),
+            Value::String(s) => Some(s),
             _ => None,
         }
     }

@@ -442,13 +442,13 @@ fn diff_headers(a: &Header, b: &Header, opts: &DiffOptions) -> Vec<HeaderDiff> {
     use std::collections::BTreeMap;
     fn collect(h: &Header) -> BTreeMap<String, Value> {
         let mut out = BTreeMap::new();
-        for entry in h.entries() {
-            if entry.keyword.is_empty() {
+        for entry in h.cards() {
+            let keyword = entry.keyword();
+            if keyword.is_empty() {
                 continue;
             }
-            if let Some(v) = &entry.value {
-                out.entry(entry.keyword.clone())
-                    .or_insert_with(|| v.clone());
+            if let Some(v) = entry.value() {
+                out.entry(keyword).or_insert(v);
             }
         }
         out
@@ -577,15 +577,14 @@ fn diff_table_structure(
 /// The per-column cards that decide how raw table bytes decode into
 /// values, sorted so two headers can be compared regardless of card
 /// order.
-fn table_decoding_cards(h: &Header) -> Vec<(&str, Option<&Value>)> {
+fn table_decoding_cards(h: &Header) -> Vec<(String, Option<Value>)> {
     const PREFIXES: [&str; 5] = ["TSCAL", "TZERO", "TNULL", "TFORM", "TDIM"];
-    let mut out: Vec<(&str, Option<&Value>)> = h
-        .entries()
-        .iter()
-        .filter(|e| PREFIXES.iter().any(|p| e.keyword.starts_with(p)))
-        .map(|e| (e.keyword.as_str(), e.value.as_ref()))
+    let mut out: Vec<(String, Option<Value>)> = h
+        .cards()
+        .map(|c| (c.keyword(), c.value()))
+        .filter(|(k, _)| PREFIXES.iter().any(|p| k.starts_with(p)))
         .collect();
-    out.sort_by(|x, y| x.0.cmp(y.0));
+    out.sort_by(|x, y| x.0.cmp(&y.0));
     out
 }
 

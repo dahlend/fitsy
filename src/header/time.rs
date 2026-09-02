@@ -336,7 +336,7 @@ impl Header {
     /// HDU creation date (`DATE`), always UTC.
     #[must_use]
     pub fn date(&self) -> Option<IsoDateTime> {
-        IsoDateTime::parse(self.optional_string("DATE")?)
+        IsoDateTime::parse(&self.optional_string("DATE")?)
     }
 
     /// Parse a `UT*` keyword (`UTSTART`, `UTSTOP`) as UTC MJD.
@@ -345,17 +345,14 @@ impl Header {
     /// the time-only case, the date is taken from the first present keyword in
     /// `date_keys`.
     fn ut_keyword_to_mjd(&self, key: &str, date_keys: &[&str]) -> Option<f64> {
-        let s = self.optional_string(key)?.to_owned();
+        let s = self.optional_string(key)?;
         // Full datetime: parse directly (already UTC).
         if let Some(dt) = IsoDateTime::parse(&s) {
             return Some(dt.mjd());
         }
         // Time-only: combine with the observation date.
         let secs = parse_hms(&s)?;
-        let date_str = date_keys
-            .iter()
-            .find_map(|k| self.optional_string(k))?
-            .to_owned();
+        let date_str = date_keys.iter().find_map(|k| self.optional_string(k))?;
         // Strip any time component so we get midnight of that date.
         let date_only = date_str.split('T').next()?;
         let date_mjd = IsoDateTime::parse(date_only)?.mjd();
@@ -380,7 +377,7 @@ impl Header {
         }
         if let Some(dt) = self
             .optional_string("DATE-OBS")
-            .and_then(IsoDateTime::parse)
+            .and_then(|v| IsoDateTime::parse(&v))
         {
             return mjd_to_utc(dt.mjd(), &ts);
         }
@@ -405,7 +402,7 @@ impl Header {
             .optional_real("MJD-BEG")
             .or_else(|| {
                 self.optional_string("DATE-BEG")
-                    .and_then(IsoDateTime::parse)
+                    .and_then(|v| IsoDateTime::parse(&v))
                     .map(|dt| dt.mjd())
             })
             .or_else(|| {
@@ -428,7 +425,7 @@ impl Header {
             .optional_real("MJD-END")
             .or_else(|| {
                 self.optional_string("DATE-END")
-                    .and_then(IsoDateTime::parse)
+                    .and_then(|v| IsoDateTime::parse(&v))
                     .map(|dt| dt.mjd())
             })
             .or_else(|| {
@@ -451,7 +448,7 @@ impl Header {
     pub fn mjd_avg_utc(&self) -> Option<f64> {
         if let Some(mjd) = self.optional_real("MJD-AVG").or_else(|| {
             self.optional_string("DATE-AVG")
-                .and_then(IsoDateTime::parse)
+                .and_then(|v| IsoDateTime::parse(&v))
                 .map(|dt| dt.mjd())
         }) {
             return mjd_to_utc(mjd, &self.time_sys());
@@ -608,7 +605,7 @@ impl Header {
             return Some(jd - 2_400_000.5);
         }
         // DATEREF (lowest precedence).
-        IsoDateTime::parse(self.optional_string("DATEREF")?).map(|dt| dt.mjd())
+        IsoDateTime::parse(&self.optional_string("DATEREF")?).map(|dt| dt.mjd())
     }
 }
 

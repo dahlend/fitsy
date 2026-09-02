@@ -138,9 +138,9 @@ impl<W: Write> FitsWriter<W> {
                     Some("HDU checksum"),
                 )?;
             }
-            tmp.to_bytes()?
+            tmp.to_bytes()
         } else {
-            header.to_bytes()?
+            header.to_bytes()
         };
         debug_assert!(
             header_bytes.len().is_multiple_of(BLOCK_SIZE),
@@ -314,13 +314,10 @@ fn validate_mandatory(header: &Header, is_primary: bool) -> Result<()> {
     // Sec.4.4.1.1: BITPIX, NAXIS, and NAXIS1..NAXISn are mandatory in
     // every HDU (including the primary). We accept only the values
     // BITPIX = +/-8, +/-16, +/-32, +/-64.
-    let bitpix = match header.first("BITPIX") {
-        Some(Value::Integer(b)) => *b,
-        _ => {
-            return Err(FitsError::Header(
-                "HDU header is missing or has non-integer BITPIX".into(),
-            ));
-        }
+    let Some(Value::Integer(bitpix)) = header.first("BITPIX") else {
+        return Err(FitsError::Header(
+            "HDU header is missing or has non-integer BITPIX".into(),
+        ));
     };
     if !matches!(bitpix, 8 | 16 | 32 | 64 | -32 | -64) {
         return Err(FitsError::Header(format!(
@@ -328,7 +325,7 @@ fn validate_mandatory(header: &Header, is_primary: bool) -> Result<()> {
         )));
     }
     let naxis = match header.first("NAXIS") {
-        Some(Value::Integer(n)) if *n >= 0 => *n as usize,
+        Some(Value::Integer(n)) if n >= 0 => n as usize,
         Some(Value::Integer(n)) => {
             return Err(FitsError::Header(format!("NAXIS = {n} is negative")));
         }
@@ -341,7 +338,7 @@ fn validate_mandatory(header: &Header, is_primary: bool) -> Result<()> {
     for i in 1..=naxis {
         let key = format!("NAXIS{i}");
         match header.first(&key) {
-            Some(Value::Integer(n)) if *n >= 0 => {}
+            Some(Value::Integer(n)) if n >= 0 => {}
             Some(Value::Integer(n)) => {
                 return Err(FitsError::Header(format!("{key} = {n} is negative")));
             }

@@ -323,17 +323,9 @@ fn reread_all(
 
 fn extname_opt(h: &PyHeader) -> Option<String> {
     h.lock()
-        .entries()
-        .iter()
-        .find(|e| e.keyword == "EXTNAME")
-        .and_then(|e| e.value.as_ref())
-        .and_then(|v| match v {
-            crate::header::Value::String(s) => {
-                let t = s.trim().to_string();
-                if t.is_empty() { None } else { Some(t) }
-            }
-            _ => None,
-        })
+        .optional_string("EXTNAME")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn fmt_f64(x: f64) -> String {

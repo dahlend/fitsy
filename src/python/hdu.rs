@@ -252,7 +252,7 @@ impl PyImageHdu {
         let bitpix_i = header
             .first("BITPIX")
             .and_then(|v| match v {
-                Value::Integer(i) => Some(*i),
+                Value::Integer(i) => Some(i),
                 _ => None,
             })
             .unwrap_or(8);
@@ -260,7 +260,7 @@ impl PyImageHdu {
         let naxis: i64 = header
             .first("NAXIS")
             .and_then(|v| match v {
-                Value::Integer(i) => Some(*i),
+                Value::Integer(i) => Some(i),
                 _ => None,
             })
             .unwrap_or(0);
@@ -270,7 +270,7 @@ impl PyImageHdu {
             let n = header
                 .first(&key)
                 .and_then(|v| match v {
-                    Value::Integer(i) => Some(*i),
+                    Value::Integer(i) => Some(i),
                     _ => None,
                 })
                 .unwrap_or(0);
@@ -442,21 +442,7 @@ fn empty_image_header(is_primary: bool, user: crate::Header) -> crate::Header {
         let _ = h.set("PCOUNT", Value::Integer(0), None);
         let _ = h.set("GCOUNT", Value::Integer(1), None);
     }
-    for entry in user.entries() {
-        let kw = entry.keyword.to_ascii_uppercase();
-        if matches!(
-            kw.as_str(),
-            "SIMPLE" | "BITPIX" | "NAXIS" | "EXTEND" | "PCOUNT" | "GCOUNT" | "XTENSION" | "END"
-        ) {
-            continue;
-        }
-        if kw.starts_with("NAXIS") && kw[5..].chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        if let Some(v) = entry.value.as_ref() {
-            let _ = h.set(&entry.keyword, v.clone(), entry.comment.as_deref());
-        }
-    }
+    super::writer::splice_user_cards(&mut h, &user);
     h
 }
 
@@ -942,14 +928,8 @@ impl PyImageHdu {
         };
         let header = self.header.lock();
         let name = header
-            .entries()
-            .iter()
-            .find(|e| e.keyword == "EXTNAME")
-            .and_then(|e| e.value.as_ref())
-            .and_then(|v| match v {
-                crate::header::Value::String(s) => Some(s.trim().to_string()),
-                _ => None,
-            })
+            .optional_string("EXTNAME")
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         match name {
             Some(n) => format!("ImageHdu(name={n:?}, dtype={dtype:?}, shape={shape})"),

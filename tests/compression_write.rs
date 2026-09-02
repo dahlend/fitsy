@@ -211,17 +211,13 @@ fn header_cards_survive_compression() {
         .unwrap();
     let img = round_trip(&h, &data, &TileOpts::new());
     let out = img.header();
-    assert_eq!(out.optional_string("OBJECT"), Some("M31"));
+    assert_eq!(out.optional_string("OBJECT").as_deref(), Some("M31"));
     assert_eq!(out.optional_real("EXPTIME"), Some(30.0));
-    assert_eq!(out.optional_string("CTYPE1"), Some("RA---TAN"));
+    assert_eq!(out.optional_string("CTYPE1").as_deref(), Some("RA---TAN"));
     assert_eq!(out.optional_real("CRVAL1"), Some(10.68));
     // The comment survives with its card.
-    let entry = out
-        .entries()
-        .iter()
-        .find(|e| e.keyword == "OBJECT")
-        .unwrap();
-    assert_eq!(entry.comment.as_deref(), Some("target"));
+    let card = out.first_card("OBJECT").unwrap();
+    assert_eq!(card.comment().as_deref(), Some("target"));
 }
 
 #[test]
@@ -231,17 +227,18 @@ fn commentary_cards_survive_compression() {
         .primary(false)
         .build()
         .unwrap();
-    h.push_commentary(CommentaryKind::History, "flat-fielded");
-    h.push_commentary(CommentaryKind::Comment, "unit test");
+    h.push_commentary(CommentaryKind::History, "flat-fielded")
+        .unwrap();
+    h.push_commentary(CommentaryKind::Comment, "unit test")
+        .unwrap();
     let img = round_trip(&h, &data, &TileOpts::new());
-    let texts: Vec<(&str, &str)> = img
+    let texts: Vec<(String, String)> = img
         .header()
-        .entries()
-        .iter()
-        .filter_map(|e| e.commentary.as_deref().map(|t| (e.keyword.as_str(), t)))
+        .cards()
+        .filter_map(|c| c.commentary().map(|t| (c.keyword(), t)))
         .collect();
-    assert!(texts.contains(&("HISTORY", "flat-fielded")));
-    assert!(texts.contains(&("COMMENT", "unit test")));
+    assert!(texts.contains(&("HISTORY".to_string(), "flat-fielded".to_string())));
+    assert!(texts.contains(&("COMMENT".to_string(), "unit test".to_string())));
 }
 
 #[test]
@@ -286,7 +283,7 @@ fn primary_image_records_zsimple_but_reads_as_an_extension() {
 
     let img = ci.as_image().unwrap();
     let out = img.header();
-    assert_eq!(out.optional_string("XTENSION"), Some("IMAGE"));
+    assert_eq!(out.optional_string("XTENSION").as_deref(), Some("IMAGE"));
     assert!(out.first("SIMPLE").is_none());
     assert_eq!(out.optional_int("PCOUNT"), Some(0));
     assert_eq!(out.optional_int("GCOUNT"), Some(1));
@@ -347,10 +344,10 @@ fn source_extname_carries_unless_overridden() {
         .build()
         .unwrap();
     let (bh, _) = fitsy::compress_image_to_hdu(&h, &data, &TileOpts::new()).unwrap();
-    assert_eq!(bh.optional_string("EXTNAME"), Some("SCI"));
+    assert_eq!(bh.optional_string("EXTNAME").as_deref(), Some("SCI"));
     let (bh, _) =
         fitsy::compress_image_to_hdu(&h, &data, &TileOpts::new().extname("TILED")).unwrap();
-    assert_eq!(bh.optional_string("EXTNAME"), Some("TILED"));
+    assert_eq!(bh.optional_string("EXTNAME").as_deref(), Some("TILED"));
 }
 
 // -- Quantization ----------------------------------------------------
@@ -491,4 +488,92 @@ fn quantize_rejects_integer_images() {
     let (h, data) = sample_image(16);
     let opts = TileOpts::new().quantize(Quantize::default());
     assert!(fitsy::compress_image_to_hdu(&h, &data, &opts).is_err());
+}
+
+/// Sec.10.2 keeps the original header's structural cards in `Z` form,
+/// and a reader rebuilds that header by walking them in the order it
+/// finds them. `ZSIMPLE` after `ZBITPIX` rebuilds a header starting
+/// with `BITPIX`, which is not a header at all -- cfitsio's `funpack`
+/// rejects such a file outright.
+#[test]
+fn z_structural_cards_follow_image_header_order() {
+    let (mut h, data) = ImageBuilder::<i16>::new(vec![8_u64, 8], vec![7_i16; 64])
+        .unwrap()
+        .primary(true)
+        .build()
+        .unwrap();
+    h.push("OBJECT", "M31", None).unwrap();
+    let (zh, _) = fitsy::compress_image_to_hdu(&h, &data, &TileOpts::new()).unwrap();
+
+    let order: Vec<String> = zh
+        .cards()
+        .map(|c| c.keyword())
+        .filter(|k| {
+            matches!(
+                k.as_str(),
+                "ZSIMPLE" | "ZTENSION" | "ZBITPIX" | "ZNAXIS" | "ZNAXIS1" | "ZNAXIS2" | "ZEXTEND"
+            )
+        })
+        .collect();
+    let at = |k: &str| order.iter().position(|x| x == k);
+    assert_eq!(at("ZSIMPLE"), Some(0), "ZSIMPLE must lead: {order:?}");
+    assert!(at("ZSIMPLE") < at("ZBITPIX"), "{order:?}");
+    assert!(at("ZBITPIX") < at("ZNAXIS"), "{order:?}");
+    assert!(at("ZNAXIS") < at("ZNAXIS1"), "{order:?}");
+    assert!(at("ZNAXIS2") < at("ZEXTEND"), "{order:?}");
+}
+
+/// The compressed extension carries the conventional name, which is
+/// what a reader looks for.
+#[test]
+fn compressed_extension_is_named() {
+    let (h, data) = ImageBuilder::<i16>::new(vec![4_u64, 4], vec![0_i16; 16])
+        .unwrap()
+        .primary(true)
+        .build()
+        .unwrap();
+    let (zh, _) = fitsy::compress_image_to_hdu(&h, &data, &TileOpts::new()).unwrap();
+    assert_eq!(
+        zh.first("EXTNAME"),
+        Some(fitsy::Value::String("COMPRESSED_IMAGE".into()))
+    );
+}
+
+/// The compressed `BINTABLE` owns the table keyword space, so an image
+/// card in it cannot be carried. cfitsio refuses such a header
+/// outright and astropy drops the card; fitsy drops it too, so a
+/// header compressed by any of the three loses the same cards and no
+/// others.
+#[test]
+fn reserved_table_keywords_are_dropped_like_other_tools() {
+    let (mut h, data) = ImageBuilder::<i16>::new(vec![8_u64, 8], vec![1_i16; 64])
+        .unwrap()
+        .primary(true)
+        .build()
+        .unwrap();
+    // Every indexed label cfitsio and astropy reserve.
+    for kw in [
+        "TTYPE1", "TFORM1", "TUNIT1", "TNULL1", "TSCAL1", "TZERO1", "TDISP1", "TBCOL1", "TDIM1",
+        "TCTYP1", "TCUNI1", "TCRPX1", "TCRVL1", "TCDLT1", "TRPOS1",
+    ] {
+        h.push(kw, "reserved", None).unwrap();
+    }
+    h.push("THEAP", 10_i64, None).unwrap();
+    h.push("OBSERVER", "me", None).unwrap();
+    h.push("EXPTIME", 30.0_f64, None).unwrap();
+
+    let img = round_trip(&h, &data, &TileOpts::new());
+    let restored = img.header();
+    for kw in ["TTYPE1", "TFORM1", "TCRVL1", "TRPOS1", "THEAP"] {
+        assert!(
+            restored.first(kw).is_none(),
+            "{kw} is reserved by the compressed table and must not come back"
+        );
+    }
+    // Everything the table does not own is untouched.
+    assert_eq!(
+        restored.first("OBSERVER"),
+        Some(fitsy::Value::String("me".into()))
+    );
+    assert_eq!(restored.first("EXPTIME"), Some(fitsy::Value::Real(30.0)));
 }

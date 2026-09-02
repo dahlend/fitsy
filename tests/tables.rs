@@ -607,8 +607,8 @@ fn bintable_tdisp_round_trip() {
     row.extend_from_slice(b"ALPHA   ");
     let (h, data) = bt.build(1, row).unwrap();
 
-    assert_eq!(h.optional_string("TDISP1"), Some("I6.4"));
-    assert_eq!(h.optional_string("TDISP2"), Some("E12.5E3"));
+    assert_eq!(h.optional_string("TDISP1").as_deref(), Some("I6.4"));
+    assert_eq!(h.optional_string("TDISP2").as_deref(), Some("E12.5E3"));
     assert_eq!(h.optional_string("TDISP3"), None);
 
     let mut buf = Vec::new();
@@ -657,8 +657,8 @@ fn ascii_table_tdisp_round_trip() {
     b.display("F9.3").unwrap();
     let (h, data) = b.build().unwrap();
 
-    assert_eq!(h.optional_string("TDISP1"), Some("A8"));
-    assert_eq!(h.optional_string("TDISP2"), Some("F9.3"));
+    assert_eq!(h.optional_string("TDISP1").as_deref(), Some("A8"));
+    assert_eq!(h.optional_string("TDISP2").as_deref(), Some("F9.3"));
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
@@ -707,7 +707,10 @@ fn unrecognized_tdisp_is_preserved_verbatim() {
         panic!("not bintable");
     };
     assert_eq!(t.columns()[0].tdisp.as_deref(), Some("nonsense"));
-    assert_eq!(t.header().optional_string("TDISP1"), Some("nonsense"));
+    assert_eq!(
+        t.header().optional_string("TDISP1").as_deref(),
+        Some("nonsense")
+    );
     let col = t.column_by_name("ID").unwrap();
     assert!(matches!(t.cell_value(0, col).unwrap(), BinValue::Int(_)));
 }

@@ -144,11 +144,19 @@ impl FitsUpdater {
         // greatest (data_offset + data_size) we will ever poke.
         for (i, m) in images.iter().enumerate() {
             if let Some(meta) = m {
-                let elems: u64 = meta
-                    .axes
-                    .iter()
-                    .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
-                    .ok_or_else(|| FitsError::Data(format!("HDU {i} pixel count overflows u64")))?;
+                // Sec.4.4.1.1: `NAXIS = 0` means the HDU carries no data
+                // array at all. Folding an empty axis list would yield
+                // the empty product, 1, and claim a phantom pixel.
+                let elems: u64 = if meta.axes.is_empty() {
+                    0
+                } else {
+                    meta.axes
+                        .iter()
+                        .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
+                        .ok_or_else(|| {
+                            FitsError::Data(format!("HDU {i} pixel count overflows u64"))
+                        })?
+                };
                 let bytes = elems
                     .checked_mul(meta.bitpix.byte_size() as u64)
                     .and_then(|b| meta.data_offset.checked_add(b))

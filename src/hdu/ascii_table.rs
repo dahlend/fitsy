@@ -269,7 +269,7 @@ impl<'a> AsciiTableHdu<'a> {
             let key_form = format!("TFORM{i}");
             let key_bcol = format!("TBCOL{i}");
             let format =
-                AsciiFormat::parse(header.optional_string(&key_form).ok_or_else(|| {
+                AsciiFormat::parse(&header.optional_string(&key_form).ok_or_else(|| {
                     FitsError::MissingMandatory {
                         keyword: key_form.clone(),
                     }
@@ -302,9 +302,7 @@ impl<'a> AsciiTableHdu<'a> {
             let tnull = if matches!(format, AsciiFormat::A(_)) {
                 None
             } else {
-                header
-                    .optional_string(&format!("TNULL{i}"))
-                    .map(String::from)
+                header.optional_string(&format!("TNULL{i}"))
             };
             let tdisp = header
                 .optional_string(&format!("TDISP{i}"))

@@ -52,8 +52,9 @@ use flate2::read::GzDecoder;
 use crate::data::encoding::Bitpix;
 use crate::error::{FitsError, Result};
 use crate::hdu::bintable::{BinColumn, BinFieldKind, BinTableHdu, BinValue};
+use crate::header::Header;
+use crate::header::card::is_indexed;
 use crate::header::value::Value;
-use crate::header::{CardKind, CommentaryKind, Header};
 
 pub use self::quantize::DitherMethod;
 use self::quantize::NULL_VALUE;
@@ -1155,21 +1156,19 @@ fn gather_tile(
 
 // -- Synthetic image header ----------------------------------------
 
-/// Indexed table-structure keywords owned by the BINTABLE layer.
+/// Indexed table keywords the compressed `BINTABLE` reserves for its
+/// own columns, so an image card of the same name cannot be carried.
+///
+/// This is the set cfitsio and astropy reserve, the table-WCS forms
+/// included, so a header compressed by any of the three loses the same
+/// cards and no others.
 const T_PREFIXES: &[&str] = &[
-    "TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP", "TBCOL",
+    "TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP", "TBCOL", "TCTYP",
+    "TCUNI", "TCRPX", "TCRVL", "TCDLT", "TRPOS",
 ];
 
 /// Indexed compression keywords reserved by Sec.10.2.
 const Z_INDEXED: &[&str] = &["ZNAME", "ZVAL", "ZTILE", "ZNAXIS"];
-
-/// True when `k` is one of `prefixes` followed by one or more digits.
-fn is_indexed(k: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|p| {
-        k.strip_prefix(p)
-            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
-    })
-}
 
 /// Map a compressed-BINTABLE keyword to its synthetic-IMAGE form, or
 /// `None` to drop it.
@@ -1182,16 +1181,15 @@ fn z_to_image_keyword(k: &str) -> Option<String> {
     // Checksums cover the *compressed* bytes; ZHECKSUM/ZDATASUM cover a
     // pre-compression image that lossy tiles need not reproduce. Neither
     // survives -- callers recompute (`FitsWriter::with_checksums`).
-    let drop = [
-        "ZIMAGE", "ZCMPTYPE", "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSCALE", "ZZERO", "ZBLANK",
-        "ZBITPIX", "ZNAXIS", "ZSIMPLE", "ZTENSION", "ZEXTEND", "ZBLOCKED", "ZPCOUNT", "ZGCOUNT",
-        "ZHECKSUM", "ZDATASUM", "XTENSION", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "PCOUNT",
-        "GCOUNT", "TFIELDS", "EXTEND", "THEAP", "CHECKSUM", "DATASUM",
-    ];
-    if drop.contains(&k) {
+    // The table's own structure and its checksums; the synthetic image
+    // header re-emits what it needs from validated values.
+    if crate::header::is_writer_owned_keyword(k) {
         return None;
     }
-    if is_indexed(k, Z_INDEXED) || is_indexed(k, T_PREFIXES) {
+    // The same reserved set the write side applies, so the two
+    // directions cannot come to disagree about what the convention
+    // owns.
+    if is_reserved_by_compression(k) {
         return None;
     }
     Some(k.to_string())
@@ -1215,18 +1213,55 @@ fn image_to_z_keyword(k: &str) -> Option<&str> {
         "BLANK" => return Some("ZBLANK"),
         _ => {}
     }
-    let drop = [
-        "BITPIX", "NAXIS", "CHECKSUM", "DATASUM", "TFIELDS", "THEAP", "ZIMAGE", "ZCMPTYPE",
-        "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSCALE", "ZZERO", "ZBLANK", "ZBITPIX", "ZNAXIS",
-        "ZSIMPLE", "ZTENSION", "ZEXTEND", "ZBLOCKED", "ZPCOUNT", "ZGCOUNT", "ZHECKSUM", "ZDATASUM",
-    ];
-    if drop.contains(&k) {
+    // The image's own structure and its checksums; `build_zimage_header`
+    // re-emits the structural names in their `Z` forms above, and the
+    // writer recomputes the checksums over the compressed bytes.
+    if crate::header::is_writer_owned_keyword(k) {
         return None;
     }
-    if is_indexed(k, &["NAXIS"]) || is_indexed(k, Z_INDEXED) || is_indexed(k, T_PREFIXES) {
+    if is_reserved_by_compression(k) {
         return None;
     }
     Some(k)
+}
+
+/// True when the tiled-image convention reserves `k` for the
+/// compressed `BINTABLE` itself, so an image card of that name cannot
+/// be carried into it.
+///
+/// This is the same set cfitsio and astropy reserve. A card it names
+/// is dropped by all three, which is what
+/// [`reserved_keywords`] reports so a caller can be told.
+#[must_use]
+pub fn is_reserved_by_compression(k: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "TFIELDS", "THEAP", "ZIMAGE", "ZCMPTYPE", "ZQUANTIZ", "ZDITHER0", "ZMASKCMP", "ZSCALE",
+        "ZZERO", "ZBLANK", "ZBITPIX", "ZNAXIS", "ZSIMPLE", "ZTENSION", "ZEXTEND", "ZBLOCKED",
+        "ZPCOUNT", "ZGCOUNT", "ZHECKSUM", "ZDATASUM",
+    ];
+    RESERVED.contains(&k) || is_indexed(k, Z_INDEXED) || is_indexed(k, T_PREFIXES)
+}
+
+/// The cards of `header` that compressing it would not carry.
+///
+/// The tiled-image convention gives the compressed `BINTABLE` these
+/// keywords for its own use, so an image card of the same name has
+/// nowhere to go. cfitsio refuses such a header outright and astropy
+/// drops the card with a warning; fitsy drops it, and this is what
+/// lets a caller say so.
+///
+/// Structural cards are not listed: they are not lost but rewritten,
+/// `BITPIX` as `ZBITPIX` and so on.
+#[must_use]
+pub fn reserved_keywords(header: &Header) -> Vec<String> {
+    let mut out: Vec<String> = header
+        .cards()
+        .filter(|c| !c.is_commentary())
+        .map(|c| c.keyword())
+        .filter(|k| is_reserved_by_compression(k))
+        .collect();
+    out.dedup();
+    out
 }
 
 fn synthesize_image_header(bt: &Header) -> Result<Header> {
@@ -1263,54 +1298,39 @@ fn synthesize_image_header(bt: &Header) -> Result<Header> {
         out.push("BLANK", Value::Integer(blank), None)?;
     }
 
-    // Pass through every other Z* / non-Z keyword, mapped to its image
-    // form. Skip anything we already emitted above.
-    let already_emitted = |kw: &str| -> bool {
-        kw == "XTENSION"
-            || kw == "BITPIX"
-            || kw == "NAXIS"
-            || kw == "PCOUNT"
-            || kw == "GCOUNT"
-            || kw == "BLANK"
-            || (kw.starts_with("NAXIS") && kw[5..].chars().all(|c| c.is_ascii_digit()))
-    };
-    for entry in bt.entries() {
-        // Commentary cards copy verbatim, so COMMENT and HISTORY
+    // Map every other Z* and non-Z keyword to its image form. Skip
+    // only the names emitted above.
+    //
+    // The test uses that record, not the contents of `out`. A repeated
+    // source keyword is legal, and its second card is not in the
+    // record, so this keeps it.
+    let emitted: std::collections::HashSet<String> = out.cards().map(|c| c.keyword()).collect();
+    for entry in bt.cards() {
+        // A commentary card moves whole. COMMENT and HISTORY
         // survive a compression round trip.
-        if matches!(entry.kind, CardKind::Commentary) {
-            if let Some(text) = entry.commentary.as_deref() {
-                out.push_commentary(commentary_kind(&entry.keyword), text);
-            }
+        if entry.is_commentary() {
+            out.splice(&entry);
             continue;
         }
-        let Some(mapped) = z_to_image_keyword(&entry.keyword) else {
+        let keyword = entry.keyword();
+        let Some(mapped) = z_to_image_keyword(&keyword) else {
             continue;
         };
-        if already_emitted(&mapped) {
+        if emitted.contains(&mapped) {
             continue;
         }
-        if let Some(v) = entry.value.clone() {
-            // Per-keyword failures aren't fatal -- silently drop and
-            // continue rather than abort the whole header. Non-finite
-            // reals and oversized strings (which would need CONTINUE
-            // and aren't carried by ZIMAGE conventions) are skipped
-            // by the builder via Err.
-            if matches!(v, Value::Real(r) if !r.is_finite()) {
-                continue;
-            }
-            let _ = out.push(mapped, v, entry.comment.as_deref());
+        if mapped == keyword {
+            // The name does not change, so the card moves whole and
+            // is not re-encoded.
+            out.splice(&entry);
+        } else if let Some(v) = entry.value() {
+            // The name changes, so the card is re-encoded. A value
+            // the header cannot hold returns an error here. It is not
+            // dropped.
+            out.push(mapped, v, entry.comment().as_deref())?;
         }
     }
     Ok(out)
-}
-
-/// The [`CommentaryKind`] for a commentary card's keyword field.
-fn commentary_kind(keyword: &str) -> CommentaryKind {
-    match keyword {
-        "COMMENT" => CommentaryKind::Comment,
-        "HISTORY" => CommentaryKind::History,
-        _ => CommentaryKind::Blank,
-    }
 }
 
 /// Tile-compress an image HDU into a `(Header, data)` pair describing
@@ -1682,10 +1702,41 @@ fn build_zimage_header(
         Value::String(opts.codec.zcmptype().into()),
         Some(cmp_comment),
     )?;
+    // Sec.10.2 keeps the original header's structural cards in `Z`
+    // form, and a reader rebuilds that header by walking them in the
+    // order it finds them. So they go in the order their image
+    // counterparts had: `SIMPLE` or `XTENSION` first, then `BITPIX`,
+    // `NAXIS`, `NAXISn`, then the rest. Emitting `ZSIMPLE` after
+    // `ZBITPIX` rebuilds a header starting with `BITPIX`, which
+    // cfitsio's `funpack` rejects as not a header at all.
+    if matches!(src.first("SIMPLE"), Some(Value::Logical(true))) {
+        h.push(
+            "ZSIMPLE",
+            Value::Logical(true),
+            Some("conforms to FITS standard"),
+        )?;
+    } else if let Some(Value::String(kind)) = src.first("XTENSION") {
+        h.push(
+            "ZTENSION",
+            Value::String(kind),
+            Some("original extension type"),
+        )?;
+    }
     h.push("ZBITPIX", Value::Integer(bitpix), None)?;
     h.push("ZNAXIS", Value::Integer(axes.len() as i64), None)?;
     for (i, &n) in axes.iter().enumerate() {
         h.push(format!("ZNAXIS{}", i + 1), Value::Integer(n as i64), None)?;
+    }
+    // `EXTEND`, `PCOUNT` and `GCOUNT` follow `NAXISn` in the header
+    // this came from, so their `Z` forms follow `ZNAXISn` here.
+    if let Some(Value::Logical(extend)) = src.first("EXTEND") {
+        h.push("ZEXTEND", Value::Logical(extend), None)?;
+    }
+    if let Some(Value::Integer(pcount)) = src.first("PCOUNT") {
+        h.push("ZPCOUNT", Value::Integer(pcount), None)?;
+    }
+    if let Some(Value::Integer(gcount)) = src.first("GCOUNT") {
+        h.push("ZGCOUNT", Value::Integer(gcount), None)?;
     }
     for (i, &t) in tile.iter().enumerate() {
         h.push(format!("ZTILE{}", i + 1), Value::Integer(t as i64), None)?;
@@ -1737,30 +1788,49 @@ fn build_zimage_header(
             Some("no quantization (raw IEEE bytes)"),
         )?;
     }
-    if let Some(name) = &opts.extname {
-        h.push("EXTNAME", Value::String(name.clone()), None)?;
-    }
+    // The convention names this extension `COMPRESSED_IMAGE`, which is
+    // what cfitsio and astropy write and what a reader looks for. A
+    // name the caller chose wins, and so does one the source image
+    // carried: that is the image's own name, not ours to replace.
+    let extname = opts.extname.clone().or_else(|| match src.first("EXTNAME") {
+        Some(Value::String(name)) => Some(name),
+        _ => None,
+    });
+    h.push(
+        "EXTNAME",
+        Value::String(extname.unwrap_or_else(|| "COMPRESSED_IMAGE".to_string())),
+        Some("name of this binary table extension"),
+    )?;
     // Carry every other card of the source image, per Sec.10.2.
-    for entry in src.entries() {
-        if matches!(entry.kind, CardKind::Commentary) {
-            if let Some(text) = entry.commentary.as_deref() {
-                h.push_commentary(commentary_kind(&entry.keyword), text);
-            }
+    //
+    // Record the keywords this function emitted above. A source card
+    // that maps to one of them is skipped: `opts.extname` wins over a
+    // source `EXTNAME`, and the computed `ZBLANK` wins over the one a
+    // source `BLANK` maps to.
+    //
+    // The test uses this record, not the contents of `h`. A repeated
+    // source keyword is legal, and its second card is not in the
+    // record, so this keeps it.
+    let emitted: std::collections::HashSet<String> = h.cards().map(|c| c.keyword()).collect();
+    for entry in src.cards() {
+        if entry.is_commentary() {
+            h.splice(&entry);
             continue;
         }
-        let Some(mapped) = image_to_z_keyword(&entry.keyword) else {
+        let keyword = entry.keyword();
+        let Some(mapped) = image_to_z_keyword(&keyword) else {
             continue;
         };
-        // First writer wins: the structural cards above, and
-        // `opts.extname` over a source EXTNAME card.
-        if h.first(mapped).is_some() {
+        if emitted.contains(mapped) {
             continue;
         }
-        if let Some(v) = entry.value.clone() {
-            // A per-keyword failure is not fatal. The builder drops a
-            // leniently parsed source card whose keyword it rejects,
-            // rather than aborting the whole header.
-            let _ = h.push(mapped, v, entry.comment.as_deref());
+        if mapped == keyword {
+            // The name does not change, so the card moves whole.
+            h.splice(&entry);
+        } else if let Some(v) = entry.value() {
+            // The name changes to its `Z` form, so the original
+            // bytes no longer describe the card. Re-encode it.
+            h.push(mapped, v, entry.comment().as_deref())?;
         }
     }
     Ok(h)

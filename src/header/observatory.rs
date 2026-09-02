@@ -176,7 +176,7 @@ impl Header {
     /// Orbit ephemeris file (`OBSORBIT`): URI, URL, or name.
     #[must_use]
     pub fn obs_orbit(&self) -> Option<String> {
-        self.optional_string("OBSORBIT").map(str::to_owned)
+        self.optional_string("OBSORBIT")
     }
 }
 

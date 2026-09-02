@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release rebuilds the header around the bytes it holds. A card is
+read through a view rather than a parsed copy, so a card read and
+written unchanged survives byte-for-byte, and one the header cannot
+write is refused where it is set. It also makes tile-compressed files
+readable by cfitsio.
+
 ### Added
 
 - Tile-compressed writes cover `RICE_1` and `GZIP_2` beside `GZIP_1`,
@@ -16,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fitsy fpack`: tile-compress a file, with `-c` (codec), `-t` (tile
   shape), `-q` (quantize level) and `-C` (skip checksums).
 - `CompressedImageHdu::was_primary`, reporting `ZSIMPLE`.
+- `CardView`, a read-only view of one card, and `Header::cards`,
+  `card`, `all` and `first_card` to reach one.
+- `Header::splice`, copying a card whole, and `Header::normalize`,
+  rewriting only the cards the Standard rejects.
+- `reserved_keywords` and `is_reserved_by_compression`: the cards
+  compressing a header would not carry.
+- `CommentaryKind::from_keyword` and `header::is_writer_owned_keyword`.
 
 ### Fixed
 
@@ -27,14 +40,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure leaves the destination untouched.
 - `fitsy funpack` keeps an empty primary HDU that carries a card of
   its own.
+- Tile-compressed files are readable by cfitsio's `funpack`: the `Z`
+  structural cards now keep the order the image header had.
+- Compression keeps duplicated keywords, and a copied header keeps its
+  commentary and its structural comments.
+- A comment too long for its card continues onto further cards instead
+  of disappearing.
+- Editing a header no longer costs more the larger the header is.
+- `Header::remove` takes value cards only, so `del header["COMMENT"]`
+  no longer wipes every comment.
+- `FitsUpdater` opens a file whose only HDU is a `NAXIS = 0` header.
 
 ### Changed
 
 - Breaking: `compress_image_to_hdu` takes `(header, data, opts)`.
+- Breaking: a `Header` stores its cards as bytes. `HeaderEntry`,
+  `entries`, `Card` and `block_count` are gone; see `CardView`.
+- Breaking: `Header::to_bytes` is infallible, `push_commentary`
+  returns `Result`, and the value accessors yield owned values.
+- Reading alters nothing: a card the Standard rejects is written back
+  as it was read, and `Header::normalize` repairs it on request.
+- Compression drops the keywords the tiled-image convention reserves,
+  matching cfitsio and astropy, and warns for each.
 - Compressing an image carries its header through: structural cards as
   `Z` forms, every other card verbatim.
 - A decompressed image header is an `IMAGE` extension, the slot a
   compressed image occupies.
+- A stale `CHECKSUM` or `DATASUM` is recomputed rather than copied.
+- Long commentary text becomes several cards, as reading it back
+  produces.
 
 ## [v0.3.0]
 

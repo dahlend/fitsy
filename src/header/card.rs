@@ -15,10 +15,10 @@ use crate::error::{FitsError, Result};
 pub const CARD_SIZE: usize = 80;
 
 /// Length of the keyword name field (bytes 1-8 of a card).
-pub const KEYWORD_LEN: usize = 8;
+pub(crate) const KEYWORD_LEN: usize = 8;
 
 /// Length of the value indicator (`"= "`, bytes 9-10 of a value card).
-pub const VALUE_INDICATOR_LEN: usize = 2;
+pub(crate) const VALUE_INDICATOR_LEN: usize = 2;
 
 /// The kind of a card, decided from its keyword field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub enum CardKind {
 
 /// A single 80-byte card.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Card {
+pub(crate) struct Card {
     /// Zero to eight characters of upper-case ASCII, digits, `-` or
     /// `_`. This is empty for a blank keyword.
     pub keyword: String,
@@ -48,20 +48,6 @@ pub struct Card {
 }
 
 impl Card {
-    /// Parse a single 80-byte card in strict mode.
-    ///
-    /// The `bytes` argument must be exactly 80 bytes long. The
-    /// `offset` argument is the byte offset of the card within the
-    /// file, and it appears in an error message.
-    ///
-    /// # Errors
-    ///
-    /// The conditions of [`Card::parse_with`] with `lenient` set to
-    /// `false`.
-    pub fn parse(bytes: &[u8], offset: u64) -> Result<Self> {
-        Self::parse_with(bytes, offset, false)
-    }
-
     /// Parse a single 80-byte card.
     ///
     /// The `bytes` argument must be exactly 80 bytes long. The
@@ -81,7 +67,7 @@ impl Card {
     /// [`FitsError::Card`] when `bytes` is not exactly 80 bytes long,
     /// or when `lenient` is `false` and the keyword field holds a byte
     /// outside upper-case ASCII, digits, `-`, `_` and space.
-    pub fn parse_with(bytes: &[u8], offset: u64, lenient: bool) -> Result<Self> {
+    pub(crate) fn parse_with(bytes: &[u8], offset: u64, lenient: bool) -> Result<Self> {
         if bytes.len() != CARD_SIZE {
             return Err(FitsError::Card {
                 offset,
@@ -99,13 +85,7 @@ impl Card {
         // and the value field. What survives is a stray byte in a
         // free-text comment, which carries no structural meaning and
         // should not sink an otherwise-valid file.
-        let mut card = [0_u8; CARD_SIZE];
-        card.copy_from_slice(bytes);
-        for b in &mut card {
-            if *b == 0 || (lenient && !is_ascii_text(*b)) {
-                *b = b' ';
-            }
-        }
+        let card = sanitized(bytes, lenient);
         let bytes: &[u8] = &card;
 
         let kw_field = &bytes[..KEYWORD_LEN];
@@ -145,20 +125,7 @@ impl Card {
         // and bytes 9 through 80 are its text. So the test below must
         // not reach `COMMENT`, `HISTORY` or a blank keyword; for those
         // the `= ` is part of the commentary.
-        let is_commentary_keyword = matches!(keyword.as_str(), "COMMENT" | "HISTORY" | "");
-        let has_value_indicator =
-            !is_commentary_keyword && bytes[KEYWORD_LEN] == b'=' && bytes[KEYWORD_LEN + 1] == b' ';
-
-        let kind = if has_value_indicator {
-            CardKind::Value
-        } else {
-            // Commentary or CONTINUE.
-            if keyword == "CONTINUE" {
-                CardKind::Continue
-            } else {
-                CardKind::Commentary
-            }
-        };
+        let kind = classify(bytes, &keyword);
 
         let body_start = if matches!(kind, CardKind::Value) {
             KEYWORD_LEN + VALUE_INDICATOR_LEN
@@ -175,7 +142,7 @@ impl Card {
 
     /// True if this is the `END` card.
     #[must_use]
-    pub fn is_end(&self) -> bool {
+    pub(crate) fn is_end(&self) -> bool {
         matches!(self.kind, CardKind::End)
     }
 }
@@ -200,27 +167,187 @@ fn parse_keyword_field(field: &[u8], offset: u64, lenient: bool) -> Result<Strin
     // Trailing spaces only -- interior spaces are not permitted.
     let mut out = String::with_capacity(name.len());
     for (i, &b) in name.iter().enumerate() {
-        if is_keyword_char(b) {
-            out.push(b as char);
-        } else if lenient && b.is_ascii_lowercase() {
-            // Fold a lower-case keyword (e.g. `exptime`) to upper case;
-            // this is the most common real-world keyword defect and the
-            // fold preserves the intended keyword semantics.
-            out.push(b.to_ascii_uppercase() as char);
-        } else if lenient {
-            // Any other stray byte (an interior space left by an earlier
-            // non-ASCII sanitization, punctuation, ...) becomes `_` so the
-            // card still carries a usable keyword instead of aborting the
-            // whole header.
-            out.push('_');
-        } else {
+        let Some(mapped) = keyword_byte(b, lenient) else {
             return Err(FitsError::Card {
                 offset: offset + i as u64,
                 msg: format!("invalid character 0x{b:02X} in keyword name"),
             });
-        }
+        };
+        out.push(mapped as char);
     }
     Ok(out)
+}
+
+/// One byte of a keyword name, as it appears in the parsed keyword,
+/// or `None` when strict mode rejects it.
+///
+/// This is the single rule the full parse and the cheap comparison in
+/// [`keyword_matches`] both follow, so the two can never disagree
+/// about what a card is called.
+#[inline]
+fn keyword_byte(b: u8, lenient: bool) -> Option<u8> {
+    if is_keyword_char(b) {
+        Some(b)
+    } else if lenient && b.is_ascii_lowercase() {
+        // Fold a lower-case keyword (e.g. `exptime`) to upper case;
+        // this is the most common real-world keyword defect and the
+        // fold preserves the intended keyword semantics.
+        Some(b.to_ascii_uppercase())
+    } else if lenient {
+        // Any other stray byte (an interior space left by an earlier
+        // non-ASCII sanitization, punctuation, ...) becomes `_` so the
+        // card still carries a usable keyword instead of aborting the
+        // whole header.
+        Some(b'_')
+    } else {
+        None
+    }
+}
+
+/// Rewrite a card's bytes as the parser reads them: NUL becomes a
+/// space always, and in lenient mode so does every non-ASCII byte.
+///
+/// Sec.3.2 makes headers ASCII 0x20..=0x7E, so NUL is never legal --
+/// but writers leak it constantly, from fixed-width buffers left
+/// zero-initialized.
+fn sanitized(bytes: &[u8], lenient: bool) -> [u8; CARD_SIZE] {
+    let mut card = [b' '; CARD_SIZE];
+    let n = bytes.len().min(CARD_SIZE);
+    card[..n].copy_from_slice(&bytes[..n]);
+    for b in &mut card {
+        if *b == 0 || (lenient && !is_ascii_text(*b)) {
+            *b = b' ';
+        }
+    }
+    card
+}
+
+/// Which shape a card has, given its sanitized bytes and the keyword
+/// already read from them. `END` and `HIERARCH` are decided before
+/// this point.
+fn classify(card: &[u8], keyword: &str) -> CardKind {
+    // Sec.4.1.2.2: `= ` in bytes 9 and 10 marks a value field,
+    // "unless it is one of the commentary keywords ... which by
+    // definition have no value". Sec.4.4.2 repeats the rule: a
+    // commentary keyword "shall have no associated value even if
+    // the value indicator characters appear in bytes 9 and 10",
+    // and bytes 9 through 80 are its text. So the test below must
+    // not reach `COMMENT`, `HISTORY` or a blank keyword; for those
+    // the `= ` is part of the commentary.
+    let is_commentary_keyword = matches!(keyword, "COMMENT" | "HISTORY" | "");
+    if !is_commentary_keyword && card[KEYWORD_LEN] == b'=' && card[KEYWORD_LEN + 1] == b' ' {
+        CardKind::Value
+    } else if keyword == "CONTINUE" {
+        CardKind::Continue
+    } else {
+        CardKind::Commentary
+    }
+}
+
+/// Read a keyword of eight characters or fewer into `buf`, returning
+/// its length. `None` when the field holds a byte strict mode rejects.
+fn short_keyword(card: &[u8], lenient: bool, buf: &mut [u8; KEYWORD_LEN]) -> Option<usize> {
+    let field = &card[..KEYWORD_LEN];
+    let end = field.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+    for (i, &b) in field[..end].iter().enumerate() {
+        buf[i] = keyword_byte(b, lenient)?;
+    }
+    Some(end)
+}
+
+/// The shape of the card at `bytes`, without copying its body.
+///
+/// Answers from the first ten bytes what [`Card::parse_with`] answers
+/// from all eighty, for a reader that only needs to know what kind of
+/// card this is. A `HIERARCH` name reaches past those ten bytes, so
+/// that one case defers to the full parse.
+pub(crate) fn kind_of(bytes: &[u8], lenient: bool) -> CardKind {
+    let card = sanitized(bytes, lenient);
+    let mut buf = [0_u8; KEYWORD_LEN];
+    let Some(n) = short_keyword(&card, lenient, &mut buf) else {
+        return full_kind(bytes, lenient);
+    };
+    let Ok(keyword) = std::str::from_utf8(&buf[..n]) else {
+        return full_kind(bytes, lenient);
+    };
+    if keyword == "END" {
+        // Sec.4.4.1.2: bytes 9-80 of an END card are spaces. A card
+        // that breaks that fails the full parse, in either mode.
+        return if card[KEYWORD_LEN..].iter().all(|&b| b == b' ') {
+            CardKind::End
+        } else {
+            full_kind(bytes, lenient)
+        };
+    }
+    if keyword == "HIERARCH" {
+        return full_kind(bytes, lenient);
+    }
+    classify(&card, keyword)
+}
+
+/// The kind the full parse reports, or `Commentary` when it fails --
+/// which is how a reader treats a card it cannot otherwise describe.
+fn full_kind(bytes: &[u8], lenient: bool) -> CardKind {
+    Card::parse_with(bytes, 0, lenient).map_or(CardKind::Commentary, |c| c.kind)
+}
+
+/// The name of the card at `bytes`.
+///
+/// Reads the keyword field in place and copies out only the name, so
+/// this does not touch the card's body. A `HIERARCH` name reaches past
+/// that field and defers to the full parse.
+pub(crate) fn keyword_of(bytes: &[u8], lenient: bool) -> String {
+    let card = sanitized(bytes, lenient);
+    let mut buf = [0_u8; KEYWORD_LEN];
+    let Some(n) = short_keyword(&card, lenient, &mut buf) else {
+        return full_keyword(bytes, lenient);
+    };
+    if &buf[..n] == b"HIERARCH" {
+        return full_keyword(bytes, lenient);
+    }
+    // `short_keyword` emits only keyword characters, which are ASCII.
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// The name the full parse reports, or the empty name when it fails --
+/// which reads as a blank-keyword commentary card, matching
+/// [`kind_of`].
+fn full_keyword(bytes: &[u8], lenient: bool) -> String {
+    Card::parse_with(bytes, 0, lenient).map_or_else(|_| String::new(), |c| c.keyword)
+}
+
+/// True when `k` is one of `prefixes` followed by one or more digits,
+/// such as `NAXIS3` for `["NAXIS"]`.
+///
+/// FITS names a whole family of cards this way, and every place that
+/// has to recognise one asks here rather than slicing the string
+/// itself.
+#[must_use]
+pub(crate) fn is_indexed(k: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| {
+        k.strip_prefix(p)
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// True when the card at `bytes` is named `keyword`.
+///
+/// Compares the keyword field in place, so asking after a card's name
+/// costs no allocation. A `HIERARCH` name lives past that field and
+/// defers to the full parse.
+pub(crate) fn keyword_matches(bytes: &[u8], lenient: bool, keyword: &str) -> bool {
+    if keyword.len() > KEYWORD_LEN || keyword.starts_with("HIERARCH") {
+        return Card::parse_with(bytes, 0, lenient).is_ok_and(|c| c.keyword == keyword);
+    }
+    let card = sanitized(bytes, lenient);
+    let mut buf = [0_u8; KEYWORD_LEN];
+    let Some(n) = short_keyword(&card, lenient, &mut buf) else {
+        return false;
+    };
+    if &buf[..n] == b"HIERARCH" {
+        return Card::parse_with(bytes, 0, lenient).is_ok_and(|c| c.keyword == keyword);
+    }
+    buf[..n] == *keyword.as_bytes()
 }
 
 #[inline]
@@ -305,68 +432,6 @@ fn is_hierarch_char(b: u8) -> bool {
     matches!(b, 0x21..=0x7E) && b != b'='
 }
 
-/// Encode a card from its parts into 80 bytes, padded with spaces.
-///
-/// A [`CardKind::Value`] card places `= ` in columns 9 and 10, so its
-/// body starts at column 11. Every other kind starts its body at
-/// column 9.
-///
-/// # Errors
-///
-/// [`FitsError::Card`] when `keyword` exceeds 8 characters, when it
-/// holds a character outside upper-case ASCII, digits, `-`, `_` and
-/// space, or when `body` does not fit in the columns that remain.
-pub fn encode(keyword: &str, kind: &CardKind, body: &[u8]) -> Result<[u8; CARD_SIZE]> {
-    if keyword.len() > KEYWORD_LEN {
-        return Err(FitsError::Card {
-            offset: 0,
-            msg: format!("keyword `{keyword}` exceeds {KEYWORD_LEN} chars"),
-        });
-    }
-    for (i, b) in keyword.bytes().enumerate() {
-        // Allow ASCII space inside non-empty keywords for the
-        // HIERARCH form (`HIERARCH name1 name2 ...`); standard short
-        // keywords don't contain spaces but the validator below
-        // tolerates them so HIERARCH cards reuse this path.
-        if !is_keyword_char(b) && b != b' ' {
-            return Err(FitsError::Card {
-                offset: i as u64,
-                msg: format!("invalid keyword character 0x{b:02X}"),
-            });
-        }
-    }
-    let mut out = [b' '; CARD_SIZE];
-    out[..keyword.len()].copy_from_slice(keyword.as_bytes());
-    let body_start = match kind {
-        CardKind::Value => {
-            out[KEYWORD_LEN] = b'=';
-            out[KEYWORD_LEN + 1] = b' ';
-            KEYWORD_LEN + VALUE_INDICATOR_LEN
-        }
-        CardKind::End | CardKind::Commentary | CardKind::Continue => KEYWORD_LEN,
-    };
-    if body.len() > CARD_SIZE - body_start {
-        return Err(FitsError::Card {
-            offset: 0,
-            msg: format!(
-                "card body for `{keyword}` is {} bytes, max {}",
-                body.len(),
-                CARD_SIZE - body_start
-            ),
-        });
-    }
-    for &b in body {
-        if !is_ascii_text(b) {
-            return Err(FitsError::Card {
-                offset: 0,
-                msg: format!("non-ASCII-text byte 0x{b:02X} in card body"),
-            });
-        }
-    }
-    out[body_start..body_start + body.len()].copy_from_slice(body);
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,7 +447,7 @@ mod tests {
     #[test]
     fn parse_simple_value_card() {
         let raw = make_card("BITPIX  =                   16");
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "BITPIX");
         assert_eq!(c.kind, CardKind::Value);
     }
@@ -390,7 +455,7 @@ mod tests {
     #[test]
     fn parse_end_card() {
         let raw = make_card("END");
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert!(c.is_end());
     }
 
@@ -398,7 +463,7 @@ mod tests {
     fn end_with_garbage_rejected() {
         let mut raw = make_card("END");
         raw[10] = b'X';
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
     }
 
     #[test]
@@ -408,7 +473,7 @@ mod tests {
         for b in &mut raw[3..] {
             *b = 0;
         }
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert!(c.is_end());
     }
 
@@ -419,7 +484,7 @@ mod tests {
         for b in &mut raw[15..] {
             *b = 0;
         }
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "OBJECT");
         assert_eq!(c.kind, CardKind::Value);
     }
@@ -428,7 +493,7 @@ mod tests {
     fn all_nul_card_is_blank_commentary() {
         // A whole zero card (post-END fill) normalizes to a blank card.
         let raw = [0_u8; CARD_SIZE];
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "");
         assert_eq!(c.kind, CardKind::Commentary);
     }
@@ -439,7 +504,7 @@ mod tests {
         let mut raw = make_card("OBJECT  = 'M31'");
         raw[6] = 0;
         raw[7] = 0;
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "OBJECT");
         assert_eq!(c.kind, CardKind::Value);
     }
@@ -452,7 +517,7 @@ mod tests {
         for b in &mut raw[13..18] {
             *b = 0;
         }
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "OBJECT");
         assert_eq!(c.kind, CardKind::Value);
     }
@@ -463,13 +528,13 @@ mod tests {
         // a non-FITS / binary file is caught rather than silently parsed.
         let mut raw = make_card("OBJECT  = 'M31'");
         raw[2] = 0xFF;
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
     }
 
     #[test]
     fn comment_card() {
         let raw = make_card("COMMENT this is a comment");
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "COMMENT");
         assert_eq!(c.kind, CardKind::Commentary);
     }
@@ -477,7 +542,7 @@ mod tests {
     #[test]
     fn hierarch_accepted() {
         let raw = make_card("HIERARCH ESO TEL ALT = 1.0");
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "HIERARCH ESO TEL ALT");
         assert_eq!(c.kind, CardKind::Value);
     }
@@ -485,7 +550,7 @@ mod tests {
     #[test]
     fn hierarch_collapses_runs_of_spaces() {
         let raw = make_card("HIERARCH ESO   TEL  ALT  = 1.0");
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "HIERARCH ESO TEL ALT");
     }
 
@@ -514,7 +579,7 @@ mod tests {
                 "= blank keyword shaped",
             ),
         ] {
-            let c = Card::parse(&make_card(raw), 0).unwrap();
+            let c = Card::parse_with(&make_card(raw), 0, false).unwrap();
             assert_eq!(c.kind, CardKind::Commentary, "{raw}");
             assert_eq!(c.keyword, keyword, "{raw}");
             let body = String::from_utf8(c.body.clone()).unwrap();
@@ -526,41 +591,34 @@ mod tests {
     /// merely starts like a commentary one.
     #[test]
     fn non_commentary_keyword_keeps_its_value_indicator() {
-        let c = Card::parse(&make_card("HISTORYX=                    1"), 0).unwrap();
+        let c = Card::parse_with(&make_card("HISTORYX=                    1"), 0, false).unwrap();
         assert_eq!(c.kind, CardKind::Value);
     }
 
     #[test]
     fn hierarch_without_value_indicator_rejected() {
         let raw = make_card("HIERARCH ESO TEL ALT 1.0");
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
     }
 
     #[test]
     fn lowercase_keyword_rejected() {
         let raw = make_card("bitpix  =                   16");
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
     }
 
     #[test]
     fn blank_keyword_is_commentary() {
         let raw = make_card("        a free-form comment");
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "");
         assert_eq!(c.kind, CardKind::Commentary);
     }
 
     #[test]
-    fn encode_round_trip() {
-        let raw = encode("BITPIX", &CardKind::Value, b"                  16").unwrap();
-        let c = Card::parse(&raw, 0).unwrap();
-        assert_eq!(c.keyword, "BITPIX");
-    }
-
-    #[test]
     fn wrong_length_rejected() {
         let raw = vec![b' '; 79];
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
     }
 
     #[test]
@@ -572,7 +630,7 @@ mod tests {
         let s = "EXPTIME =                 30.0 / temp in C";
         let mut raw = make_card(s);
         raw[s.rfind('C').unwrap()] = 0xB0; // Latin-1 degree sign in comment
-        let c = Card::parse(&raw, 0).unwrap();
+        let c = Card::parse_with(&raw, 0, false).unwrap();
         assert_eq!(c.keyword, "EXPTIME");
         assert_eq!(c.kind, CardKind::Value);
     }
@@ -581,13 +639,13 @@ mod tests {
     fn non_ascii_in_keyword_field_still_rejected_strict() {
         let mut raw = make_card("OBJECT  = 'M31'");
         raw[2] = 0xB0; // inside the keyword name
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
     }
 
     #[test]
     fn lowercase_keyword_folded_when_lenient() {
         let raw = make_card("exptime =                 30.0");
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
         let c = Card::parse_with(&raw, 0, true).unwrap();
         assert_eq!(c.keyword, "EXPTIME");
         assert_eq!(c.kind, CardKind::Value);
@@ -596,7 +654,7 @@ mod tests {
     #[test]
     fn interior_space_keyword_becomes_underscore_when_lenient() {
         let raw = make_card("CD1 1   =                  1.0");
-        assert!(Card::parse(&raw, 0).is_err());
+        assert!(Card::parse_with(&raw, 0, false).is_err());
         let c = Card::parse_with(&raw, 0, true).unwrap();
         assert_eq!(c.keyword, "CD1_1");
     }

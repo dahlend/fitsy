@@ -114,11 +114,11 @@ impl<'a> RandomGroupsHdu<'a> {
                 .ok_or_else(|| FitsError::Data("NAXISn product overflowed u64".into()))?;
         }
         let pcount = match header.first("PCOUNT") {
-            Some(crate::header::Value::Integer(p)) if *p >= 0 => *p as u64,
+            Some(crate::header::Value::Integer(p)) if p >= 0 => p as u64,
             _ => 0,
         };
         let gcount = match header.first("GCOUNT") {
-            Some(crate::header::Value::Integer(g)) if *g >= 1 => *g as u64,
+            Some(crate::header::Value::Integer(g)) if g >= 1 => g as u64,
             _ => 1,
         };
         let bytes_per_elem = bitpix.byte_size() as u64;

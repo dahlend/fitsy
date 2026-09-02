@@ -18,14 +18,8 @@ use super::wcs::PyWcs;
 /// Extract EXTNAME from a `PyHeader`, returning an empty string if absent.
 fn extname_from_header(h: &PyHeader) -> String {
     h.lock()
-        .entries()
-        .iter()
-        .find(|e| e.keyword == "EXTNAME")
-        .and_then(|e| e.value.as_ref())
-        .and_then(|v| match v {
-            crate::header::Value::String(s) => Some(s.trim().to_string()),
-            _ => None,
-        })
+        .optional_string("EXTNAME")
+        .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
@@ -33,11 +27,11 @@ fn extname_from_header(h: &PyHeader) -> String {
 /// which is the minimal indicator that a WCS is present.  This is a fast
 /// keyword scan -- no full WCS parse -- so repr stays cheap.
 fn header_has_wcs(h: &PyHeader) -> bool {
-    h.lock().entries().iter().any(|e| {
-        e.keyword.starts_with("CTYPE")
+    h.lock().cards().any(|c| {
+        c.keyword().starts_with("CTYPE")
             && matches!(
-                e.value.as_ref(),
-                Some(crate::header::Value::String(s)) if !s.trim().is_empty()
+                c.value(),
+                Some(crate::header::Value::String(ref s)) if !s.trim().is_empty()
             )
     })
 }

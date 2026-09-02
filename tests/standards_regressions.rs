@@ -1,7 +1,7 @@
 //! Regression tests for conformance gaps found by checking the code
 //! against FITS Standard 4.0. Each names the section it enforces.
 
-use fitsy::header::card::CARD_SIZE;
+use fitsy::header::CARD_SIZE;
 use fitsy::{FitsAppender, FitsFile, Hdu, Header, ImageBuilder, Wcs};
 
 /// Sky position of a celestial pixel, as `(lon, lat)`.
@@ -384,9 +384,9 @@ fn commentary_keywords_ignore_a_value_indicator() {
         "COMMENT = also value-shaped",
     ]);
     // Bytes 9 through 80 are the text, so the `= ` belongs to it.
-    let history: Vec<&str> = h.history().collect();
+    let history: Vec<String> = h.history().collect();
     assert_eq!(history, vec!["= looks like a value", "plain entry"]);
-    let comments: Vec<&str> = h.comments().collect();
+    let comments: Vec<String> = h.comments().collect();
     assert_eq!(comments, vec!["= also value-shaped"]);
     // No commentary card leaks into the value namespace.
     assert!(h.first("HISTORY").is_none());
@@ -404,10 +404,10 @@ fn long_commentary_splits_on_the_card_boundary() {
         "BITPIX  =                    8",
         "NAXIS   =                    0",
     ]);
-    h.push_commentary(CommentaryKind::History, &text);
-    let bytes = h.to_bytes().unwrap();
+    h.push_commentary(CommentaryKind::History, &text).unwrap();
+    let bytes = h.to_bytes();
     let (re, _) = Header::parse(&bytes, 0).unwrap();
-    let parts: Vec<&str> = re.history().collect();
+    let parts: Vec<String> = re.history().collect();
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0].len(), 72);
     assert_eq!(parts[1].len(), 72);
@@ -435,7 +435,7 @@ fn commentary_keywords_write_commentary_cards() {
         .unwrap();
 
     // The emitted cards carry no value indicator.
-    let bytes = h.to_bytes().unwrap();
+    let bytes = h.to_bytes();
     let cards: Vec<String> = bytes
         .chunks(80)
         .map(|c| String::from_utf8_lossy(c).trim_end().to_string())

@@ -140,8 +140,8 @@ fn commentary_iteration_on_real_image() {
     let f = FitsFile::open(&path).unwrap();
     let h = f.hdu(0).unwrap();
     let hdr = h.header();
-    let comments: Vec<&str> = hdr.comments().collect();
-    let history: Vec<&str> = hdr.history().collect();
+    let comments: Vec<String> = hdr.comments().collect();
+    let history: Vec<String> = hdr.history().collect();
     assert!(
         comments.len() >= 3,
         "expected >=3 COMMENTs, got {}",

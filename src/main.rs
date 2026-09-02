@@ -21,9 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[cfg(feature = "compression")]
-use fitsy::header::{CardKind, CommentaryKind};
-use fitsy::header::{HeaderEntry, Value};
+use fitsy::header::{CardView, Value};
 use fitsy::wcs::celestial::CelestialFrame;
 #[cfg(feature = "compression")]
 use fitsy::{Codec, FitsWriter, TileOpts, compression::Quantize};
@@ -115,7 +113,7 @@ fn cmd_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let extver = header
             .first("EXTVER")
             .and_then(|v| match v {
-                Value::Integer(n) => Some(*n),
+                Value::Integer(n) => Some(n),
                 _ => None,
             })
             .map(|n| format!(" v{n}"))
@@ -231,12 +229,12 @@ fn format_wcs_summary(wcs: &fitsy::Wcs, suffix: &str) -> Vec<String> {
 /// the data section is never read.
 fn describe_header(h: &Header, index: usize) -> (&'static str, String) {
     let int = |key: &str| match h.first(key) {
-        Some(Value::Integer(n)) => Some(*n),
+        Some(Value::Integer(n)) => Some(n),
         _ => None,
     };
     let axes = |naxis_key: &str, axis_key: &dyn Fn(usize) -> String| -> Vec<i64> {
         let n = match h.first(naxis_key) {
-            Some(Value::Integer(n)) if *n > 0 => *n as usize,
+            Some(Value::Integer(n)) if n > 0 => n as usize,
             _ => 0,
         };
         (1..=n).filter_map(|i| int(&axis_key(i))).collect()
@@ -378,37 +376,37 @@ fn cmd_header(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_header(h: &Header, filter: Option<&str>) {
-    for entry in h.entries() {
+    for card in h.cards() {
         if let Some(f) = filter
-            && !entry.keyword.to_ascii_lowercase().contains(f)
+            && !card.keyword().to_ascii_lowercase().contains(f)
         {
             continue;
         }
-        println!("{}", format_entry(entry));
+        println!("{}", format_entry(&card));
     }
 }
 
-fn format_entry(e: &HeaderEntry) -> String {
-    if let Some(text) = e.commentary.as_deref() {
+fn format_entry(card: &CardView<'_>) -> String {
+    let keyword = card.keyword();
+    if let Some(text) = card.commentary() {
         // COMMENT, HISTORY, blank-keyword commentary cards.
-        let kw = if e.keyword.is_empty() {
+        let kw = if keyword.is_empty() {
             "       "
         } else {
-            &e.keyword
+            keyword.as_str()
         };
         return format!("{kw:<8} {text}");
     }
-    let value = match &e.value {
+    let value = match card.value() {
         None => String::from("(no value)"),
-        Some(v) => display_value(v),
+        Some(v) => display_value(&v),
     };
-    let comment = e
-        .comment
-        .as_deref()
+    let comment = card
+        .comment()
         .filter(|c| !c.is_empty())
         .map(|c| format!(" / {c}"))
         .unwrap_or_default();
-    format!("{:<8}= {}{}", e.keyword, value, comment)
+    format!("{keyword:<8}= {value}{comment}")
 }
 
 fn display_value(v: &Value) -> String {
@@ -671,6 +669,15 @@ fn fpack_into(
         let mut opts = TileOpts::new().codec(resolve_codec(codec, codec_bitpix, i));
         opts.tile = tile.map(<[u64]>::to_vec);
         opts.quantize = hdu_quantize;
+        // The compressed BINTABLE owns these keywords, so a card of
+        // the same name cannot come along. Say so rather than let it
+        // vanish quietly.
+        for keyword in fitsy::reserved_keywords(header) {
+            eprintln!(
+                "fitsy: HDU {i}: keyword `{keyword}` is reserved for use by the \
+                 FITS Tiled Image Convention so will be dropped"
+            );
+        }
         writer.write_hdu_compressed(header, hdu.data_bytes(), &opts)?;
         compressed += 1;
     }
@@ -860,9 +867,9 @@ fn cmd_funpack(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 /// `funpack` keeps the HDU rather than dropping it.
 #[cfg(feature = "compression")]
 fn is_bare_stub(h: &Header) -> bool {
-    h.entries().iter().all(|e| {
+    h.cards().all(|c| {
         matches!(
-            e.keyword.as_str(),
+            c.keyword().as_str(),
             "SIMPLE" | "BITPIX" | "NAXIS" | "EXTEND" | "CHECKSUM" | "DATASUM"
         )
     })
@@ -886,30 +893,13 @@ fn promote_to_primary(h: &Header) -> Result<Header, Box<dyn std::error::Error>> 
         Value::Logical(true),
         Some("FITS dataset may contain extensions"),
     )?;
-    for entry in h.entries() {
-        let kw = entry.keyword.as_str();
-        if matches!(entry.kind, CardKind::Commentary) {
-            if let Some(text) = entry.commentary.as_deref() {
-                let kind = match kw {
-                    "COMMENT" => CommentaryKind::Comment,
-                    "HISTORY" => CommentaryKind::History,
-                    _ => CommentaryKind::Blank,
-                };
-                out.push_commentary(kind, text);
-            }
+    for card in h.cards() {
+        // The structural cards above describe the promoted primary;
+        // every other card moves across whole, bytes and all.
+        if !card.is_commentary() && fitsy::header::is_writer_owned_keyword(&card.keyword()) {
             continue;
         }
-        let structural = matches!(
-            kw,
-            "XTENSION" | "SIMPLE" | "EXTEND" | "BITPIX" | "NAXIS" | "PCOUNT" | "GCOUNT"
-        ) || (kw.starts_with("NAXIS")
-            && kw[5..].chars().all(|c| c.is_ascii_digit()));
-        if structural {
-            continue;
-        }
-        if let Some(v) = entry.value.clone() {
-            out.push(kw.to_string(), v, entry.comment.as_deref())?;
-        }
+        out.splice(&card);
     }
     Ok(out)
 }

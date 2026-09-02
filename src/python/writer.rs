@@ -96,8 +96,8 @@ pub struct PyAsciiTableBuilder {
 /// :class:`fitsy.FitsError` if a later HDU still declares
 /// ``SIMPLE``, or if the first HDU does not.
 ///
-/// A ``COMMENT``, ``HISTORY`` or blank-keyword card in `header` is
-/// not copied to the built HDU; only cards that carry a value are.
+/// A ``COMMENT``, ``HISTORY`` or blank-keyword card in `header`
+/// carries into the built HDU, after the value cards.
 #[pyfunction]
 #[pyo3(signature = (data, header=None, primary=true))]
 pub fn image(
@@ -167,22 +167,39 @@ pub fn image(
 /// fitsy computes the structural cards of the compressed HDU itself.
 /// It therefore ignores a structural card, such as ``BITPIX``, and a
 /// reserved ``Z`` card, such as ``ZBITPIX``, in `header`. Set
-/// ``EXTNAME`` through `extname`. Every other value card carries into
-/// the compressed HDU and survives decompression. A ``COMMENT``,
-/// ``HISTORY`` or blank-keyword card in `header` does not carry.
+/// ``EXTNAME`` through `extname`. Every other card carries into the
+/// compressed HDU and survives decompression, including a ``COMMENT``,
+/// ``HISTORY`` or blank-keyword card, which lands after the value
+/// cards.
 #[pyfunction]
 #[pyo3(signature = (data, header=None, *, tile_shape=None, extname=None))]
 pub fn compressed_image(
+    py: Python<'_>,
     data: Bound<'_, PyAny>,
     header: Option<Bound<'_, PyAny>>,
     tile_shape: Option<Vec<u64>>,
     extname: Option<String>,
 ) -> PyResult<PyBinTableBuilder> {
-    use crate::compression::{TileOpts, compress_image_to_hdu};
+    use crate::compression::{TileOpts, compress_image_to_hdu, reserved_keywords};
     let extra = match header.as_ref() {
         Some(d) => header_from_py(d)?,
         None => Header::empty(),
     };
+    // The compressed BINTABLE owns these keywords, so a card of the
+    // same name cannot come along. Say so rather than let it vanish.
+    let dropped = reserved_keywords(&extra);
+    if !dropped.is_empty() {
+        let warnings = py.import("warnings")?;
+        for keyword in dropped {
+            warnings.call_method1(
+                "warn",
+                (format!(
+                    "Keyword '{keyword}' is reserved for use by the FITS Tiled \
+                     Image Convention so will be dropped"
+                ),),
+            )?;
+        }
+    }
     // Build the uncompressed image first so we get correct BITPIX
     // and big-endian raw bytes; then hand off to the Rust compressor,
     // which maps the structural cards to their Z forms and carries
@@ -347,14 +364,15 @@ fn with_unsigned_scaling(mut extra: Header, bzero: f64) -> Header {
     extra
 }
 
-/// Copy every value-bearing, non-structural card from `extra` onto
-/// `builder`, then render the finished `(Header, data)` pair.
+/// Render `builder`, then splice the cards of `extra` onto the
+/// finished header.
 ///
-/// Drops `SIMPLE`, `BITPIX`, `NAXIS`, `NAXISn`, `EXTEND`, `PCOUNT`,
-/// `GCOUNT` and `XTENSION` from `extra`: [`ImageBuilder::build`]
-/// writes those itself. Also drops a commentary card (`COMMENT`,
-/// `HISTORY`, or blank keyword), because `extra.entries()` carries
-/// no value for one.
+/// Each card moves whole, with its value, its inline comment and its
+/// bytes. A repeated keyword keeps every occurrence.
+///
+/// This skips the cards that
+/// [`is_writer_owned_keyword`](crate::header::is_writer_owned_keyword)
+/// names. [`ImageBuilder::build`] writes those from the data.
 ///
 /// # Errors
 ///
@@ -364,24 +382,47 @@ fn apply_extra_header<T>(builder: ImageBuilder<T>, extra: Header) -> PyResult<(H
 where
     T: crate::data::Pixel,
 {
-    let mut b = builder;
-    for entry in extra.entries() {
-        if let Some(v) = entry.value.as_ref() {
-            // Skip structural keywords ImageBuilder writes itself.
-            let kw = entry.keyword.to_ascii_uppercase();
-            if matches!(
-                kw.as_str(),
-                "SIMPLE" | "BITPIX" | "NAXIS" | "EXTEND" | "PCOUNT" | "GCOUNT" | "XTENSION"
-            ) {
-                continue;
+    let (mut header, data) = builder.build().into_py_result()?;
+    splice_user_cards(&mut header, &extra);
+    Ok((header, data))
+}
+
+/// Splice the cards of `src` onto `dst`.
+///
+/// A user-supplied header reaches a built HDU through this function.
+/// It moves whole cards. It does not rebuild a card from a keyword
+/// and a value.
+///
+/// This keeps a commentary card. It keeps every occurrence of a
+/// repeated keyword. It does not re-encode a card.
+pub(crate) fn splice_user_cards(dst: &mut Header, src: &Header) {
+    // Collect first, so the borrow of `src` ends before `dst` is
+    // mutated; `src` and `dst` may be the same header.
+    let moves: Vec<(String, Vec<u8>)> = src
+        .cards()
+        .map(|c| (c.keyword(), c.raw().to_vec()))
+        .collect();
+    for (keyword, raw) in moves {
+        let kw = keyword.to_ascii_uppercase();
+        if crate::header::is_writer_owned_keyword(&kw) {
+            // Only a card the writer regenerates needs its comment
+            // read, and those are a handful out of the whole header.
+            let comment = crate::header::CardView::new(&raw).comment();
+            // The writer sets the value of a structural card from
+            // the data it wrote. It does not set the comment, so
+            // copy the source comment onto the card it regenerated.
+            // A checksum comment describes a checksum that no longer
+            // applies, so skip those two keywords.
+            if !matches!(kw.as_str(), "CHECKSUM" | "DATASUM")
+                && let Some(c) = comment
+                && let Some(existing) = dst.first(&kw)
+            {
+                let _ = dst.set(&kw, existing, Some(&c));
             }
-            if kw.starts_with("NAXIS") && kw[5..].chars().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            b = b.card(entry.keyword.clone(), v.clone(), entry.comment.as_deref());
+            continue;
         }
+        dst.append_card_bytes(&raw);
     }
-    b.build().into_py_result()
 }
 
 /// Build a ``BINTABLE`` HDU from a column dictionary.

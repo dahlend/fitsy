@@ -14,8 +14,8 @@ use crate::error::{FitsError, Result};
 /// h.push("OBJECT", "M42", None)?;
 /// h.push("SIMPLE", true, None)?;
 ///
-/// assert_eq!(h.first("NAXIS"), Some(&Value::Integer(2)));
-/// assert_eq!(h.first("SIMPLE"), Some(&Value::Logical(true)));
+/// assert_eq!(h.first("NAXIS"), Some(Value::Integer(2)));
+/// assert_eq!(h.first("SIMPLE"), Some(Value::Logical(true)));
 ///
 /// match h.first("OBJECT") {
 ///     Some(Value::String(s)) => assert_eq!(s, "M42"),

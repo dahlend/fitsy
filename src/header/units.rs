@@ -15,12 +15,9 @@ impl Header {
     #[must_use]
     pub fn keyword_unit(&self, key: &str) -> Option<String> {
         let k = key.trim().to_ascii_uppercase();
-        let entry = self.entries().iter().find(|e| e.keyword == k).or_else(|| {
-            let alt = Self::alt_key(&k)?;
-            self.entries().iter().find(|e| e.keyword == alt)
-        })?;
-        let comment = entry.comment.as_deref()?;
-        parse_comment_unit(comment).map(str::to_owned)
+        let card = self.first_card(&k)?;
+        let comment = card.comment()?;
+        parse_comment_unit(&comment).map(str::to_owned)
     }
 
     /// Value of `key` expressed in `target_unit`.

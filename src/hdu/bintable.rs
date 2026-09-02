@@ -491,11 +491,12 @@ impl<'a> BinTableHdu<'a> {
         let mut offset = 0_usize;
         for i in 1..=tfields {
             let key_form = format!("TFORM{i}");
-            let format = BinFormat::parse(header.optional_string(&key_form).ok_or_else(|| {
-                FitsError::MissingMandatory {
-                    keyword: key_form.clone(),
-                }
-            })?)?;
+            let format =
+                BinFormat::parse(&header.optional_string(&key_form).ok_or_else(|| {
+                    FitsError::MissingMandatory {
+                        keyword: key_form.clone(),
+                    }
+                })?)?;
             let width = format.row_bytes();
             let name = header
                 .optional_string(&format!("TTYPE{i}"))

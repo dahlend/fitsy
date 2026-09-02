@@ -4059,32 +4059,27 @@ fn spectral_code_with_the_wrong_associate_is_rejected() {
     }
 }
 
-/// A parser must refuse malformed input, not abort on it.
+/// A header cannot hold a card it could not write.
 ///
 /// Regression: `CTYPE` handling sliced at byte 4, which panics when
-/// that byte falls inside a multi-byte character. Unreachable from a
-/// file (the card reader keeps non-ASCII out) but reachable through a
-/// programmatically built `Header`.
+/// that byte falls inside a multi-byte character. The card reader
+/// keeps non-ASCII out of a parsed header, and a card is now encoded
+/// when it is created, so a programmatically built header cannot
+/// carry one either -- the value is refused at the point it is set.
 #[test]
-fn non_ascii_ctype_errors_instead_of_panicking() {
+fn non_ascii_ctype_is_refused_at_the_card() {
     let mut h = fitsy::Header::empty();
     h.push("NAXIS", 2_i64, None).unwrap();
     h.push("NAXIS1", 10_i64, None).unwrap();
     h.push("NAXIS2", 10_i64, None).unwrap();
     // 'e' with an acute accent spans bytes 3..5, so byte 4 splits it.
-    h.push("CTYPE1", "RAB\u{e9}-TAN".to_string(), None).unwrap();
-    h.push("CTYPE2", "DEC--TAN".to_string(), None).unwrap();
-    // Must return, either way -- the point is that it does not panic.
-    let _ = fitsy::Wcs::from_header(&h, ' ');
-
-    // And the same CTYPE on the latitude axis, which reaches
-    // `projection_code` rather than `first4`.
-    let mut h = fitsy::Header::empty();
-    h.push("NAXIS", 2_i64, None).unwrap();
-    h.push("NAXIS1", 10_i64, None).unwrap();
-    h.push("NAXIS2", 10_i64, None).unwrap();
-    h.push("CTYPE1", "RA---TAN".to_string(), None).unwrap();
-    h.push("CTYPE2", "DEC\u{e9}TAN".to_string(), None).unwrap();
+    assert!(
+        h.push("CTYPE1", "RAB\u{e9}-TAN".to_string(), None).is_err(),
+        "a non-ASCII value must not reach the header"
+    );
+    assert!(h.push("CTYPE2", "DEC\u{e9}TAN".to_string(), None).is_err());
+    // The header is still usable, and holds only what it could write.
+    assert!(h.first("CTYPE1").is_none());
     let _ = fitsy::Wcs::from_header(&h, ' ');
 }
 
@@ -4119,12 +4114,11 @@ fn multi_dimensional_tab_matches_wcslib() {
     };
     let h = refhdu.header();
     let get = |k: &str| -> Vec<f64> {
-        h.entries()
-            .iter()
-            .filter(|e| e.keyword == k)
-            .filter_map(|e| match e.value.as_ref()? {
-                fitsy::header::value::Value::Real(r) => Some(*r),
-                fitsy::header::value::Value::Integer(i) => Some(*i as f64),
+        h.cards()
+            .filter(|c| c.has_keyword(k))
+            .filter_map(|c| match c.value()? {
+                fitsy::header::value::Value::Real(r) => Some(r),
+                fitsy::header::value::Value::Integer(i) => Some(i as f64),
                 _ => None,
             })
             .collect()

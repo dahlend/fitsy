@@ -6,26 +6,30 @@
 //! that sequence into a [`Header`], reads values out of it, and
 //! renders it back to bytes.
 //!
-//! [`Header`] is the preservation layer of the crate. It holds every
-//! card as written, in file order, including a card that contradicts
-//! another card. Interpretation happens elsewhere, in
-//! [`Wcs`](crate::Wcs) for a coordinate description and in the
-//! [`reserved`] accessors for a single typed keyword.
+//! [`Header`] stores the bytes of every card, in file order. It
+//! stores no parsed form of them. It keeps a card that contradicts
+//! another card, and a card that breaks the Standard.
+//!
+//! Interpretation happens elsewhere, in [`Wcs`](crate::Wcs) for a
+//! coordinate description and in the [`reserved`] accessors for a
+//! single typed keyword.
 //!
 //! # Layout
 //!
 //! Three types carry the data:
 //!
-//! - [`Header`] -- one parsed header. Read it with [`Header::first`],
-//!   [`Header::entries`] and [`Header::contains`].
-//! - [`Card`] -- one 80-byte card, split into keyword, kind and body.
+//! - [`Header`] -- the cards of one header, as bytes. Read it with
+//!   [`Header::first`], [`Header::cards`] and [`Header::contains`].
+//! - [`CardView`] -- a read-only view of one logical card. It reads a
+//!   keyword, a value or a comment from the bytes of that card.
 //! - [`Value`] -- the parsed value of one card.
 //!
 //! Each submodule owns one part of the work:
 //!
-//! - [`card`] -- the 80-byte card scanner.
 //! - [`value`] -- the value and comment parser.
-//! - [`builder`] -- the write path, including [`Header::to_bytes`].
+//! - [`view`] -- [`CardView`], the read path over the stored bytes.
+//! - [`builder`] -- card construction and editing. A card is encoded
+//!   here when a caller creates or edits it.
 //! - [`reserved`] -- typed accessors such as [`Header::bitpix`].
 //! - [`validation`] -- structural checks that report a [`Diagnostic`].
 //! - [`time`] -- the time keywords of Standard Sec.9.
@@ -34,11 +38,17 @@
 //!
 //! # Design constraints
 //!
+//! [`Header::to_bytes`] writes the stored bytes. It encodes no card.
+//! A card is encoded when a caller creates or edits it, so a value
+//! that the header cannot write returns an error at that point. A
+//! card read from a file is written back as it was read, and
+//! [`Header::normalize`] is the one method that rewrites it.
+//!
 //! A keyword can repeat. `COMMENT` and `HISTORY` do so by design, and
 //! a malformed file repeats a value keyword. [`Header`] keeps every
-//! occurrence and indexes the first one, so [`Header::first`] is a
-//! constant-time lookup while [`Header::entries`] still reaches the
-//! rest.
+//! occurrence and indexes the first one. [`Header::first`] is
+//! therefore a constant-time lookup, and [`Header::all`] reaches
+//! every occurrence.
 //!
 //! Lookup falls back from `-` to `_`. Sec.4.1.2.1 makes the two
 //! distinct, but real files write `MJD_OBS` for `MJD-OBS`. The
@@ -46,25 +56,33 @@
 //! `CD1-1` card.
 
 pub mod builder;
-pub mod card;
+// The card scanner is an implementation detail of this module.
+// [`CardView`] is how a caller reads a card; `Card` is how the parser
+// splits one, and nothing outside the crate needs that distinction.
+pub(crate) mod card;
 pub mod observatory;
 pub mod reserved;
 pub mod time;
 pub mod units;
 pub mod validation;
 pub mod value;
+pub mod view;
 
 pub use builder::CommentaryKind;
-pub use card::{CARD_SIZE, Card, CardKind};
+pub use card::{CARD_SIZE, CardKind};
 pub use observatory::{ObsGeo, ObsGeodetic};
 pub use time::IsoDateTime;
 pub use validation::{Diagnostic, Fix, Level};
 pub use value::Value;
+pub use view::CardView;
 
 use std::collections::BTreeMap;
+use std::ops::Range;
+use std::sync::OnceLock;
 
 use crate::error::{FitsError, Result};
 use crate::io::block::{BLOCK_SIZE, CARDS_PER_BLOCK};
+use card::Card;
 
 /// A parsed FITS header: a sequence of value cards plus commentary.
 ///
@@ -81,39 +99,33 @@ use crate::io::block::{BLOCK_SIZE, CARDS_PER_BLOCK};
 /// h.push("OBJECT", "M42", None)?;
 ///
 /// assert!(h.contains("OBJECT"));
-/// assert_eq!(h.first("OBJECT"), Some(&Value::String("M42".into())));
+/// assert_eq!(h.first("OBJECT"), Some(Value::String("M42".into())));
 ///
 /// // Rendering pads to the 2880-byte block and appends END.
-/// assert_eq!(h.to_bytes()?.len() % 2880, 0);
+/// assert_eq!(h.to_bytes().len() % 2880, 0);
 /// # Ok::<(), fitsy::FitsError>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct Header {
-    cards: Vec<HeaderEntry>,
-    /// Number of header blocks (each 2880 bytes) consumed in the file,
-    /// including padding through the END card.
-    blocks: usize,
-    /// First-card index per keyword for O(1) lookup. Multiple entries
-    /// with the same keyword (e.g. `COMMENT`, `HISTORY`) keep only the
-    /// first index here; use `find_all` for the full set.
-    index: BTreeMap<String, usize>,
+    /// Every physical card, back to back. The length is a multiple
+    /// of [`CARD_SIZE`].
+    ///
+    /// This is the header. A card is a fixed 80 bytes, so one buffer
+    /// holds them all. [`CardView`] reads a keyword, a value or a
+    /// comment from these bytes and writes nothing back, and
+    /// [`Header::to_bytes`] emits the buffer, so a card is written as
+    /// it was stored.
+    bytes: Vec<u8>,
+    /// Everything derived from `bytes`: where each logical card lies,
+    /// and where each keyword first appears.
+    ///
+    /// Built when first needed. A mutation either leaves this alone,
+    /// when it cannot have changed what the layout says, or drops it.
+    /// Nothing edits it into a different shape, so it cannot come to
+    /// disagree with the bytes. A dropped layout costs a rebuild; a
+    /// wrong one would return the wrong card.
+    layout: OnceLock<Layout>,
 }
-
-/// One entry in a parsed header.
-#[derive(Debug, Clone)]
-pub struct HeaderEntry {
-    /// Keyword name, trimmed and upper-cased.
-    pub keyword: String,
-    /// Which of the Sec.4.1.2 card shapes this is.
-    pub kind: CardKind,
-    /// Parsed value, or `None` for a commentary card or a null field.
-    pub value: Option<Value>,
-    /// Inline comment following the `/`, trimmed.
-    pub comment: Option<String>,
-    /// Raw body bytes for commentary cards.
-    pub commentary: Option<String>,
-}
-
 impl Header {
     /// Parse a header from byte offset `start` within `bytes`, in
     /// strict mode.
@@ -129,35 +141,29 @@ impl Header {
         Self::parse_with(bytes, start, false)
     }
 
-    /// Parse a header. Stray bytes in free-text comments and commentary
-    /// cards are sanitized to spaces in both modes, so they never fail
-    /// the parse.
+    /// Parse a header, keeping every card's bytes.
     ///
-    /// When `lenient` is true the same tolerance covers *values*: the
-    /// card scanner sanitizes non-ASCII bytes and folds lower-case
-    /// keywords, and an unrecognizable value field is kept as
-    /// [`Value::Unparsed`]. Some structural defects are recovered too:
-    /// stray bytes after `END`, broken `CONTINUE` chains, and an `END`
-    /// written in any case.
+    /// The header stores the cards as they appear in the file. This
+    /// function re-encodes no card. A card that this crate cannot
+    /// fully describe is written back as it was read.
+    ///
+    /// When `lenient` is false, a card that breaks the Standard
+    /// fails the parse. When `lenient` is true, the header keeps that
+    /// card. A read of it returns [`Value::Unparsed`] rather than an
+    /// error. [`Header::normalize`] rewrites it into conforming
+    /// form.
     ///
     /// An `END` card is required under either value of `lenient`. It
     /// is the only marker of the boundary between header and data.
     ///
-    /// The buffer may run past the header and may end mid-block. The
-    /// scan reads whole blocks alone.
-    ///
     /// # Errors
     ///
-    /// - [`FitsError::Block`] when `start` lies past the end of
-    ///   `bytes`, or when no `END` card appears in the whole blocks
-    ///   available.
-    /// - [`FitsError::Card`] or [`FitsError::Value`] when a card fails
-    ///   to parse. A `lenient` value of `true` recovers most of these
-    ///   as [`Value::Unparsed`].
-    /// - [`FitsError::EndCardMisplaced`] when `lenient` is `false` and
-    ///   a non-space byte follows the `END` card.
-    /// - [`FitsError::Header`] when `lenient` is `false` and a
-    ///   `CONTINUE` card has no string card to continue.
+    /// - [`FitsError::Block`] when `start` is past the end of `bytes`.
+    /// - [`FitsError::Header`] when no `END` card is found.
+    /// - [`FitsError::EndCardMisplaced`] when a non-blank card follows
+    ///   `END`, in strict mode.
+    /// - In strict mode, any error from the card scanner or the value
+    ///   parser.
     pub fn parse_with(bytes: &[u8], start: u64, lenient: bool) -> Result<(Self, u64)> {
         let start_usize = start as usize;
         if start_usize > bytes.len() {
@@ -170,13 +176,9 @@ impl Header {
         // a whole file) and may end in a partial block; only full 2880-byte
         // blocks are scanned, and a header whose END card is never found in
         // them is rejected below.
-
-        let mut cards = Vec::new();
-        let mut continuations: Vec<usize> = Vec::new();
+        let mut cards: Vec<u8> = Vec::new();
         let mut block_idx = 0_usize;
         let mut end_seen = false;
-        // (block, card_in_block)
-        let mut end_card_pos = (0_usize, 0_usize);
 
         'outer: while start_usize + (block_idx + 1) * BLOCK_SIZE <= bytes.len() {
             let block_start = start_usize + block_idx * BLOCK_SIZE;
@@ -187,7 +189,7 @@ impl Header {
 
                 if end_seen {
                     // Sec.4.4.1.2: every card after END must be all spaces.
-                    // Tolerate NUL padding here too (see `Card::parse`): some
+                    // Tolerate NUL padding here too (see `Card::parse_with`): some
                     // writers zero-fill the remainder of the final header block.
                     // In lenient mode, ignore any other trailing bytes in the
                     // final header block (some writers leave stray fill there).
@@ -197,19 +199,19 @@ impl Header {
                     continue;
                 }
 
-                match card.kind {
-                    CardKind::End => {
-                        end_seen = true;
-                        end_card_pos = (block_idx, c);
-                    }
-                    CardKind::Continue => {
-                        let idx = cards.len();
-                        cards.push(card_to_entry(card, off as u64, lenient)?);
-                        continuations.push(idx);
-                    }
-                    CardKind::Commentary | CardKind::Value => {
-                        cards.push(card_to_entry(card, off as u64, lenient)?);
-                    }
+                // Strict mode rejects a value field the Standard does
+                // not allow. Lenient mode keeps the card as written.
+                if !lenient && matches!(card.kind, CardKind::Value | CardKind::Continue) {
+                    value::parse(&card.keyword, &card.body)?;
+                }
+
+                // Every card but `END` is kept exactly as it appears.
+                // Which of them join into one logical card is decided
+                // by `Layout`, from these same bytes.
+                if matches!(card.kind, CardKind::End) {
+                    end_seen = true;
+                } else {
+                    cards.extend_from_slice(raw);
                 }
             }
             block_idx += 1;
@@ -228,35 +230,65 @@ impl Header {
             return Err(FitsError::Header("no END card found in header".into()));
         }
 
-        // Resolve CONTINUE long-string concatenation (Sec.4.2.1.2).
-        merge_continuations(&mut cards, &continuations);
-
-        let index = build_index(&cards);
-
-        let blocks = block_idx;
-        let consumed = (blocks * BLOCK_SIZE) as u64;
-        // Reserved for future diagnostics.
-        let _ = end_card_pos;
-        Ok((
-            Self {
-                cards,
-                blocks,
-                index,
-            },
-            consumed,
-        ))
+        let consumed = (block_idx * BLOCK_SIZE) as u64;
+        Ok((Self::from_bytes(cards), consumed))
     }
 
-    /// All entries in order.
+    /// Render the header: every card's bytes, then `END`, padded with
+    /// spaces to a whole 2880-byte block.
+    ///
+    /// This function encodes no card. The header holds the bytes of
+    /// every card, whether the card came from a file or from
+    /// [`push`](Self::push). This function copies those bytes.
     #[must_use]
-    pub fn entries(&self) -> &[HeaderEntry] {
-        &self.cards
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(self.bytes.len() + BLOCK_SIZE);
+        out.extend_from_slice(&self.bytes);
+        let mut end = [b' '; CARD_SIZE];
+        end[..3].copy_from_slice(b"END");
+        out.extend_from_slice(&end);
+        while !out.len().is_multiple_of(BLOCK_SIZE) {
+            out.push(b' ');
+        }
+        out
     }
 
-    /// Number of header blocks consumed.
+    /// Every card, in order, as a read-only view over its bytes.
+    pub fn cards(&self) -> impl Iterator<Item = CardView<'_>> {
+        self.layout()
+            .spans
+            .iter()
+            .map(|span| CardView::new(&self.bytes[span.clone()]))
+    }
+
+    /// The layout of the current bytes, deriving it if it is not held.
+    fn layout(&self) -> &Layout {
+        self.layout.get_or_init(|| Layout::build(&self.bytes))
+    }
+
+    /// Drop the derived layout, because the bytes no longer match it.
+    fn forget_layout(&mut self) {
+        self.layout.take();
+    }
+
+    /// The card at `idx`, or `None` when the index is past the end.
     #[must_use]
-    pub fn block_count(&self) -> usize {
-        self.blocks
+    pub fn card(&self, idx: usize) -> Option<CardView<'_>> {
+        let span = self.layout().spans.get(idx)?.clone();
+        Some(CardView::new(&self.bytes[span]))
+    }
+
+    /// How many logical cards the header holds. A continued string
+    /// counts once, however many `CONTINUE` cards it spans.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.layout().spans.len()
+    }
+
+    /// True when the header holds no cards.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
     }
 
     /// Return `keyword` with each `-` replaced by `_`, so a lookup for
@@ -272,7 +304,7 @@ impl Header {
         Some(keyword.replace('-', "_"))
     }
 
-    /// Find the value of the first occurrence of `keyword`.
+    /// The value of the first card named `keyword`.
     ///
     /// # Examples
     ///
@@ -289,175 +321,380 @@ impl Header {
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     #[must_use]
-    pub fn first(&self, keyword: &str) -> Option<&Value> {
-        if let Some(&idx) = self.index.get(keyword) {
-            return self.cards[idx].value.as_ref();
-        }
-        // Some files use '_' where the standard uses '-' (e.g. MJD_OBS for MJD-OBS).
-        let &idx = self.index.get(Self::alt_key(keyword)?.as_str())?;
-        self.cards[idx].value.as_ref()
+    pub fn first(&self, keyword: &str) -> Option<Value> {
+        self.first_card(keyword).and_then(|c| c.value())
     }
 
-    /// True if `keyword` is present (with any kind).
+    /// A view of the first card named `keyword`.
+    #[must_use]
+    pub fn first_card(&self, keyword: &str) -> Option<CardView<'_>> {
+        if let Some(&idx) = self.layout().index.get(keyword) {
+            return self.card(idx);
+        }
+        // Some files use '_' where the standard uses '-' (e.g. MJD_OBS for MJD-OBS).
+        let &idx = self.layout().index.get(Self::alt_key(keyword)?.as_str())?;
+        self.card(idx)
+    }
+
+    /// Every card named `keyword`, in order.
+    ///
+    /// The Standard allows a keyword to repeat. This returns every
+    /// occurrence.
+    pub fn all<'a>(&'a self, keyword: &'a str) -> impl Iterator<Item = CardView<'a>> {
+        self.cards().filter(move |c| c.has_keyword(keyword))
+    }
+
+    /// True if `keyword` is present, with any card kind.
     #[must_use]
     pub fn contains(&self, keyword: &str) -> bool {
-        if self.cards.iter().any(|e| e.keyword == keyword) {
-            return true;
-        }
-        Self::alt_key(keyword).is_some_and(|alt| self.cards.iter().any(|e| e.keyword == alt))
+        self.has_exactly(keyword)
+            || Self::alt_key(keyword).is_some_and(|alt| self.has_exactly(&alt))
+    }
+
+    /// True if a card is named exactly `keyword`, with no `-`/`_`
+    /// fallback.
+    ///
+    /// The index answers for a value card without reading any card. A
+    /// commentary keyword is not indexed, so a miss still has to look.
+    fn has_exactly(&self, keyword: &str) -> bool {
+        self.layout().index.contains_key(keyword) || self.cards().any(|c| c.has_keyword(keyword))
     }
 
     /// Iterate over the body text of every `COMMENT` card in the
     /// order they appear (Sec.4.4.2.1). Returns an empty iterator if
     /// none are present.
-    pub fn comments(&self) -> impl Iterator<Item = &str> {
+    pub fn comments(&self) -> impl Iterator<Item = String> {
         self.commentary_iter("COMMENT")
     }
 
     /// Iterate over the body text of every `HISTORY` card in the
     /// order they appear (Sec.4.4.2.2).
-    pub fn history(&self) -> impl Iterator<Item = &str> {
+    pub fn history(&self) -> impl Iterator<Item = String> {
         self.commentary_iter("HISTORY")
     }
 
     /// Iterate over the body text of every blank-keyword commentary
     /// card (Sec.4.1.2.3 -- eight spaces in the keyword field).
-    pub fn blank_commentary(&self) -> impl Iterator<Item = &str> {
+    pub fn blank_commentary(&self) -> impl Iterator<Item = String> {
         self.commentary_iter("")
     }
 
-    fn commentary_iter<'a>(&'a self, keyword: &'a str) -> impl Iterator<Item = &'a str> {
-        self.cards.iter().filter_map(move |e| {
-            if matches!(e.kind, CardKind::Commentary) && e.keyword == keyword {
-                e.commentary.as_deref()
+    fn commentary_iter<'a>(&'a self, keyword: &'a str) -> impl Iterator<Item = String> + 'a {
+        self.cards().filter_map(move |c| {
+            if c.is_commentary() && c.has_keyword(keyword) {
+                c.commentary()
             } else {
                 None
             }
         })
     }
 
-    /// Internal constructor used by the builder API in
-    /// [`crate::header::builder`].
-    pub(crate) fn from_parts(cards: Vec<HeaderEntry>, blocks: usize) -> Self {
-        let index = build_index(&cards);
+    /// A header over `bytes`, which must be whole 80-byte cards.
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
+        debug_assert!(
+            bytes.len().is_multiple_of(CARD_SIZE),
+            "a header is a whole number of 80-byte cards"
+        );
         Self {
-            cards,
-            blocks,
-            index,
+            bytes,
+            layout: OnceLock::new(),
         }
     }
 
-    /// Append a single entry, updating the keyword index.
-    pub(crate) fn append_entry(&mut self, entry: HeaderEntry) {
-        let idx = self.cards.len();
-        if !entry.keyword.is_empty()
-            && !matches!(entry.kind, CardKind::Commentary)
-            && !self.index.contains_key(&entry.keyword)
-        {
-            self.index.insert(entry.keyword.clone(), idx);
+    /// Append `bytes`, one or more whole cards, as one logical card.
+    pub(crate) fn append_card_bytes(&mut self, bytes: &[u8]) {
+        debug_assert!(
+            bytes.len().is_multiple_of(CARD_SIZE) && !bytes.is_empty(),
+            "a logical card is one or more whole 80-byte cards"
+        );
+        let span = self.bytes.len()..self.bytes.len() + bytes.len();
+        self.bytes.extend_from_slice(bytes);
+        // Appending cannot invalidate what the layout already says, so
+        // this is the one mutation that keeps it.
+        if let Some(layout) = self.layout.get_mut() {
+            layout.note_appended(span, &self.bytes);
         }
-        self.cards.push(entry);
     }
 
-    /// Mutable handle to the first value entry whose keyword matches.
-    pub(crate) fn first_value_entry_mut(&mut self, keyword: &str) -> Option<&mut HeaderEntry> {
-        let idx = *self.index.get(keyword)?;
-        self.cards.get_mut(idx)
+    /// Insert `bytes` as a logical card at `idx`, shifting the rest.
+    pub(crate) fn insert_card_bytes(&mut self, idx: usize, bytes: Vec<u8>) {
+        let at = self
+            .layout()
+            .spans
+            .get(idx)
+            .map_or(self.bytes.len(), |span| span.start);
+        self.bytes.splice(at..at, bytes);
+        // Every card after the insertion point moved.
+        self.forget_layout();
     }
 
-    /// Position of the first value card whose keyword matches, or
-    /// `None` if no such card exists. Used by the positional
-    /// insertion methods on the builder.
+    /// Replace the logical card at `idx`.
+    pub(crate) fn replace_card_bytes(&mut self, idx: usize, bytes: Vec<u8>) {
+        let Some(range) = self.layout().spans.get(idx).cloned() else {
+            return;
+        };
+        // Replacing a card in place moves nothing and renames nothing,
+        // so the layout still describes these bytes. Setting a value
+        // under a keyword that is already there -- the ordinary case --
+        // takes this path.
+        let same_size = range.len() == bytes.len();
+        let same_name =
+            CardView::new(&bytes).has_keyword(&CardView::new(&self.bytes[range.clone()]).keyword());
+        if same_size {
+            self.bytes[range].copy_from_slice(&bytes);
+        } else {
+            self.bytes.splice(range, bytes);
+        }
+        if !(same_size && same_name) {
+            self.forget_layout();
+        }
+    }
+
+    /// Copy `card` onto the end of this header, bytes and all.
+    ///
+    /// One header takes a card from another with this method. The
+    /// bytes move unchanged. The value, the comment and the layout of
+    /// the card are all preserved.
+    ///
+    /// This method does not look the keyword up. It appends the card,
+    /// so it does not replace a card that has the same keyword. Use
+    /// [`set`](Self::set) to edit a card by keyword.
+    pub fn splice(&mut self, card: &CardView<'_>) {
+        self.append_card_bytes(card.raw());
+    }
+
+    /// Index of the first value card named `keyword`.
     pub(crate) fn first_value_index(&self, keyword: &str) -> Option<usize> {
-        self.index.get(keyword).copied()
+        self.layout().index.get(keyword).copied()
     }
 
-    /// Insert `entry` at the given position, shifting subsequent
-    /// cards right by one.
-    pub(crate) fn insert_entry(&mut self, idx: usize, entry: HeaderEntry) {
-        let i = idx.min(self.cards.len());
-        self.cards.insert(i, entry);
-        self.rebuild_index();
-    }
-
-    /// Mutable handle to all cards. Callers must call
-    /// [`rebuild_index`](Self::rebuild_index) afterwards if they
-    /// modify any keyword text.
-    pub(crate) fn cards_mut(&mut self) -> &mut Vec<HeaderEntry> {
-        &mut self.cards
-    }
-
-    /// Recompute the keyword -> first-occurrence index from scratch.
-    pub(crate) fn rebuild_index(&mut self) {
-        self.index.clear();
-        for (i, e) in self.cards.iter().enumerate() {
-            if !e.keyword.is_empty()
-                && !matches!(e.kind, CardKind::Commentary)
-                && !self.index.contains_key(&e.keyword)
-            {
-                self.index.insert(e.keyword.clone(), i);
-            }
-        }
-    }
-
-    /// Remove every value card whose keyword equals `keyword` (case
-    /// sensitive). Commentary cards (`COMMENT`, `HISTORY`, blank) are
-    /// not affected. Returns the number of cards removed.
+    /// Remove every card named `keyword`, returning how many went.
     pub fn remove(&mut self, keyword: &str) -> usize {
-        let before = self.cards.len();
-        self.cards
-            .retain(|e| !(matches!(e.kind, CardKind::Value) && e.keyword == keyword));
-        let removed = before - self.cards.len();
+        // Value cards only. A commentary keyword names a class of
+        // cards, not one card. A caller that names `COMMENT` does not
+        // ask to delete every comment in the header.
+        let keep: Vec<Range<usize>> = self
+            .layout()
+            .spans
+            .iter()
+            .filter(|span| {
+                let card = CardView::new(&self.bytes[(*span).clone()]);
+                !(matches!(card.kind(), CardKind::Value) && card.has_keyword(keyword))
+            })
+            .cloned()
+            .collect();
+        let removed = self.layout().spans.len() - keep.len();
         if removed > 0 {
-            self.rebuild_index();
+            let mut bytes = Vec::with_capacity(self.bytes.len());
+            for span in keep {
+                bytes.extend_from_slice(&self.bytes[span]);
+            }
+            self.bytes = bytes;
+            self.forget_layout();
         }
         removed
     }
 
-    /// Append every value card from `parent` not already in `self`.
-    /// This is the Goddard/IRAF `INHERIT` convention: an extension
-    /// with `INHERIT = T` takes the primary HDU's non-structural
-    /// keywords.
+    /// Rewrite every card that does not conform to the Standard into
+    /// conforming form, leaving conforming cards byte-for-byte alone.
     ///
-    /// Structural keywords (`SIMPLE`, `XTENSION`, `BITPIX`, `NAXIS`,
-    /// `NAXISn`, `PCOUNT`, `GCOUNT`, `EXTEND`, `END`, `INHERIT`) and
-    /// `CHECKSUM`/`DATASUM` are never inherited; the extension carries
-    /// its own. Commentary cards are skipped so provenance is not
-    /// duplicated.
+    /// This is the only method that re-encodes a card that was read
+    /// from a file. A caller must call it. No other operation
+    /// rewrites a card that it did not change.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when a non-conforming card cannot be
+    /// re-encoded, which leaves the header untouched.
+    pub fn normalize(&mut self) -> Result<usize> {
+        let mut fixed = 0;
+        let mut bytes: Vec<u8> = Vec::with_capacity(self.bytes.len());
+        let spans = self.layout().spans.clone();
+        for span in spans {
+            let raw = &self.bytes[span];
+            if raw
+                .as_chunks::<CARD_SIZE>()
+                .0
+                .iter()
+                .all(|c| card_is_conforming(c))
+            {
+                bytes.extend_from_slice(raw);
+                continue;
+            }
+            let view = CardView::new(raw);
+            let encoded = if view.is_commentary() {
+                builder::encode_commentary_card(
+                    &view.keyword(),
+                    view.commentary().as_deref().unwrap_or(""),
+                )?
+            } else {
+                let Some((value, comment)) = view.parsed() else {
+                    bytes.extend_from_slice(raw);
+                    continue;
+                };
+                // A field no standard type matched keeps its text, as
+                // a string: repairing the card must not lose what it
+                // said, only how it said it.
+                let value = match value {
+                    Value::Unparsed(text) => Value::String(text),
+                    other => other,
+                };
+                builder::encode_value_card(&view.keyword(), &value, comment.as_deref())?
+            };
+            bytes.extend_from_slice(&encoded);
+            fixed += 1;
+        }
+        self.bytes = bytes;
+        self.forget_layout();
+        Ok(fixed)
+    }
+
+    /// Merge value cards from `parent` that this header lacks.
+    ///
+    /// Adds a card only when this header has no card with that
+    /// keyword. Skips commentary and structural keywords: a
+    /// `HISTORY` chain belongs to the HDU that recorded it, and the
+    /// structural cards describe this HDU's own data.
     pub fn merge_inherited(&mut self, parent: &Self) {
-        for entry in &parent.cards {
-            if !matches!(entry.kind, CardKind::Value) {
+        // Read this header's keywords once. Asking `contains` per
+        // parent card would rescan this header for every one of them.
+        let mine: std::collections::HashSet<String> = self.cards().map(|c| c.keyword()).collect();
+        let mut adopt: Vec<Vec<u8>> = Vec::new();
+        for card in parent.cards() {
+            if card.is_commentary() {
                 continue;
             }
-            if is_structural_keyword(&entry.keyword) {
+            let keyword = card.keyword();
+            if is_structural_keyword(&keyword) || mine.contains(&keyword) {
                 continue;
             }
-            if self.contains(&entry.keyword) {
-                continue;
-            }
-            self.append_entry(entry.clone());
+            adopt.push(card.raw().to_vec());
+        }
+        for bytes in adopt {
+            self.append_card_bytes(&bytes);
         }
     }
 }
 
-/// Map each keyword to the position of its first value card.
+/// True when the last physical card of `span` leaves its string open,
+/// so the `CONTINUE` card after it extends the same value
+/// (Sec.4.2.1.2).
 ///
-/// This skips a commentary card, meaning `COMMENT`, `HISTORY` or a
-/// blank keyword. Those repeat by design, so an index entry would name
-/// a keyword that no single value can answer. A repeated value keyword
-/// keeps its first occurrence, which is the card [`Header::first`]
-/// returns.
-fn build_index(cards: &[HeaderEntry]) -> BTreeMap<String, usize> {
-    let mut index = BTreeMap::new();
-    for (i, e) in cards.iter().enumerate() {
-        if !e.keyword.is_empty()
-            && !matches!(e.kind, CardKind::Commentary)
-            && !index.contains_key(&e.keyword)
-        {
-            index.insert(e.keyword.clone(), i);
+/// Only the last card of the run can be open, so this reads that one
+/// card. Asking the whole logical card for its value would rejoin the
+/// entire chain, once per card, to answer a question about its tail.
+fn ends_open(bytes: &[u8], span: &Range<usize>) -> bool {
+    let last = &bytes[span.end - CARD_SIZE..span.end];
+    let Ok(card) = Card::parse_with(last, 0, true) else {
+        return false;
+    };
+    let (value, _) = value::parse_lenient(&card.keyword, &card.body);
+    matches!(value, Value::String(s) if s.ends_with('&'))
+}
+
+/// Where each logical card lies in a header's bytes, and where each
+/// keyword first appears.
+///
+/// Both facts follow from the bytes, so this is a cache. It is built
+/// in one place and never edited into a different shape, which is what
+/// keeps it from disagreeing with the bytes it describes.
+#[derive(Debug, Clone)]
+struct Layout {
+    /// Byte range of each logical card, in order.
+    spans: Vec<Range<usize>>,
+    /// Logical index of the first value card with each keyword.
+    /// A commentary keyword names a class of cards rather than one
+    /// card, so it is not listed.
+    index: BTreeMap<String, usize>,
+}
+
+impl Layout {
+    /// Derive the layout of `bytes`.
+    fn build(bytes: &[u8]) -> Self {
+        let mut spans: Vec<Range<usize>> = Vec::new();
+        let mut at = 0_usize;
+        while at + CARD_SIZE <= bytes.len() {
+            // Sec.4.2.1.2: a `CONTINUE` extends the card before it when
+            // that card's string is still open. The two are then one
+            // logical card. A `CONTINUE` that attaches to nothing
+            // stands alone, which the same section reads as commentary.
+            let attaches = matches!(
+                card::kind_of(&bytes[at..at + CARD_SIZE], true),
+                CardKind::Continue
+            ) && spans.last().is_some_and(|prev| ends_open(bytes, prev));
+            if attaches {
+                spans.last_mut().expect("checked by `attaches`").end += CARD_SIZE;
+            } else {
+                spans.push(at..at + CARD_SIZE);
+            }
+            at += CARD_SIZE;
         }
+        let mut index = BTreeMap::new();
+        for (i, span) in spans.iter().enumerate() {
+            let view = CardView::new(&bytes[span.clone()]);
+            if view.is_commentary() {
+                continue;
+            }
+            let keyword = view.keyword();
+            if !keyword.is_empty() {
+                index.entry(keyword).or_insert(i);
+            }
+        }
+        Self { spans, index }
     }
-    index
+
+    /// Record a card appended at the end of the header.
+    ///
+    /// The only edit this type allows, and the only mutation that
+    /// cannot invalidate an existing entry: every card already present
+    /// keeps its span, and a card at the end can never displace the
+    /// first occurrence of a keyword.
+    fn note_appended(&mut self, span: Range<usize>, bytes: &[u8]) {
+        let idx = self.spans.len();
+        let view = CardView::new(&bytes[span.clone()]);
+        if !view.is_commentary() {
+            let keyword = view.keyword();
+            if !keyword.is_empty() {
+                self.index.entry(keyword).or_insert(idx);
+            }
+        }
+        self.spans.push(span);
+    }
+}
+
+/// True when a writer regenerates `kw` from the HDU it is building,
+/// so a copy must not carry the source's version of it.
+///
+/// This covers the cards that describe the HDU's own structure, which
+/// [`ImageBuilder::build`](crate::ImageBuilder::build) and the table
+/// builders emit themselves, and the checksums, which the writer
+/// recomputes over the bytes it actually wrote -- carrying a source
+/// `CHECKSUM` forward would describe data that no longer exists.
+///
+/// Every other card belongs to the user and is copied verbatim.
+/// This deliberately excludes `INHERIT`, which carries meaning of its
+/// own, and the `Z` compression keywords, which the compression path
+/// maps rather than drops.
+#[must_use]
+pub fn is_writer_owned_keyword(kw: &str) -> bool {
+    if matches!(
+        kw,
+        "SIMPLE"
+            | "XTENSION"
+            | "BITPIX"
+            | "NAXIS"
+            | "PCOUNT"
+            | "GCOUNT"
+            | "EXTEND"
+            | "END"
+            | "TFIELDS"
+            | "GROUPS"
+            | "CHECKSUM"
+            | "DATASUM"
+    ) {
+        return true;
+    }
+    card::is_indexed(kw, &["NAXIS"])
 }
 
 fn is_structural_keyword(kw: &str) -> bool {
@@ -483,10 +720,10 @@ fn is_structural_keyword(kw: &str) -> bool {
     ) {
         return true;
     }
-    if kw.starts_with("NAXIS") && kw[5..].chars().all(|c| c.is_ascii_digit()) && kw.len() > 5 {
+    if card::is_indexed(kw, &["NAXIS"]) {
         return true;
     }
-    if kw.starts_with("ZNAXIS") && kw[6..].chars().all(|c| c.is_ascii_digit()) && kw.len() > 6 {
+    if card::is_indexed(kw, &["ZNAXIS"]) {
         return true;
     }
     if kw.starts_with("TFORM")
@@ -505,140 +742,436 @@ fn is_structural_keyword(kw: &str) -> bool {
     false
 }
 
-fn card_to_entry(card: Card, _offset: u64, lenient: bool) -> Result<HeaderEntry> {
-    match card.kind {
-        CardKind::Value | CardKind::Continue => {
-            // In lenient mode a value field that matches no standard type
-            // is kept as `Value::Unparsed` instead of aborting the header;
-            // strict mode propagates the parse error.
-            let (val, comment) = if lenient {
-                value::parse_lenient(&card.keyword, &card.body)
-            } else {
-                value::parse(&card.keyword, &card.body)?
-            };
-            // Sec.4.2.1.2 lets a `CONTINUE` that attaches to nothing fall
-            // back to commentary, so keep its raw text alongside the
-            // parsed value; `merge_continuations` needs it to demote the
-            // card rather than discard it.
-            let commentary = matches!(card.kind, CardKind::Continue)
-                .then(|| value::sanitize_free_text(&card.body).trim_end().to_string());
-            Ok(HeaderEntry {
-                keyword: card.keyword,
-                kind: card.kind,
-                value: Some(val),
-                comment,
-                commentary,
-            })
-        }
-        CardKind::Commentary => {
-            // Commentary cards (COMMENT, HISTORY, blank keyword) are free
-            // text; sanitize any non-ASCII/control bytes to spaces (they
-            // carry no structural meaning) rather than rejecting an
-            // otherwise-valid header. Comment leniency is the default and
-            // does not require the `lenient` flag.
-            let text = value::sanitize_free_text(&card.body).trim_end().to_string();
-            Ok(HeaderEntry {
-                keyword: card.keyword,
-                kind: card.kind,
-                value: None,
-                comment: None,
-                commentary: Some(text),
-            })
-        }
-        CardKind::End => unreachable!("END handled by caller"),
-    }
-}
-
-/// Resolve `CONTINUE` long-string concatenation. A string value ending
-/// with `&` is continued by the next `CONTINUE` card whose value is
-/// itself a string (Sec.4.2.1.2). We merge each chain into the parent
-/// card and remove the merged `CONTINUE` entries.
+/// True when `raw`, one 80-byte card, conforms to the Standard as
+/// written. A strict parse accepts such a card and repairs nothing.
 ///
-/// A `CONTINUE` that cannot attach -- no preceding value card, a
-/// non-string parent, or a parent whose string does not end in `&` --
-/// is *orphaned*. Sec.4.2.1.2 is explicit that this does not invalidate
-/// the file: such records "should be interpreted as containing
-/// commentary text in bytes 9 -- 80 (similar to a `COMMENT` keyword)",
-/// and an unmatched trailing `&` "should be interpreted as the literal
-/// last character in the string". So an orphan is demoted to a
-/// commentary card, in strict and lenient mode alike, and the parent is
-/// left exactly as written.
-fn merge_continuations(cards: &mut Vec<HeaderEntry>, continuations: &[usize]) {
-    if continuations.is_empty() {
-        return;
+/// [`Header::normalize`] uses this to select the cards it rewrites.
+/// It leaves a conforming card unchanged.
+fn card_is_conforming(raw: &[u8]) -> bool {
+    if raw.len() != CARD_SIZE {
+        return false;
     }
-    let mut to_remove: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-    let mut to_demote: Vec<usize> = Vec::new();
-    // Walk forwards: for each CONTINUE, find the most recent prior
-    // value card whose String ends in `&`, and append.
-    for &cont_idx in continuations {
-        // Find parent: walk backwards skipping any CONTINUE entries.
-        let mut parent_idx: Option<usize> = None;
-        for back in (0..cont_idx).rev() {
-            if matches!(cards[back].kind, CardKind::Continue) {
-                continue;
-            }
-            parent_idx = Some(back);
-            break;
-        }
-        let Some(parent_idx) = parent_idx else {
-            to_demote.push(cont_idx);
-            continue;
-        };
-
-        // Mutate parent string.
-        let Some(Value::String(cont_text)) = cards[cont_idx].value.clone() else {
-            to_demote.push(cont_idx);
-            continue;
-        };
-        let cont_comment = cards[cont_idx].comment.clone();
-        let parent = &mut cards[parent_idx];
-        let Some(Value::String(parent_str)) = parent.value.as_mut() else {
-            to_demote.push(cont_idx);
-            continue;
-        };
-        if !parent_str.ends_with('&') {
-            // The `&` is what licenses the join; without it the parent's
-            // value is already complete and this card is commentary.
-            to_demote.push(cont_idx);
-            continue;
-        }
-        // Drop the trailing `&` continuation marker.
-        parent_str.pop();
-        parent_str.push_str(&cont_text);
-        if let Some(c) = cont_comment {
-            match parent.comment.as_mut() {
-                Some(existing) => {
-                    existing.push(' ');
-                    existing.push_str(&c);
-                }
-                None => parent.comment = Some(c),
-            }
-        }
-        to_remove.insert(cont_idx);
+    // Sec.4.1.1: a card holds printable ASCII, 0x20 to 0x7e, only.
+    if raw.iter().any(|&b| !(0x20..=0x7e).contains(&b)) {
+        return false;
     }
-
-    for idx in to_demote {
-        let entry = &mut cards[idx];
-        entry.kind = CardKind::Commentary;
-        entry.value = None;
-        entry.comment = None;
-        if entry.commentary.is_none() {
-            entry.commentary = Some(String::new());
-        }
+    let Ok(card) = Card::parse_with(raw, 0, false) else {
+        return false;
+    };
+    match card.kind {
+        CardKind::Value | CardKind::Continue => value::parse(&card.keyword, &card.body).is_ok(),
+        CardKind::Commentary | CardKind::End => true,
     }
-
-    // Drop only the CONTINUE entries that were successfully merged.
-    let mut i = 0_usize;
-    cards.retain(|_| {
-        let keep = !to_remove.contains(&i);
-        i += 1;
-        keep
-    });
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Setting a value under a keyword that is already there leaves
+    /// every other card, and the lookup index, exactly as it was.
+    #[test]
+    fn set_keeps_the_index_and_its_neighbours() {
+        let mut h = Header::empty();
+        for i in 0..8 {
+            h.push(format!("KEY{i}"), i64::from(i), None).unwrap();
+        }
+        h.set("KEY3", 300_i64, None).unwrap();
+        assert_eq!(h.first("KEY3"), Some(Value::Integer(300)));
+        for i in (0..8).filter(|&i| i != 3) {
+            assert_eq!(
+                h.first(&format!("KEY{i}")),
+                Some(Value::Integer(i64::from(i)))
+            );
+        }
+        assert_eq!(h.len(), 8);
+    }
+
+    /// A set whose new card needs more physical cards than the old one
+    /// shifts every later card, and they must all still be found.
+    #[test]
+    fn set_to_a_continued_string_keeps_later_cards_readable() {
+        let mut h = Header::empty();
+        for i in 0..6 {
+            h.push(format!("KEY{i}"), i64::from(i), None).unwrap();
+        }
+        let long = "x".repeat(150);
+        h.set("KEY2", long.clone(), None).unwrap();
+        assert_eq!(h.first("KEY2"), Some(Value::String(long)));
+        assert!(h.first_card("KEY2").unwrap().physical_cards() > 1);
+        for i in [0, 1, 3, 4, 5] {
+            assert_eq!(
+                h.first(&format!("KEY{i}")),
+                Some(Value::Integer(i64::from(i)))
+            );
+        }
+        // And the whole thing still round-trips.
+        let (re, _) = Header::parse_with(&h.to_bytes(), 0, true).unwrap();
+        assert_eq!(re.len(), h.len());
+    }
+
+    /// Inserting ahead of a card with the same keyword makes the new
+    /// card the one `first` reports.
+    #[test]
+    fn insert_before_a_duplicate_becomes_the_first() {
+        let mut h = Header::empty();
+        h.push("OBJECT", "second", None).unwrap();
+        h.insert(0, "OBJECT", "first", None).unwrap();
+        assert_eq!(h.first("OBJECT"), Some(Value::String("first".into())));
+        let all: Vec<Value> = h.all("OBJECT").filter_map(|c| c.value()).collect();
+        assert_eq!(
+            all,
+            vec![
+                Value::String("first".into()),
+                Value::String("second".into())
+            ]
+        );
+    }
+
+    /// Inserting after one leaves the earlier card first, and every
+    /// card that moved is still found under its own keyword.
+    #[test]
+    fn insert_after_a_duplicate_leaves_the_first_alone() {
+        let mut h = Header::empty();
+        h.push("OBJECT", "first", None).unwrap();
+        h.push("TAIL", 1_i64, None).unwrap();
+        h.insert(1, "OBJECT", "second", None).unwrap();
+        assert_eq!(h.first("OBJECT"), Some(Value::String("first".into())));
+        assert_eq!(h.first("TAIL"), Some(Value::Integer(1)));
+    }
+
+    /// A commentary card is not indexed, and inserting one still
+    /// shifts the cards it moved.
+    #[test]
+    fn insert_of_a_commentary_card_shifts_the_index() {
+        let mut h = Header::empty();
+        h.push("OBJECT", "M31", None).unwrap();
+        h.push("TAIL", 1_i64, None).unwrap();
+        let card = builder::encode_commentary_card("COMMENT", "note").unwrap();
+        h.insert_card_bytes(0, card);
+        assert_eq!(h.first("OBJECT"), Some(Value::String("M31".into())));
+        assert_eq!(h.first("TAIL"), Some(Value::Integer(1)));
+        assert_eq!(h.comments().collect::<Vec<_>>(), vec!["note".to_string()]);
+    }
+
+    /// Renaming does change what a card is called, so the index has to
+    /// be rebuilt for it.
+    #[test]
+    fn rename_updates_the_index() {
+        let mut h = Header::empty();
+        h.push("OLD", 1_i64, None).unwrap();
+        h.push("KEEP", 2_i64, None).unwrap();
+        assert_eq!(h.rename_keyword("OLD", "NEW").unwrap(), 1);
+        assert_eq!(h.first("NEW"), Some(Value::Integer(1)));
+        assert_eq!(h.first("OLD"), None);
+        assert_eq!(h.first("KEEP"), Some(Value::Integer(2)));
+    }
+
+    /// The layout is derived from the bytes, so whatever a mutation
+    /// does to them, what the header holds must match what a fresh
+    /// derivation says. This walks a long mixed sequence of edits and
+    /// checks that after every one.
+    #[test]
+    fn the_held_layout_always_matches_a_fresh_one() {
+        // xorshift, so the sequence is reproducible without a dependency.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..60 {
+            let mut h = Header::empty();
+            for step in 0..40 {
+                let keyword = if rnd() % 4 == 0 {
+                    format!("HIERARCH ESO DET CHIP{}", rnd() % 5)
+                } else {
+                    format!("K{:03}", rnd() % 12)
+                };
+                match rnd() % 6 {
+                    0 => {
+                        let _ = h.push(keyword, (rnd() % 1000) as i64, None);
+                    }
+                    1 => {
+                        let _ = h.set(&keyword, (rnd() % 1000) as i64, None);
+                    }
+                    2 => {
+                        let at = (rnd() as usize) % (h.len() + 1);
+                        let _ = h.insert(at, keyword, (rnd() % 1000) as i64, None);
+                    }
+                    3 => {
+                        h.remove(&keyword);
+                    }
+                    4 => {
+                        let _ = h.push_commentary(CommentaryKind::History, "note");
+                    }
+                    // long enough to need a CONTINUE chain, which is
+                    // the case that makes a logical card span several
+                    // physical ones.
+                    _ => {
+                        let _ = h.set(&keyword, "z".repeat(90), None);
+                    }
+                }
+                let fresh = Layout::build(&h.bytes);
+                assert_eq!(
+                    h.layout().spans,
+                    fresh.spans,
+                    "round {round} step {step}: spans drifted"
+                );
+                assert_eq!(
+                    h.layout().index,
+                    fresh.index,
+                    "round {round} step {step}: index drifted"
+                );
+                // And the bytes still describe the same cards on the
+                // way back in.
+                let (re, _) = Header::parse_with(&h.to_bytes(), 0, true).unwrap();
+                let mine: Vec<(String, Option<Value>)> =
+                    h.cards().map(|c| (c.keyword(), c.value())).collect();
+                let theirs: Vec<(String, Option<Value>)> =
+                    re.cards().map(|c| (c.keyword(), c.value())).collect();
+                assert_eq!(mine, theirs, "round {round} step {step}: round trip");
+            }
+        }
+    }
+
+    /// Editing a header must not cost more the larger it gets. A
+    /// quadratic `set` made a 1600-card header take a quarter second
+    /// to update; the bound here is loose enough for a noisy machine
+    /// but far under what that regression would produce.
+    #[test]
+    fn editing_scales_with_the_number_of_edits_not_the_header() {
+        use std::time::Instant;
+        let elapsed = |n: usize| {
+            let mut h = Header::empty();
+            for i in 0..n {
+                h.push(format!("KEY{i:05}"), i as i64, None).unwrap();
+            }
+            let t = Instant::now();
+            for i in 0..n {
+                h.set(&format!("KEY{i:05}"), (i * 2) as i64, None).unwrap();
+            }
+            t.elapsed().as_secs_f64()
+        };
+        let small = elapsed(200).max(1e-6);
+        let large = elapsed(1600);
+        // Linear work grows 8x with 8x the edits; quadratic grows 64x.
+        assert!(
+            large / small < 24.0,
+            "editing looks super-linear: 200 keys took {small:.4}s, 1600 took {large:.4}s"
+        );
+    }
+
+    /// Comment text too long for its card continues onto `CONTINUE`
+    /// cards, and the reader rejoins every fragment.
+    #[test]
+    fn oversized_comment_round_trips_through_continuations() {
+        // Two-letter words: many break points, so the chunking is
+        // exercised rather than the single-split case.
+        let comment = "ab ".repeat(60).trim_end().to_string();
+        let mut h = Header::empty();
+        h.push("OBJECT", "M31", Some(&comment)).unwrap();
+        let (re, _) = Header::parse_with(&h.to_bytes(), 0, true).unwrap();
+        let card = re.first_card("OBJECT").expect("card present");
+        assert_eq!(card.value(), Some(Value::String("M31".into())));
+        assert_eq!(card.comment().as_deref(), Some(comment.as_str()));
+    }
+
+    /// A value that cannot carry a `CONTINUE` chain spills its comment
+    /// to a `COMMENT` card rather than to an orphan.
+    #[test]
+    fn unattachable_comment_spills_to_a_commentary_card() {
+        let comment = "a long note about the exposure that will not fit on one card at all";
+        let mut h = Header::empty();
+        h.push("EXPTIME", 30.0_f64, Some(comment)).unwrap();
+        let (re, _) = Header::parse_with(&h.to_bytes(), 0, true).unwrap();
+        // No orphaned CONTINUE card is left behind.
+        assert!(re.cards().all(|c| !c.has_keyword("CONTINUE")));
+        let tail: Vec<String> = re.comments().collect();
+        assert_eq!(tail.len(), 1);
+        // Every word survives, across the card and its overflow.
+        let head = re.first_card("EXPTIME").and_then(|c| c.comment()).unwrap();
+        assert_eq!(format!("{head} {}", tail[0]), comment);
+    }
+
+    /// Commentary too long for one card becomes several cards, and a
+    /// built header reads back exactly as a parsed one does.
+    #[test]
+    fn long_commentary_matches_its_parsed_form() {
+        let mut h = Header::empty();
+        h.push_commentary(CommentaryKind::History, &"y".repeat(150))
+            .unwrap();
+        let built: Vec<String> = h.history().collect();
+        let (re, _) = Header::parse_with(&h.to_bytes(), 0, true).unwrap();
+        let parsed: Vec<String> = re.history().collect();
+        assert_eq!(built, parsed);
+        assert_eq!(built.concat(), "y".repeat(150));
+    }
+
+    /// A header takes no card it could not write. Every construction
+    /// path encodes the card first, so an invalid one is refused at
+    /// the point it is offered rather than discovered on the way out.
+    #[test]
+    fn a_card_that_cannot_be_written_is_never_taken() {
+        let mut h = Header::empty();
+        // Non-printable bytes are forbidden on a card (Sec.4.1.1).
+        let bad = "caf\u{e9}";
+        assert!(h.push("OBJECT", bad, None).is_err());
+        assert!(h.push("OBJECT", "M31", Some(bad)).is_err());
+        assert!(h.push_commentary(CommentaryKind::Comment, bad).is_err());
+        assert!(h.push_commentary(CommentaryKind::History, bad).is_err());
+        assert!(h.set("OBJECT", bad, None).is_err());
+        assert!(h.insert(0, "OBJECT", bad, None).is_err());
+        // A refused card leaves nothing behind, and what the header
+        // does hold still writes.
+        assert!(h.is_empty());
+        assert_eq!(h.to_bytes().len(), BLOCK_SIZE);
+    }
+
+    /// Reading alters nothing. A card the Standard rejects is still
+    /// written back exactly as it was read; repairing it is something
+    /// a caller asks for with `normalize`.
+    #[test]
+    fn a_card_read_is_a_card_written() {
+        let mut raw = vec![b' '; BLOCK_SIZE];
+        let card = b"OBJECT  = 'M31'    / caf\xe9 au lait";
+        raw[..card.len()].copy_from_slice(card);
+        raw[CARD_SIZE..CARD_SIZE + 3].copy_from_slice(b"END");
+        let (mut h, _) = Header::parse_with(&raw, 0, true).unwrap();
+        assert_eq!(h.to_bytes(), raw, "a read card is written back unaltered");
+        // The caller can ask for the repair, and only then.
+        assert_eq!(h.normalize().unwrap(), 1);
+        assert!(!h.to_bytes().contains(&0xe9));
+    }
+
+    /// `remove` takes value cards. A commentary keyword names a
+    /// class of cards, not one card, so `remove` leaves those cards
+    /// in place.
+    #[test]
+    fn remove_leaves_commentary_cards_alone() {
+        let mut h = Header::empty();
+        h.push_commentary(CommentaryKind::Comment, "note").unwrap();
+        h.push("OBJECT", "M31", None).unwrap();
+        assert_eq!(h.remove("COMMENT"), 0);
+        assert_eq!(h.comments().count(), 1);
+        assert_eq!(h.remove("OBJECT"), 1);
+    }
+
+    /// A conforming card that is read and written unchanged comes
+    /// back byte-for-byte. The write path emits the stored bytes and
+    /// re-encodes no card.
+    #[test]
+    fn conforming_cards_round_trip_byte_for_byte() {
+        let cards = [
+            "SIMPLE  =                    T / conforms to FITS standard",
+            "BITPIX  =                   16 / array data type",
+            "NAXIS   =                    0",
+            // A comment sitting where our own encoder would not put it.
+            "OBSERVER= 'me'   / who observed",
+            // Duplicate keywords: legal, order-significant, not a map.
+            "NOTE    = 'one'                / first",
+            "NOTE    = 'two'                / second",
+            "COMMENT first light",
+            "HISTORY flat-fielded",
+            "END",
+        ];
+        let mut bytes = vec![b' '; BLOCK_SIZE];
+        for (i, c) in cards.iter().enumerate() {
+            bytes[i * CARD_SIZE..i * CARD_SIZE + c.len()].copy_from_slice(c.as_bytes());
+        }
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        assert_eq!(h.to_bytes(), bytes, "header did not round-trip verbatim");
+        // Both duplicates survive, in order: a keyword is not a key.
+        let notes: Vec<Value> = h.all("NOTE").filter_map(|c| c.value()).collect();
+        assert_eq!(
+            notes,
+            vec![Value::String("one".into()), Value::String("two".into())]
+        );
+    }
+
+    /// A long string and its `CONTINUE` cards are one logical card
+    /// spanning several physical ones.
+    #[test]
+    fn continue_chain_is_one_logical_card() {
+        let cards = [
+            "LONGSTR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&'",
+            "CONTINUE  'bbbbbbbbbbbbbbbb' / joined",
+            "END",
+        ];
+        let mut bytes = vec![b' '; BLOCK_SIZE];
+        for (i, c) in cards.iter().enumerate() {
+            bytes[i * CARD_SIZE..i * CARD_SIZE + c.len()].copy_from_slice(c.as_bytes());
+        }
+        let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        let card = h.first_card("LONGSTR").expect("card present");
+        assert_eq!(card.physical_cards(), 2);
+        assert_eq!(card.raw().len(), 2 * CARD_SIZE);
+        match card.value() {
+            Some(Value::String(s)) => assert!(s.starts_with('a') && s.ends_with('b')),
+            other => panic!("expected a joined string, got {other:?}"),
+        }
+        assert_eq!(h.to_bytes(), bytes);
+    }
+
+    /// Normalizing rewrites a card the Standard rejects and leaves
+    /// every conforming card exactly as it was.
+    #[test]
+    fn normalize_rewrites_only_the_non_conforming_card() {
+        let cards = [
+            "SIMPLE  =                    T",
+            "WEIRD   =             12.3.4.5 / unparsable value",
+            "OBSERVER= 'me'   / who observed",
+            "END",
+        ];
+        let mut bytes = vec![b' '; BLOCK_SIZE];
+        for (i, c) in cards.iter().enumerate() {
+            bytes[i * CARD_SIZE..i * CARD_SIZE + c.len()].copy_from_slice(c.as_bytes());
+        }
+        let (mut h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        // Until asked, even the malformed card is written back as read.
+        assert_eq!(h.to_bytes(), bytes);
+
+        assert_eq!(h.normalize().unwrap(), 1, "exactly one card needed fixing");
+        let out = h.to_bytes();
+        // The conforming neighbour is untouched; the repaired one is not.
+        assert_eq!(
+            &out[2 * CARD_SIZE..3 * CARD_SIZE],
+            &bytes[2 * CARD_SIZE..3 * CARD_SIZE]
+        );
+        assert_ne!(
+            &out[CARD_SIZE..2 * CARD_SIZE],
+            &bytes[CARD_SIZE..2 * CARD_SIZE]
+        );
+        // Normalizing keeps the text it could not parse as a value.
+        assert_eq!(h.first("WEIRD"), Some(Value::String("12.3.4.5".into())));
+    }
+
+    /// Editing one card rewrites that card and no other.
+    #[test]
+    fn editing_a_card_touches_only_that_card() {
+        let cards = [
+            "SIMPLE  =                    T / conforms to FITS standard",
+            "OBSERVER= 'me'   / who observed",
+            "END",
+        ];
+        let mut bytes = vec![b' '; BLOCK_SIZE];
+        for (i, c) in cards.iter().enumerate() {
+            bytes[i * CARD_SIZE..i * CARD_SIZE + c.len()].copy_from_slice(c.as_bytes());
+        }
+        let (mut h, _) = Header::parse_with(&bytes, 0, true).unwrap();
+        h.set("OBSERVER", "someone else", None).unwrap();
+        let out = h.to_bytes();
+        assert_eq!(
+            &out[..CARD_SIZE],
+            &bytes[..CARD_SIZE],
+            "SIMPLE was rewritten"
+        );
+        let observer = String::from_utf8_lossy(&out[CARD_SIZE..2 * CARD_SIZE]).to_string();
+        assert!(observer.contains("someone else"));
+        // An edit keeps the comment the caller did not replace.
+        assert!(observer.contains("who observed"));
+    }
+
     use super::*;
 
     fn make_header(cards: &[&str]) -> Vec<u8> {
@@ -755,12 +1288,11 @@ mod tests {
             }
             // Demoted to commentary: it must not be indexed as a value.
             let orphan = h
-                .entries()
-                .iter()
-                .find(|e| e.keyword == "CONTINUE")
+                .cards()
+                .find(|c| c.has_keyword("CONTINUE"))
                 .expect("orphan card is kept");
-            assert!(matches!(orphan.kind, CardKind::Commentary));
-            assert!(orphan.value.is_none());
+            assert!(orphan.is_commentary());
+            assert!(orphan.value().is_none());
         }
     }
 
@@ -797,7 +1329,7 @@ mod tests {
         ]);
         let (h, _) = Header::parse(&bytes, 0).unwrap();
         assert_eq!(
-            h.optional_string("STRKEY"),
+            h.optional_string("STRKEY").as_deref(),
             Some("This keyword value is continued  over multiple keyword records.")
         );
     }
@@ -914,7 +1446,7 @@ mod tests {
         ]);
         // Default (strict) parse succeeds and the value is still numeric.
         let (h, _) = Header::parse(&bytes, 0).unwrap();
-        assert_eq!(h.first("EXPTIME"), Some(&Value::Real(30.0)));
+        assert_eq!(h.first("EXPTIME"), Some(Value::Real(30.0)));
     }
 
     #[test]
@@ -961,7 +1493,7 @@ mod tests {
         ]);
         let (h, _) = Header::parse_with(&bytes, 0, true).unwrap();
         // Re-encoding preserves the raw value text unchanged.
-        let out = h.to_bytes().unwrap();
+        let out = h.to_bytes();
         let (h2, _) = Header::parse_with(&out, 0, true).unwrap();
         assert!(matches!(h2.first("EXPTIME"), Some(Value::Unparsed(s)) if s == "12.3.4.5"));
     }

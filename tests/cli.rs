@@ -153,7 +153,10 @@ fn funpack_keeps_a_stub_that_carries_metadata() {
     let out = FitsFile::open(&restored).unwrap();
     assert_eq!(out.len(), 2, "the stub carried metadata and must be kept");
     assert_eq!(
-        out.parsed_header(0).unwrap().optional_string("OBJECT"),
+        out.parsed_header(0)
+            .unwrap()
+            .optional_string("OBJECT")
+            .as_deref(),
         Some("kept")
     );
 
@@ -271,7 +274,7 @@ fn fpack_funpack_round_trip() {
         h.first("SIMPLE"),
         Some(fitsy::header::Value::Logical(true))
     ));
-    assert_eq!(h.optional_string("OBJECT"), Some("cli test"));
+    assert_eq!(h.optional_string("OBJECT").as_deref(), Some("cli test"));
     assert_eq!(h.optional_real("EXPTIME"), Some(12.5));
 
     for p in [&src, &packed, &restored] {

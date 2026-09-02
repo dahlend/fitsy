@@ -105,20 +105,13 @@ impl Header {
 fn apply_fix(header: &mut Header, fix: &Fix) {
     match fix {
         Fix::RenameKeyword { from, to } => {
-            for entry in header.cards_mut() {
-                if entry.keyword == *from {
-                    entry.keyword.clone_from(to);
-                }
-            }
-            header.rebuild_index();
+            let _ = header.rename_keyword(from, to);
         }
         Fix::RemoveKeyword { keyword } => {
             header.remove(keyword);
         }
         Fix::SetStringValue { keyword, value } => {
-            if let Some(entry) = header.first_value_entry_mut(keyword) {
-                entry.value = Some(Value::String(value.clone()));
-            }
+            let _ = header.set(keyword, Value::String(value.clone()), None);
         }
     }
 }
@@ -212,12 +205,13 @@ fn check_exptime_type(hdr: &Header, diags: &mut Vec<Diagnostic>) {
 /// `CROTAn` is a deprecated WCS rotation keyword (WCS Paper I, Sec.6.1).
 /// The canonical representation uses the `PCi_j` matrix.
 fn check_crota(hdr: &Header, diags: &mut Vec<Diagnostic>) {
-    for entry in hdr.entries() {
-        if let Some(suffix) = entry.keyword.strip_prefix("CROTA")
+    for card in hdr.cards() {
+        let kw = card.keyword();
+        if let Some(suffix) = kw.strip_prefix("CROTA")
             && !suffix.is_empty()
             && suffix.bytes().all(|b| b.is_ascii_digit())
         {
-            let keyword = entry.keyword.clone();
+            let keyword = kw.clone();
             let message = format!(
                 "{keyword} is a deprecated rotation keyword; \
                  migrate to the PCi_j matrix (WCS Paper I, Sec.6.1)"
@@ -236,13 +230,13 @@ fn check_crota(hdr: &Header, diags: &mut Vec<Diagnostic>) {
 /// order (FITS Standard Sec.4.4.1.1). Commentary cards may appear anywhere.
 fn check_mandatory_order(hdr: &Header, diags: &mut Vec<Diagnostic>) {
     let mut value_kws = hdr
-        .entries()
-        .iter()
-        .filter(|e| e.value.is_some())
-        .map(|e| e.keyword.as_str());
+        .cards()
+        .filter(|c| !c.is_commentary())
+        .map(|c| c.keyword());
     let pos1 = value_kws.next();
     let pos2 = value_kws.next();
     let pos3 = value_kws.next();
+    let (pos1, pos2, pos3) = (pos1.as_deref(), pos2.as_deref(), pos3.as_deref());
 
     if !matches!(pos1, Some("SIMPLE" | "XTENSION") | None) {
         diags.push(Diagnostic {
@@ -493,7 +487,10 @@ mod tests {
             "DATE-OBS= '15/06/98'",
         ]);
         let (_, fixed) = h.validate(true);
-        assert_eq!(fixed.optional_string("DATE-OBS"), Some("1998-06-15"));
+        assert_eq!(
+            fixed.optional_string("DATE-OBS").as_deref(),
+            Some("1998-06-15")
+        );
     }
 
     #[test]

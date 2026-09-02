@@ -57,7 +57,7 @@ impl Wcs {
             .first(&format!("WCSAXES{alt_suffix}"))
             .or_else(|| header.first(&format!("WCSDIM{alt_suffix}")))
         {
-            Some(Value::Integer(n)) if *n > 0 => *n as usize,
+            Some(Value::Integer(n)) if n > 0 => n as usize,
             _ => header_naxis,
         };
 
@@ -606,11 +606,11 @@ fn read_real(header: &Header, key: &str, default: f64, hit: &mut bool) -> f64 {
     match header.first(key) {
         Some(Value::Integer(i)) => {
             *hit = true;
-            *i as f64
+            i as f64
         }
         Some(Value::Real(r)) => {
             *hit = true;
-            *r
+            r
         }
         _ => default,
     }
@@ -618,8 +618,8 @@ fn read_real(header: &Header, key: &str, default: f64, hit: &mut bool) -> f64 {
 
 fn read_optional_real(header: &Header, key: &str) -> Option<f64> {
     match header.first(key)? {
-        Value::Integer(i) => Some(*i as f64),
-        Value::Real(r) => Some(*r),
+        Value::Integer(i) => Some(i as f64),
+        Value::Real(r) => Some(r),
         _ => None,
     }
 }
@@ -656,8 +656,8 @@ fn read_iraf_subimage(header: &Header, n: usize) -> Result<(Vec<f64>, Vec<f64>, 
         if let Some(v) = header.first(&key) {
             any = true;
             ltv[i - 1] = match v {
-                Value::Integer(k) => *k as f64,
-                Value::Real(r) => *r,
+                Value::Integer(k) => k as f64,
+                Value::Real(r) => r,
                 _ => return Err(FitsError::Wcs(format!("{key} must be numeric"))),
             };
         }
@@ -668,8 +668,8 @@ fn read_iraf_subimage(header: &Header, n: usize) -> Result<(Vec<f64>, Vec<f64>, 
             if let Some(v) = header.first(&key) {
                 any = true;
                 ltm[(i - 1) * n + (j - 1)] = match v {
-                    Value::Integer(k) => *k as f64,
-                    Value::Real(r) => *r,
+                    Value::Integer(k) => k as f64,
+                    Value::Real(r) => r,
                     _ => return Err(FitsError::Wcs(format!("{key} must be numeric"))),
                 };
             }
@@ -709,8 +709,8 @@ fn read_matrix(header: &Header, name: &str, alt: &str, n: usize) -> Result<Optio
             if let Some(v) = header.first(&key) {
                 any = true;
                 let r = match v {
-                    Value::Integer(i) => *i as f64,
-                    Value::Real(r) => *r,
+                    Value::Integer(i) => i as f64,
+                    Value::Real(r) => r,
                     _ => {
                         return Err(FitsError::Wcs(format!("{key} must be numeric")));
                     }
@@ -732,8 +732,8 @@ fn collect_pv(header: &Header, axis: usize, alt: &str, count: usize) -> Vec<f64>
     for m in 0..count {
         let key = format!("PV{axis}_{m}{alt}");
         let v = match header.first(&key) {
-            Some(Value::Integer(i)) => *i as f64,
-            Some(Value::Real(r)) => *r,
+            Some(Value::Integer(i)) => i as f64,
+            Some(Value::Real(r)) => r,
             _ => 0.0,
         };
         out.push(v);
@@ -750,8 +750,8 @@ fn collect_pv_pairs(header: &Header, axis: usize, alt: &str) -> Vec<(u32, f64)> 
         let key = format!("PV{axis}_{m}{alt}");
         if let Some(v) = header.first(&key) {
             let val = match v {
-                Value::Integer(i) => *i as f64,
-                Value::Real(r) => *r,
+                Value::Integer(i) => i as f64,
+                Value::Real(r) => r,
                 _ => continue,
             };
             out.push((m, val));
@@ -803,8 +803,8 @@ fn collect_sip_poly(header: &Header, prefix: &str, order: u32) -> Result<SipPoly
             let key = format!("{prefix}_{p}_{q}");
             if let Some(v) = header.first(&key) {
                 let val = match v {
-                    Value::Integer(i) => *i as f64,
-                    Value::Real(r) => *r,
+                    Value::Integer(i) => i as f64,
+                    Value::Real(r) => r,
                     _ => {
                         return Err(FitsError::Wcs(format!("{key} must be numeric")));
                     }
@@ -818,7 +818,7 @@ fn collect_sip_poly(header: &Header, prefix: &str, order: u32) -> Result<SipPoly
 
 fn read_required_uint(header: &Header, key: &str) -> Result<u32> {
     match header.first(key) {
-        Some(Value::Integer(i)) if *i >= 0 => Ok(*i as u32),
+        Some(Value::Integer(i)) if i >= 0 => Ok(i as u32),
         Some(_) => Err(FitsError::Wcs(format!(
             "{key} must be a non-negative integer"
         ))),
@@ -828,7 +828,7 @@ fn read_required_uint(header: &Header, key: &str) -> Result<u32> {
 
 fn read_optional_uint(header: &Header, key: &str) -> Option<u32> {
     match header.first(key) {
-        Some(Value::Integer(i)) if *i >= 0 => Some(*i as u32),
+        Some(Value::Integer(i)) if i >= 0 => Some(i as u32),
         _ => None,
     }
 }
@@ -1041,18 +1041,18 @@ fn read_tab_spec(header: &Header, alt_suffix: &str, axis: usize) -> Result<TabSp
         _ => None,
     };
     let extver = match header.first(&format!("PV{i}_1{alt_suffix}")) {
-        Some(Value::Integer(v)) => *v,
-        Some(Value::Real(r)) => *r as i64,
+        Some(Value::Integer(v)) => v,
+        Some(Value::Real(r)) => r as i64,
         _ => 1,
     };
     let extlevel = match header.first(&format!("PV{i}_2{alt_suffix}")) {
-        Some(Value::Integer(v)) => *v,
-        Some(Value::Real(r)) => *r as i64,
+        Some(Value::Integer(v)) => v,
+        Some(Value::Real(r)) => r as i64,
         _ => 1,
     };
     let coord_axis = match header.first(&format!("PV{i}_3{alt_suffix}")) {
-        Some(Value::Integer(v)) if *v > 0 => *v as u32,
-        Some(Value::Real(r)) if *r > 0.0 => *r as u32,
+        Some(Value::Integer(v)) if v > 0 => v as u32,
+        Some(Value::Real(r)) if r > 0.0 => r as u32,
         _ => 1,
     };
     Ok(TabSpec {

@@ -238,7 +238,7 @@ pub use hdu::{
     BinFormat, BinTableBuilder, BinTableHdu, BinValue, FitsFile, Hdu, ImageBuilder, ImageHdu,
     ImagePixels,
 };
-pub use header::{Card, CommentaryKind, Diagnostic, Fix, Header, IsoDateTime, Level, Value};
+pub use header::{CardView, CommentaryKind, Diagnostic, Fix, Header, IsoDateTime, Level, Value};
 #[cfg(not(target_arch = "wasm32"))]
 pub use io::FitsAppender;
 #[cfg(not(target_arch = "wasm32"))]
@@ -249,4 +249,5 @@ pub use wcs::{AxisKind, Wcs};
 #[cfg(feature = "compression")]
 pub use compression::{
     Codec, CompressedImageHdu, DitherMethod, OwnedImage, Quantize, TileOpts, compress_image_to_hdu,
+    is_reserved_by_compression, reserved_keywords,
 };

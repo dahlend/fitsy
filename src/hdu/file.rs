@@ -963,7 +963,7 @@ impl FitsFile {
             if let Some(want) = ver {
                 let (header, _) = Header::parse_with(&self.header_bytes[i], 0, self.lenient)?;
                 let have = match header.first("EXTVER") {
-                    Some(Value::Integer(v)) => *v,
+                    Some(Value::Integer(v)) => v,
                     _ => 1,
                 };
                 if have != want {
@@ -1176,7 +1176,7 @@ impl FitsFile {
     /// `BINTABLE`.
     fn bintable_header(&self, i: usize) -> Result<Header> {
         let header = self.parsed_header(i)?;
-        match header.optional_string("XTENSION") {
+        match header.optional_string("XTENSION").as_deref() {
             Some("BINTABLE") => Ok(header),
             other => Err(FitsError::HduMismatch {
                 expected: "BINTABLE",

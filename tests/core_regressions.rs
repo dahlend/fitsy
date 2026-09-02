@@ -113,13 +113,13 @@ fn continue_chunking_never_splits_quote_escape() {
     for val in values {
         let mut h = Header::empty();
         h.push("SVAL", Value::String(val.clone()), None).unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         for lenient in [false, true] {
             let (parsed, _) = Header::parse_with(&bytes, 0, lenient)
                 .unwrap_or_else(|e| panic!("reparse (lenient={lenient}) failed: {e}"));
             match parsed.first("SVAL") {
                 Some(Value::String(s)) => {
-                    assert_eq!(s, &val, "value corrupted (lenient={lenient})");
+                    assert_eq!(s, val, "value corrupted (lenient={lenient})");
                 }
                 other => panic!("SVAL parsed as {other:?}"),
             }

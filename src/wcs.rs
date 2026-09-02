@@ -1582,7 +1582,7 @@ fn load_tab_group(file: &crate::FitsFile, specs: &[&TabSpec]) -> Result<TabGroup
     // Sec.6.2 identifies the table by the EXTNAME/EXTVER/EXTLEVEL
     // triple; `hdu_by_name` matches the first two, so confirm the third.
     let found_level = match bin.header().first("EXTLEVEL") {
-        Some(crate::header::value::Value::Integer(v)) => *v,
+        Some(crate::header::value::Value::Integer(v)) => v,
         _ => 1,
     };
     if found_level != first.extlevel {

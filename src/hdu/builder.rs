@@ -201,7 +201,7 @@ impl<T: Pixel> ImageBuilder<T> {
             h.push(k, v, c.as_deref())?;
         }
         for line in self.history {
-            h.push_commentary(CommentaryKind::History, &line);
+            h.push_commentary(CommentaryKind::History, &line)?;
         }
 
         // Serialize pixels big-endian.
@@ -658,7 +658,7 @@ impl BinTableBuilder {
             h.push(k, v, c.as_deref())?;
         }
         for line in self.history {
-            h.push_commentary(CommentaryKind::History, &line);
+            h.push_commentary(CommentaryKind::History, &line)?;
         }
         let mut out = row_bytes;
         out.extend_from_slice(heap_bytes);
@@ -994,7 +994,7 @@ impl AsciiTableBuilder {
             h.push(k, v, c.as_deref())?;
         }
         for line in self.history {
-            h.push_commentary(CommentaryKind::History, &line);
+            h.push_commentary(CommentaryKind::History, &line)?;
         }
         Ok((h, data))
     }
@@ -1328,7 +1328,7 @@ mod tests {
         let (h, data) = bt.build_with_heap(payloads.len(), row_data, &heap).unwrap();
 
         // Sanity check on the emitted header.
-        assert!(matches!(h.first("PCOUNT"), Some(Value::Integer(p)) if *p > 0));
+        assert!(matches!(h.first("PCOUNT"), Some(Value::Integer(p)) if p > 0));
         match h.first("TFORM2") {
             Some(Value::String(s)) => assert!(s.contains('P') && s.contains('J')),
             _ => panic!("missing TFORM2"),

@@ -28,7 +28,8 @@ fn build_minimal_primary_from_scratch_round_trips() {
         .unwrap();
     h.push("BITPIX", Value::Integer(8), None).unwrap();
     h.push("NAXIS", Value::Integer(0), None).unwrap();
-    h.push_commentary(CommentaryKind::History, "built by fitsy writer test");
+    h.push_commentary(CommentaryKind::History, "built by fitsy writer test")
+        .unwrap();
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
@@ -49,12 +50,7 @@ fn build_minimal_primary_from_scratch_round_trips() {
     }
     let h2 = parsed.hdu(0).unwrap();
     let header = h2.header();
-    let history: Vec<_> = header
-        .entries()
-        .iter()
-        .filter(|e| e.keyword == "HISTORY")
-        .filter_map(|e| e.commentary.clone())
-        .collect();
+    let history: Vec<String> = header.history().collect();
     assert_eq!(history, vec!["built by fitsy writer test".to_string()]);
 }
 
@@ -107,7 +103,7 @@ fn long_string_round_trips_via_writer() {
     let parsed = FitsFile::from_bytes(buf).unwrap();
     let hdu = parsed.hdu(0).unwrap();
     match hdu.header().first("OBJECT").unwrap() {
-        Value::String(s) => assert_eq!(s, &payload),
+        Value::String(s) => assert_eq!(s, payload),
         other => panic!("not a string: {other:?}"),
     }
 }

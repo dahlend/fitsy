@@ -621,7 +621,7 @@ fn synthetic_header_preserves_non_reserved_z_keywords() {
     assert_eq!(synth.bitpix().unwrap(), 16);
     assert_eq!(synth.axes().unwrap(), vec![nx as u64, ny as u64]);
     assert_eq!(
-        synth.optional_string("CTYPE1").map(str::to_string),
+        synth.optional_string("CTYPE1"),
         Some("RA---TAN".to_string())
     );
 }

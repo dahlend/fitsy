@@ -1116,14 +1116,15 @@ mod tests {
             // Guard the guard: confirm the distortion actually moves
             // coordinates, so a silent drop would be detectable.
             let mut plain = Header::empty();
-            for e in h.entries() {
-                let key = match e.keyword.as_str() {
-                    "CTYPE1" | "CTYPE2" if ctype == "TNX" => e.keyword.as_str(),
+            for e in h.cards() {
+                let kw_owned = e.keyword();
+                let key = match kw_owned.as_str() {
+                    "CTYPE1" | "CTYPE2" if ctype == "TNX" => kw_owned.as_str(),
                     k if k.starts_with("PV") || k.starts_with("WAT") => continue,
                     k => k,
                 };
-                if let Some(v) = &e.value {
-                    plain.push(key, v.clone(), None).unwrap();
+                if let Some(v) = e.value() {
+                    plain.push(key, v, None).unwrap();
                 }
             }
             if ctype == "TNX" {

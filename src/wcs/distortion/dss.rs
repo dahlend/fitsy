@@ -439,16 +439,16 @@ fn amd_eval(t: &[f64; AMD_DIM * AMD_DIM], x: f64, y: f64) -> f64 {
 
 fn read_real(header: &Header, key: &str) -> Result<f64> {
     match header.first(key) {
-        Some(Value::Integer(i)) => Ok(*i as f64),
-        Some(Value::Real(r)) => Ok(*r),
+        Some(Value::Integer(i)) => Ok(i as f64),
+        Some(Value::Real(r)) => Ok(r),
         _ => Err(FitsError::Wcs(format!("DSS: missing or non-numeric {key}"))),
     }
 }
 
 fn read_optional_real(header: &Header, key: &str) -> Option<f64> {
     match header.first(key)? {
-        Value::Integer(i) => Some(*i as f64),
-        Value::Real(r) => Some(*r),
+        Value::Integer(i) => Some(i as f64),
+        Value::Real(r) => Some(r),
         _ => None,
     }
 }

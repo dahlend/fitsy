@@ -131,8 +131,8 @@ impl TableWcs {
     pub fn from_pixel_list(header: &Header, alt: char) -> Result<Option<Self>> {
         let suffix = alt_suffix(alt)?;
         let mut columns: Vec<usize> = Vec::new();
-        for entry in header.entries() {
-            if let Some(col) = pixel_list_axis_column(&entry.keyword, alt)
+        for entry in header.cards() {
+            if let Some(col) = pixel_list_axis_column(entry.keyword().as_str(), alt)
                 && !columns.contains(&col)
             {
                 columns.push(col);
@@ -160,11 +160,13 @@ impl TableWcs {
         }
         // Matrices and coordinate parameters index columns, not axes,
         // on both sides of the underscore.
-        for entry in header.entries() {
-            let kw = &entry.keyword;
-            let Some(value) = entry.value.as_ref() else {
+        for entry in header.cards() {
+            let kw_owned = entry.keyword();
+            let kw = kw_owned.as_str();
+            let Some(value) = entry.value() else {
                 continue;
             };
+            let value = &value;
             for (image_root, roots) in [("PC", ["TPC", "TP"]), ("CD", ["TCD", "TC"])] {
                 for root in roots {
                     if let Some((n, k, a)) = split_pair(kw, root)
@@ -221,8 +223,8 @@ impl TableWcs {
             )));
         }
         let mut max_axis = 0_usize;
-        for entry in header.entries() {
-            if let Some(axis) = bintable_axis(&entry.keyword, column, alt) {
+        for entry in header.cards() {
+            if let Some(axis) = bintable_axis(entry.keyword().as_str(), column, alt) {
                 max_axis = max_axis.max(axis);
             }
         }
@@ -233,7 +235,7 @@ impl TableWcs {
         let declared = header
             .first(&format!("WCAX{column}{suffix}"))
             .and_then(|v| match v {
-                Value::Integer(n) if *n > 0 && *n <= 999 => Some(*n as usize),
+                Value::Integer(n) if n > 0 && n <= 999 => Some(n as usize),
                 _ => None,
             });
         let naxes = declared.unwrap_or(max_axis).max(max_axis);
@@ -249,11 +251,13 @@ impl TableWcs {
                 }
             }
         }
-        for entry in header.entries() {
-            let kw = &entry.keyword;
-            let Some(value) = entry.value.as_ref() else {
+        for entry in header.cards() {
+            let kw_owned = entry.keyword();
+            let kw = kw_owned.as_str();
+            let Some(value) = entry.value() else {
                 continue;
             };
+            let value = &value;
             for (image_root, root) in [("PC", "PC"), ("CD", "CD")] {
                 if let Some((i, j, n, a)) = split_matrix_prefixed(kw, root)
                     && a == alt
@@ -299,8 +303,8 @@ impl TableWcs {
     #[must_use]
     pub fn pixel_list_alternates(header: &Header) -> Vec<char> {
         let mut out = Vec::new();
-        for entry in header.entries() {
-            if let Some((_, alt)) = split_pixel_list_axis(&entry.keyword)
+        for entry in header.cards() {
+            if let Some((_, alt)) = split_pixel_list_axis(entry.keyword().as_str())
                 && !out.contains(&alt)
             {
                 out.push(alt);
@@ -316,8 +320,8 @@ impl TableWcs {
     #[must_use]
     pub fn image_columns(header: &Header) -> Vec<(usize, Vec<char>)> {
         let mut by_col: BTreeMap<usize, Vec<char>> = BTreeMap::new();
-        for entry in header.entries() {
-            let Some((_, col, alt)) = split_bintable_axis(&entry.keyword) else {
+        for entry in header.cards() {
+            let Some((_, col, alt)) = split_bintable_axis(entry.keyword().as_str()) else {
                 continue;
             };
             let alts = by_col.entry(col).or_default();
@@ -341,15 +345,15 @@ fn image_key(root: &str, axis: usize, suffix: &str) -> String {
 /// to the table's coordinate descriptions too.
 fn inherited_cards(header: &Header) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
-    for entry in header.entries() {
-        let Some(value) = entry.value.as_ref() else {
+    for entry in header.cards() {
+        let Some(value) = entry.value() else {
             continue;
         };
-        if is_image_axis_keyword(&entry.keyword) {
+        let keyword = entry.keyword();
+        if is_image_axis_keyword(&keyword) {
             continue;
         }
-        out.entry(entry.keyword.clone())
-            .or_insert_with(|| value.clone());
+        out.entry(keyword).or_insert(value);
     }
     out
 }
@@ -385,16 +389,17 @@ fn insert_globals(header: &Header, out: &mut BTreeMap<String, Value>, alt: char,
     for (image_key, roots, has_alt) in GLOBAL_KEYWORDS {
         let mut found: Option<Value> = None;
         'roots: for root in *roots {
-            for entry in header.entries() {
-                let Some(value) = entry.value.as_ref() else {
+            for entry in header.cards() {
+                let Some(value) = entry.value() else {
                     continue;
                 };
+                let value = &value;
                 let matched = if *has_alt {
-                    split_indexed(&entry.keyword, root).is_some_and(|(_, a)| a == alt)
+                    split_indexed(entry.keyword().as_str(), root).is_some_and(|(_, a)| a == alt)
                 } else {
                     // No alternate code defined for this row, so the
                     // whole tail must be the (ignored) column index.
-                    split_indexed(&entry.keyword, root).is_some_and(|(_, a)| a == ' ')
+                    split_indexed(entry.keyword().as_str(), root).is_some_and(|(_, a)| a == ' ')
                 };
                 if matched {
                     found = Some(value.clone());

@@ -34,9 +34,10 @@
 //!   boundary (Sec.3.1).
 
 use crate::error::{FitsError, Result};
+use crate::header::Header;
 use crate::header::card::{CARD_SIZE, KEYWORD_LEN, VALUE_INDICATOR_LEN};
 use crate::header::value::Value;
-use crate::header::{Header, HeaderEntry};
+#[cfg(test)]
 use crate::io::block::BLOCK_SIZE;
 
 /// Kind of a commentary card (Standard Sec.4.4.2.4-Sec.4.4.2.5).
@@ -89,6 +90,20 @@ impl CommentaryKind {
             Self::Blank => "",
         }
     }
+
+    /// The kind a commentary card's keyword field names.
+    ///
+    /// Any keyword other than `COMMENT` or `HISTORY` maps to
+    /// [`Blank`](Self::Blank), which is the remaining Sec.4.4.2.4
+    /// commentary form.
+    #[must_use]
+    pub fn from_keyword(keyword: &str) -> Self {
+        match keyword {
+            "COMMENT" => Self::Comment,
+            "HISTORY" => Self::History,
+            _ => Self::Blank,
+        }
+    }
 }
 
 impl Header {
@@ -97,9 +112,7 @@ impl Header {
     /// always appends an `END` card and pads to a 2880-byte block.
     #[must_use]
     pub fn empty() -> Self {
-        // SAFETY-style note: the public constructor in the parent module
-        // builds via `parse`. We mirror its zero-state here.
-        Self::from_parts(Vec::new(), 0)
+        Self::from_bytes(Vec::new())
     }
 
     /// Append a value card.
@@ -136,35 +149,35 @@ impl Header {
         // Route the value to a commentary card instead.
         if let Some(kind) = commentary_kind_of(&keyword) {
             let text = commentary_text(&value.into());
-            self.push_commentary(kind, &text);
+            self.push_commentary(kind, &text)?;
             return Ok(self);
         }
-        let entry = HeaderEntry {
-            keyword,
-            kind: crate::header::card::CardKind::Value,
-            value: Some(value.into()),
-            comment: comment.map(ToString::to_string),
-            commentary: None,
-        };
-        self.append_entry(entry);
+        let bytes = encode_value_card(&keyword, &value.into(), comment)?;
+        self.append_card_bytes(&bytes);
         Ok(self)
     }
 
     /// Append a commentary card holding `text`.
     ///
     /// The `kind` argument picks the keyword: `COMMENT`, `HISTORY` or
-    /// a blank keyword. The `text` argument takes any length, and
-    /// [`Header::to_bytes`] splits long text across several cards.
-    pub fn push_commentary(&mut self, kind: CommentaryKind, text: &str) -> &mut Self {
-        let entry = HeaderEntry {
-            keyword: kind.keyword().to_string(),
-            kind: crate::header::card::CardKind::Commentary,
-            value: None,
-            comment: None,
-            commentary: Some(text.to_string()),
-        };
-        self.append_entry(entry);
-        self
+    /// a blank keyword. The `text` argument takes any length.
+    ///
+    /// # Errors
+    ///
+    /// [`FitsError::Header`] when `text` holds a byte the Standard
+    /// does not allow on a card, which is any byte outside printable
+    /// ASCII (Sec.4.1.1). The header is left unchanged: a card it
+    /// could not write is a card it does not take.
+    pub fn push_commentary(&mut self, kind: CommentaryKind, text: &str) -> Result<&mut Self> {
+        let bytes = encode_commentary_card(kind.keyword(), text)?;
+        // Text longer than one card becomes several cards. Each
+        // is one commentary record. A parse of these bytes
+        // returns the same records, so a built header and a
+        // parsed header hold the same cards.
+        for card in bytes.chunks(CARD_SIZE) {
+            self.append_card_bytes(card);
+        }
+        Ok(self)
     }
 
     /// Replace the value of the first card with `keyword`, or append
@@ -197,11 +210,15 @@ impl Header {
             self.push(keyword.to_string(), value, comment)?;
             return Ok(false);
         }
-        if let Some(entry) = self.first_value_entry_mut(keyword) {
-            entry.value = Some(value);
-            if let Some(c) = comment {
-                entry.comment = Some(c.to_string());
-            }
+        if let Some(idx) = self.first_value_index(keyword) {
+            // Keep the existing comment when the caller supplies none.
+            let existing = match comment {
+                Some(_) => None,
+                None => self.card(idx).and_then(|c| c.comment()),
+            };
+            let comment = comment.or(existing.as_deref());
+            let bytes = encode_value_card(keyword, &value, comment)?;
+            self.replace_card_bytes(idx, bytes);
             return Ok(true);
         }
         self.push(keyword.to_string(), value, comment)?;
@@ -230,14 +247,8 @@ impl Header {
     ) -> Result<&mut Self> {
         let keyword = keyword.into();
         validate_keyword(&keyword)?;
-        let entry = HeaderEntry {
-            keyword,
-            kind: crate::header::card::CardKind::Value,
-            value: Some(value.into()),
-            comment: comment.map(ToString::to_string),
-            commentary: None,
-        };
-        self.insert_entry(idx, entry);
+        let bytes = encode_value_card(&keyword, &value.into(), comment)?;
+        self.insert_card_bytes(idx, bytes);
         Ok(self)
     }
 
@@ -267,18 +278,12 @@ impl Header {
         let pos = self.first_value_index(after);
         let keyword = keyword.into();
         validate_keyword(&keyword)?;
-        let entry = HeaderEntry {
-            keyword,
-            kind: crate::header::card::CardKind::Value,
-            value: Some(value.into()),
-            comment: comment.map(ToString::to_string),
-            commentary: None,
-        };
+        let bytes = encode_value_card(&keyword, &value.into(), comment)?;
         if let Some(i) = pos {
-            self.insert_entry(i + 1, entry);
+            self.insert_card_bytes(i + 1, bytes);
             Ok(true)
         } else {
-            self.append_entry(entry);
+            self.append_card_bytes(&bytes);
             Ok(false)
         }
     }
@@ -309,18 +314,12 @@ impl Header {
         let pos = self.first_value_index(before);
         let keyword = keyword.into();
         validate_keyword(&keyword)?;
-        let entry = HeaderEntry {
-            keyword,
-            kind: crate::header::card::CardKind::Value,
-            value: Some(value.into()),
-            comment: comment.map(ToString::to_string),
-            commentary: None,
-        };
+        let bytes = encode_value_card(&keyword, &value.into(), comment)?;
         if let Some(i) = pos {
-            self.insert_entry(i, entry);
+            self.insert_card_bytes(i, bytes);
             Ok(true)
         } else {
-            self.append_entry(entry);
+            self.append_card_bytes(&bytes);
             Ok(false)
         }
     }
@@ -336,85 +335,75 @@ impl Header {
     /// [`Header::push`] lists the rules.
     pub fn rename_keyword(&mut self, old: &str, new: &str) -> Result<usize> {
         validate_keyword(new)?;
-        let mut count = 0_usize;
-        for entry in self.cards_mut().iter_mut() {
-            if matches!(entry.kind, crate::header::card::CardKind::Value) && entry.keyword == old {
-                entry.keyword = new.to_string();
-                count += 1;
+        let mut rewritten: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (idx, card) in self.cards().enumerate() {
+            if card.is_commentary() || !card.has_keyword(old) {
+                continue;
             }
+            let Some((value, comment)) = card.parsed() else {
+                continue;
+            };
+            // A renamed card is a different card, so it is encoded
+            // afresh rather than keeping the bytes of the old name.
+            rewritten.push((idx, encode_value_card(new, &value, comment.as_deref())?));
         }
-        if count > 0 {
-            self.rebuild_index();
+        let count = rewritten.len();
+        for (idx, bytes) in rewritten {
+            self.replace_card_bytes(idx, bytes);
         }
         Ok(count)
-    }
-
-    /// Render this header to bytes, ending with an `END` card and
-    /// ASCII spaces out to the next 2880-byte boundary.
-    ///
-    /// # Errors
-    ///
-    /// [`FitsError::Header`] when a card cannot be encoded into 80
-    /// bytes. A keyword longer than the card, or a `HIERARCH` name
-    /// that leaves no room for its value, causes this.
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut out: Vec<u8> = Vec::with_capacity(BLOCK_SIZE);
-        for entry in self.entries() {
-            match entry.kind {
-                crate::header::card::CardKind::Value => {
-                    write_value_entry(&mut out, entry)?;
-                }
-                crate::header::card::CardKind::Commentary => {
-                    write_commentary_entry(&mut out, entry)?;
-                }
-                crate::header::card::CardKind::Continue => {
-                    // Should never appear in a built header -- parsed
-                    // headers fold continuations into their parent
-                    // string. If we see one, treat it as a stray
-                    // commentary so we don't panic.
-                    write_commentary_entry(&mut out, entry)?;
-                }
-                crate::header::card::CardKind::End => {
-                    // Skip -- we always emit our own END card below.
-                }
-            }
-        }
-        // END card.
-        let mut end = [b' '; CARD_SIZE];
-        end[..3].copy_from_slice(b"END");
-        out.extend_from_slice(&end);
-        // Pad to block boundary with ASCII spaces.
-        while !out.len().is_multiple_of(BLOCK_SIZE) {
-            out.push(b' ');
-        }
-        Ok(out)
     }
 }
 
 // -- Card encoders ------------------------------------------------
 
-fn write_value_entry(out: &mut Vec<u8>, entry: &HeaderEntry) -> Result<()> {
-    let value = entry
-        .value
-        .as_ref()
-        .ok_or_else(|| FitsError::Header(format!("value card `{}` has no value", entry.keyword)))?;
-
+/// Encode one value card, with the `CONTINUE` cards it needs.
+///
+/// This is the only place that turns a value card into bytes. It runs
+/// when a caller creates or edits a card. The write path does not
+/// call it, so it does not re-encode a card that the header holds.
+///
+/// The `keyword` argument is the card keyword. The `value` argument
+/// becomes the value field. The `comment` argument becomes the inline
+/// comment after the `/`.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when `keyword` is not a legal FITS keyword,
+/// when the value does not fit on a card, or when the value or the
+/// comment holds a byte outside printable ASCII.
+pub(crate) fn encode_value_card(
+    keyword: &str,
+    value: &Value,
+    comment: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(CARD_SIZE);
     if let Value::String(s) = value {
-        write_string_value_with_continue(out, &entry.keyword, s, entry.comment.as_deref())?;
-        return Ok(());
+        write_string_value_with_continue(&mut out, keyword, s, comment)?;
+        return Ok(out);
     }
-
     let value_field = format_scalar_value(value)?;
-    let card = encode_single_value_card(&entry.keyword, &value_field, entry.comment.as_deref())?;
+    let (card, tail) = encode_single_value_card(keyword, &value_field, comment)?;
     out.extend_from_slice(&card);
-    Ok(())
+    write_unattached_spill(&mut out, tail)?;
+    Ok(out)
 }
 
-fn write_commentary_entry(out: &mut Vec<u8>, entry: &HeaderEntry) -> Result<()> {
+/// Encode one commentary card. Text longer than one card continues
+/// on further cards with the same keyword.
+///
+/// The `keyword` argument is `COMMENT`, `HISTORY` or the blank
+/// keyword. The `text` argument is the free text of the card.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when `keyword` is longer than eight
+/// characters, or when `text` holds a byte outside printable ASCII.
+pub(crate) fn encode_commentary_card(keyword: &str, text: &str) -> Result<Vec<u8>> {
     // 72 bytes of payload per card (columns 9..80).
     const PAYLOAD: usize = CARD_SIZE - KEYWORD_LEN;
-    let text = entry.commentary.as_deref().unwrap_or("");
-    let kw = entry.keyword.as_str();
+    let mut out: Vec<u8> = Vec::with_capacity(CARD_SIZE);
+    let kw = keyword;
     if kw.len() > KEYWORD_LEN {
         return Err(FitsError::Header(format!(
             "commentary keyword `{kw}` exceeds {KEYWORD_LEN} chars"
@@ -424,7 +413,7 @@ fn write_commentary_entry(out: &mut Vec<u8>, entry: &HeaderEntry) -> Result<()> 
         let mut card = [b' '; CARD_SIZE];
         copy_keyword(&mut card, kw);
         out.extend_from_slice(&card);
-        return Ok(());
+        return Ok(out);
     }
     // Split text into 72-byte chunks (columns 9..80).
     let bytes = text.as_bytes();
@@ -441,7 +430,7 @@ fn write_commentary_entry(out: &mut Vec<u8>, entry: &HeaderEntry) -> Result<()> 
         card[KEYWORD_LEN..KEYWORD_LEN + chunk.len()].copy_from_slice(chunk);
         out.extend_from_slice(&card);
     }
-    Ok(())
+    Ok(out)
 }
 
 fn write_string_value_with_continue(
@@ -478,9 +467,11 @@ fn write_string_value_with_continue(
         // to HIERARCH) or we hard-fail.
         if escaped.len() <= first_quote_budget {
             let value_field = format!("'{escaped}'");
-            let card = encode_single_value_card(keyword, &value_field, comment)?;
+            let (card, tail) = encode_single_value_card(keyword, &value_field, comment)?;
             out.extend_from_slice(&card);
-            return Ok(());
+            // Sec.4.2.1.2 chaining is not defined for HIERARCH, so the
+            // overflow cannot be attached to this card.
+            return write_unattached_spill(out, tail);
         }
         return Err(FitsError::Header(format!(
             "string value for HIERARCH keyword `{keyword}` is too long for one card \
@@ -504,9 +495,24 @@ fn write_string_value_with_continue(
             padded.push(' ');
         }
         let value_field = format!("'{padded}'");
-        let card = encode_single_value_card(keyword, &value_field, comment)?;
+        let (card, tail) = encode_single_value_card(keyword, &value_field, comment)?;
+        if tail.is_none() {
+            out.extend_from_slice(&card);
+            return Ok(());
+        }
+        // The comment is longer than the card. Continue the string
+        // value, so the further cards attach to this one and a reader
+        // joins the comment fields into one comment (Sec.4.2.1.2).
+        if padded.len() < first_quote_budget {
+            let cont_field = format!("'{padded}&'");
+            let (card, tail) = encode_single_value_card(keyword, &cont_field, comment)?;
+            out.extend_from_slice(&card);
+            return write_comment_spill(out, tail);
+        }
+        // There is no room for the `&`, so a further card cannot
+        // attach to this one.
         out.extend_from_slice(&card);
-        return Ok(());
+        return write_unattached_spill(out, tail);
     }
 
     // Multi-card case. Reserve room for the trailing `&` on every
@@ -529,36 +535,58 @@ fn write_string_value_with_continue(
         remaining = &remaining[take..];
     }
 
-    // Try to fit a comment on the LAST card; if it doesn't fit, drop
-    // the comment from this header rather than truncate it silently.
-    // (Most callers don't put comments on long strings.)
+    // The comment goes on the last card of the chain. When it is
+    // longer than that card, the chunk keeps its `&`, so the further
+    // cards attach and a reader joins the comment fields.
     let last_idx = chunks.len() - 1;
     // Emit chunks with `&` on all but the last.
     for (i, chunk) in chunks.iter().enumerate() {
         let is_last = i == last_idx;
-        let body = if is_last {
-            format!("'{chunk}'")
-        } else {
-            format!("'{chunk}&'")
+        let comment = if is_last { comment } else { None };
+        // The first card of a chain carries the keyword; the rest are
+        // `CONTINUE` cards.
+        let encode = |body: &str| -> Result<([u8; CARD_SIZE], Option<String>)> {
+            if i == 0 {
+                encode_single_value_card(keyword, body, comment)
+            } else {
+                encode_continue_card(body, comment)
+            }
         };
-        if i == 0 {
-            let comment = if is_last { comment } else { None };
-            let card = encode_single_value_card(keyword, &body, comment)?;
+        if !is_last {
+            // Mid-chain: the `&` says the string continues.
+            let (card, _) = encode(&format!("'{chunk}&'"))?;
             out.extend_from_slice(&card);
-        } else {
-            let comment = if is_last { comment } else { None };
-            let card = encode_continue_card(&body, comment)?;
-            out.extend_from_slice(&card);
+            continue;
         }
+        let (card, tail) = encode(&format!("'{chunk}'"))?;
+        if tail.is_none() {
+            out.extend_from_slice(&card);
+            continue;
+        }
+        // The comment overruns the last card, so that chunk keeps its
+        // `&` too and the cards carrying the rest of the comment attach
+        // to it. Every chunk budget reserved a byte for that `&`.
+        let (card, tail) = encode(&format!("'{chunk}&'"))?;
+        out.extend_from_slice(&card);
+        return write_comment_spill(out, tail);
     }
     Ok(())
 }
 
+/// Encode one value card. Returns the card and any comment text that
+/// did not fit beside the value.
+///
+/// The caller writes that remainder on further cards.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when the keyword or the value does not fit
+/// in 80 bytes, or when either holds a byte outside printable ASCII.
 fn encode_single_value_card(
     keyword: &str,
     value_field: &str,
     comment: Option<&str>,
-) -> Result<[u8; CARD_SIZE]> {
+) -> Result<([u8; CARD_SIZE], Option<String>)> {
     let body_offset = keyword_body_offset(keyword)?;
     let mut card = [b' '; CARD_SIZE];
     if is_hierarch(keyword) {
@@ -577,7 +605,8 @@ fn encode_single_value_card(
         let vb = value_field.as_bytes();
         validate_text(vb)?;
         card[v_off..v_off + vb.len()].copy_from_slice(vb);
-        write_optional_comment(&mut card, v_off + vb.len(), comment)?;
+        let tail = write_optional_comment(&mut card, v_off + vb.len(), comment)?;
+        Ok((card, tail))
     } else {
         copy_keyword(&mut card, keyword);
         card[KEYWORD_LEN] = b'=';
@@ -592,12 +621,15 @@ fn encode_single_value_card(
             )));
         }
         card[body_offset..body_offset + vb.len()].copy_from_slice(vb);
-        write_optional_comment(&mut card, body_offset + vb.len(), comment)?;
+        let tail = write_optional_comment(&mut card, body_offset + vb.len(), comment)?;
+        Ok((card, tail))
     }
-    Ok(card)
 }
 
-fn encode_continue_card(value_field: &str, comment: Option<&str>) -> Result<[u8; CARD_SIZE]> {
+fn encode_continue_card(
+    value_field: &str,
+    comment: Option<&str>,
+) -> Result<([u8; CARD_SIZE], Option<String>)> {
     let mut card = [b' '; CARD_SIZE];
     card[..KEYWORD_LEN].copy_from_slice(b"CONTINUE");
     // Sec.4.2.1.2: CONTINUE has no value indicator; bytes 9..80 are
@@ -612,15 +644,25 @@ fn encode_continue_card(value_field: &str, comment: Option<&str>) -> Result<[u8;
         ));
     }
     card[body_off..body_off + vb.len()].copy_from_slice(vb);
-    write_optional_comment(&mut card, body_off + vb.len(), comment)?;
-    Ok(card)
+    let tail = write_optional_comment(&mut card, body_off + vb.len(), comment)?;
+    Ok((card, tail))
 }
 
+/// Write as much of `comment` as fits beside the value. Returns the
+/// text that did not fit.
+///
+/// The caller writes the remainder on further cards. This function
+/// drops no text and reports no error when the comment is too long.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when the comment holds a byte outside
+/// printable ASCII.
 fn write_optional_comment(
     card: &mut [u8; CARD_SIZE],
     cursor: usize,
     comment: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     // FITS convention: the comment indicator `/` sits at column 32
     // (byte 31, 0-indexed) so that short string values align with
     // right-justified numeric values.  Advance `cursor` to the space
@@ -631,25 +673,152 @@ fn write_optional_comment(
     const COMMENT_START: usize = 30;
 
     let Some(c) = comment else {
-        return Ok(());
+        return Ok(None);
     };
     if c.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let start = cursor.max(COMMENT_START);
+    // Keep the conventional alignment while the comment fits at that
+    // column. When the aligned column would push part of the comment
+    // off the card, start the comment after the value instead. The
+    // alignment is a convention, and the comment text is not.
+    let aligned = cursor.max(COMMENT_START);
+    let start = if aligned + 3 + c.len() <= CARD_SIZE {
+        aligned
+    } else {
+        cursor
+    };
+    let mut tail = None;
     // Need " / " plus the comment text.
     let needed = 3 + c.len();
-    if start + needed > CARD_SIZE {
-        // Comment doesn't fit. Drop it silently -- losing a comment is
-        // less bad than failing the whole serialize.
-        return Ok(());
-    }
+    let c = if start + needed > CARD_SIZE {
+        // Split on a byte boundary that keeps the head on this
+        // card. The caller writes the rest.
+        let room = CARD_SIZE.saturating_sub(start + 3);
+        let mut split = room.min(c.len());
+        while split > 0 && !c.is_char_boundary(split) {
+            split -= 1;
+        }
+        if split == 0 {
+            tail = Some(c.to_string());
+            return Ok(tail);
+        }
+        let (head_end, tail_start) = split_at_space(c, split);
+        if head_end == 0 {
+            tail = Some(c.to_string());
+            return Ok(tail);
+        }
+        tail = Some(c[tail_start..].to_string());
+        &c[..head_end]
+    } else {
+        c
+    };
     card[start] = b' ';
     card[start + 1] = b'/';
     card[start + 2] = b' ';
     let cb = c.as_bytes();
     validate_text(cb)?;
     card[start + 3..start + 3 + cb.len()].copy_from_slice(cb);
+    Ok(tail.filter(|t| !t.is_empty()))
+}
+
+/// Where to break a comment that continues on another card.
+///
+/// Returns `(head_end, tail_start)`. A reader joins comment fragments
+/// with one space. A break that consumes a space therefore restores
+/// the original text.
+///
+/// A comment with no space before `limit` breaks inside a word. The
+/// text survives, and the reader adds one space at the break.
+fn split_at_space(c: &str, limit: usize) -> (usize, usize) {
+    if c.as_bytes().get(limit) == Some(&b' ') {
+        return (limit, limit + 1);
+    }
+    match c[..limit].rfind(' ') {
+        Some(sp) => (sp, sp + 1),
+        None => (limit, limit),
+    }
+}
+
+/// Write comment text that did not fit on the card it belongs to.
+///
+/// This calls [`write_attached_spill`].
+///
+/// # Errors
+///
+/// The conditions of [`write_attached_spill`].
+fn write_comment_spill(out: &mut Vec<u8>, tail: Option<String>) -> Result<()> {
+    write_attached_spill(out, tail)
+}
+
+/// Write the rest of a comment on a `COMMENT` card.
+///
+/// Sec.4.2.1.2 binds a `CONTINUE` card to a string value that ends in
+/// `&`. A numeric value, a logical value and a `HIERARCH` keyword
+/// cannot carry that marker. A `CONTINUE` card after one of them is
+/// an orphan, which a reader reports as raw card text.
+///
+/// This writes the remaining text on a `COMMENT` card instead. The
+/// text reaches the file, in a card the Standard defines, directly
+/// after the card it describes.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when the text holds a byte outside printable
+/// ASCII.
+fn write_unattached_spill(out: &mut Vec<u8>, tail: Option<String>) -> Result<()> {
+    let Some(tail) = tail else {
+        return Ok(());
+    };
+    let card = encode_commentary_card(CommentaryKind::Comment.keyword(), &tail)?;
+    out.extend_from_slice(&card);
+    Ok(())
+}
+
+/// Write the rest of a comment on `CONTINUE` cards.
+///
+/// Sec.4.2.1.2 gives a `CONTINUE` card a string value and a comment
+/// field. The value card before these cards ends in `&`, so a reader
+/// joins the comment fields into one comment.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when the text holds a byte outside printable
+/// ASCII.
+fn write_attached_spill(out: &mut Vec<u8>, tail: Option<String>) -> Result<()> {
+    // `CONTINUE` + two spaces + a value field + ` / `. Every card
+    // except the last carries `'&'`, which is the wider of the two
+    // value fields. Budget for that field on every card. A chunk
+    // sized for `''` does not fit a card that carries `'&'`.
+    const SPILL_ROOM: usize = CARD_SIZE - KEYWORD_LEN - VALUE_INDICATOR_LEN - 3 - 3;
+    let Some(tail) = tail else {
+        return Ok(());
+    };
+    let mut rest = tail.as_str();
+    while !rest.is_empty() {
+        let mut take = SPILL_ROOM.min(rest.len());
+        while take > 0 && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
+        let (head_end, tail_start) = if take < rest.len() {
+            split_at_space(rest, take)
+        } else {
+            (take, take)
+        };
+        let (head, next) = (
+            &rest[..head_end.max(1)],
+            &rest[tail_start.max(1).min(rest.len())..],
+        );
+        // Every card except the last carries a `&`, so a reader
+        // continues to the card after it. The last card holds an
+        // empty string, which ends the chain. The `&` markers are
+        // removed by the join, so the value is unchanged.
+        let value_field = if next.is_empty() { "''" } else { "'&'" };
+        let (card, leftover) = encode_continue_card(value_field, Some(head))?;
+        debug_assert!(leftover.is_none(), "spill chunk must fit its own card");
+        out.extend_from_slice(&card);
+        rest = next;
+    }
     Ok(())
 }
 
@@ -847,7 +1016,7 @@ mod tests {
     #[test]
     fn empty_header_renders_to_one_block_with_end() {
         let h = Header::empty();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         assert_eq!(bytes.len(), BLOCK_SIZE);
         assert_eq!(&bytes[..3], b"END");
         // Everything after END must be spaces.
@@ -858,9 +1027,9 @@ mod tests {
     fn integer_card_round_trips() {
         let mut h = Header::empty();
         h.push("BITPIX", Value::Integer(16), None).unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
-        assert_eq!(h2.first("BITPIX"), Some(&Value::Integer(16)));
+        assert_eq!(h2.first("BITPIX"), Some(Value::Integer(16)));
     }
 
     #[test]
@@ -868,7 +1037,7 @@ mod tests {
         let mut h = Header::empty();
         h.push("OBJECT", Value::String("M51".into()), Some("nice galaxy"))
             .unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
         match h2.first("OBJECT").unwrap() {
             // Sec.4.2.1.1: parsers may strip trailing spaces.
@@ -882,7 +1051,7 @@ mod tests {
         let long = "x".repeat(200);
         let mut h = Header::empty();
         h.push("OBJECT", Value::String(long.clone()), None).unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         // At least one CONTINUE card present.
         let n_continue = bytes
             .as_chunks::<CARD_SIZE>()
@@ -896,7 +1065,7 @@ mod tests {
         );
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
         match h2.first("OBJECT").unwrap() {
-            Value::String(s) => assert_eq!(s, &long),
+            Value::String(s) => assert_eq!(s, long),
             other => panic!("not a string: {other:?}"),
         }
     }
@@ -906,8 +1075,8 @@ mod tests {
         let mut h = Header::empty();
         // 150 chars > 72, so this should produce 3 HISTORY cards.
         let long = "y".repeat(150);
-        h.push_commentary(CommentaryKind::History, &long);
-        let bytes = h.to_bytes().unwrap();
+        h.push_commentary(CommentaryKind::History, &long).unwrap();
+        let bytes = h.to_bytes();
         let n_history = bytes
             .as_chunks::<CARD_SIZE>()
             .0
@@ -917,10 +1086,9 @@ mod tests {
         assert_eq!(n_history, 3);
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
         let joined: String = h2
-            .entries()
-            .iter()
-            .filter(|e| e.keyword == "HISTORY")
-            .filter_map(|e| e.commentary.clone())
+            .cards()
+            .filter(|c| c.has_keyword("HISTORY"))
+            .filter_map(|c| c.commentary())
             .collect();
         assert_eq!(joined, long);
     }
@@ -930,10 +1098,10 @@ mod tests {
         let mut h = Header::empty();
         h.push("SIMPLE", Value::Logical(true), None).unwrap();
         h.push("EMPTY", Value::Undefined, Some("absent")).unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
-        assert_eq!(h2.first("SIMPLE"), Some(&Value::Logical(true)));
-        assert_eq!(h2.first("EMPTY"), Some(&Value::Undefined));
+        assert_eq!(h2.first("SIMPLE"), Some(Value::Logical(true)));
+        assert_eq!(h2.first("EMPTY"), Some(Value::Undefined));
     }
 
     #[test]
@@ -945,9 +1113,10 @@ mod tests {
 
     #[test]
     fn rejects_nonfinite_real() {
+        // A card is encoded when it is created, so a value the header
+        // cannot hold fails there rather than at write time.
         let mut h = Header::empty();
-        h.push("BAD", Value::Real(f64::NAN), None).unwrap();
-        assert!(h.to_bytes().is_err());
+        assert!(h.push("BAD", Value::Real(f64::NAN), None).is_err());
     }
 
     #[test]
@@ -956,9 +1125,9 @@ mod tests {
         h.push("BITPIX", Value::Integer(8), None).unwrap();
         let updated = h.set("BITPIX", Value::Integer(16), None).unwrap();
         assert!(updated);
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
-        assert_eq!(h2.first("BITPIX"), Some(&Value::Integer(16)));
+        assert_eq!(h2.first("BITPIX"), Some(Value::Integer(16)));
     }
 
     #[test]
@@ -970,7 +1139,7 @@ mod tests {
             Some("altitude in deg"),
         )
         .unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
         assert!(matches!(
             h2.first("HIERARCH ESO TEL ALT"),
@@ -988,10 +1157,10 @@ mod tests {
         for r in [0.0_f64, 1.0, -1.0, 2000.0, 32768.0, 1.0e100, -1.0e-100] {
             let mut h = Header::empty();
             h.push("BSCALE", Value::Real(r), None).unwrap();
-            let bytes = h.to_bytes().unwrap();
+            let bytes = h.to_bytes();
             let (h2, _) = Header::parse(&bytes, 0).unwrap();
             match h2.first("BSCALE") {
-                Some(Value::Real(got)) => assert_eq!(*got, r, "wrong value"),
+                Some(Value::Real(got)) => assert_eq!(got, r, "wrong value"),
                 other => panic!("BSCALE = {r} round-tripped as {other:?}, expected Real"),
             }
         }
@@ -1001,12 +1170,12 @@ mod tests {
     fn whole_number_complex_real_round_trips_as_complex_real() {
         let mut h = Header::empty();
         h.push("ZVAL", Value::ComplexReal(1.0, 0.0), None).unwrap();
-        let bytes = h.to_bytes().unwrap();
+        let bytes = h.to_bytes();
         let (h2, _) = Header::parse(&bytes, 0).unwrap();
         match h2.first("ZVAL") {
             Some(Value::ComplexReal(re, im)) => {
-                assert_eq!(*re, 1.0);
-                assert_eq!(*im, 0.0);
+                assert_eq!(re, 1.0);
+                assert_eq!(im, 0.0);
             }
             other => panic!("got {other:?}, expected ComplexReal"),
         }
