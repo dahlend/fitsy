@@ -462,7 +462,7 @@ pub fn append(
     // Release the GIL while doing the actual file I/O.
     py.detach(|| -> crate::error::Result<()> {
         let mut app = crate::FitsAppender::open(&path)?;
-        app.append_hdu(&builder.header, &builder.data)?;
+        app.append_hdu_parts(&builder.header, &builder.data)?;
         app.finish()?;
         Ok(())
     })

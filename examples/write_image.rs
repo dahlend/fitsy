@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Builder: axes are FITS-order (NAXIS1 first).
-    let (header, bytes) = ImageBuilder::new(vec![nx, ny], data)?
+    let hdu = ImageBuilder::new(vec![nx, ny], data)?
         .primary(true)
         .card("OBJECT", Value::from("synthetic ramp"), Some("test image"))
         .card("BUNIT", Value::from("counts"), None)
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write.
     let mut out = std::fs::File::create(&path)?;
     let mut w = FitsWriter::new(&mut out);
-    w.write_hdu(&header, &bytes)?;
+    w.write_hdu(&hdu)?;
     w.finish()?;
 
     println!(

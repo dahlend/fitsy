@@ -71,12 +71,12 @@ fn write_demo_table(path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         rows.extend_from_slice(&i.to_be_bytes());
         rows.extend_from_slice(&mag.to_be_bytes());
     }
-    let (h, data) = bt.build(5, rows)?;
+    let table = bt.build(5, rows)?;
 
     let mut out = std::fs::File::create(path)?;
     let mut w = FitsWriter::new(&mut out);
-    w.write_hdu(&primary.0, &primary.1)?;
-    w.write_hdu(&h, &data)?;
+    w.write_hdu(&primary)?;
+    w.write_hdu(&table)?;
     w.finish()?;
     Ok(())
 }

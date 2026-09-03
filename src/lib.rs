@@ -70,11 +70,11 @@
 //! ```
 //! # use fitsy::{FitsWriter, ImageBuilder};
 //! # let path = std::env::temp_dir().join("fitsy_doc_quickstart_read.fits");
-//! # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![1.0_f32; 12])?
+//! # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![1.0_f32; 12])?
 //! #     .primary(true)
 //! #     .build()?;
 //! # let mut out = std::fs::File::create(&path)?;
-//! # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+//! # FitsWriter::new(&mut out).write_hdu(&hdu)?;
 //! use fitsy::{FitsError, FitsFile, Hdu};
 //!
 //! let file = FitsFile::open(&path)?;
@@ -97,13 +97,13 @@
 //!
 //! # let path = std::env::temp_dir().join("fitsy_doc_quickstart_write.fits");
 //! let pixels: Vec<f32> = vec![0.0; 64 * 48];
-//! let (header, data) = ImageBuilder::new(vec![64_u64, 48], pixels)?
+//! let hdu = ImageBuilder::new(vec![64_u64, 48], pixels)?
 //!     .primary(true)
 //!     .card("OBJECT", "M42", Some("target"))
 //!     .build()?;
 //!
 //! let mut out = std::fs::File::create(&path)?;
-//! FitsWriter::new(&mut out).write_hdu(&header, &data)?;
+//! FitsWriter::new(&mut out).write_hdu(&hdu)?;
 //! # drop(out);
 //! # assert_eq!(std::fs::metadata(&path)?.len() % 2880, 0);
 //! # std::fs::remove_file(&path)?;
@@ -117,7 +117,7 @@
 //! ```
 //! # use fitsy::{FitsWriter, ImageBuilder};
 //! # let path = std::env::temp_dir().join("fitsy_doc_quickstart_wcs.fits");
-//! # let (h, d) = ImageBuilder::new(vec![64_u64, 48], vec![0.0_f32; 64 * 48])?
+//! # let hdu = ImageBuilder::new(vec![64_u64, 48], vec![0.0_f32; 64 * 48])?
 //! #     .primary(true)
 //! #     .card("CTYPE1", "RA---TAN", None)
 //! #     .card("CTYPE2", "DEC--TAN", None)
@@ -129,7 +129,7 @@
 //! #     .card("CDELT2", 0.001, None)
 //! #     .build()?;
 //! # let mut out = std::fs::File::create(&path)?;
-//! # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+//! # FitsWriter::new(&mut out).write_hdu(&hdu)?;
 //! use fitsy::FitsFile;
 //!
 //! let file = FitsFile::open(&path)?;
@@ -235,8 +235,8 @@ pub use data::{Bitpix, ImageData};
 pub use error::FitsError;
 pub use hdu::{
     AsciiCell, AsciiColumn, AsciiFormat, AsciiTableBuilder, AsciiTableHdu, BinColumn, BinFieldKind,
-    BinFormat, BinTableBuilder, BinTableHdu, BinValue, FitsFile, Hdu, ImageBuilder, ImageHdu,
-    ImagePixels,
+    BinFormat, BinTableBuilder, BinTableHdu, BinValue, FitsFile, Hdu, HduBytes, HduKind,
+    ImageBuilder, ImageHdu, ImagePixels,
 };
 pub use header::{CardView, CommentaryKind, Diagnostic, Fix, Header, IsoDateTime, Level, Value};
 #[cfg(not(target_arch = "wasm32"))]
@@ -248,6 +248,6 @@ pub use wcs::{AxisKind, Wcs};
 
 #[cfg(feature = "compression")]
 pub use compression::{
-    Codec, CompressedImageHdu, DitherMethod, OwnedImage, Quantize, TileOpts, compress_image_to_hdu,
-    is_reserved_by_compression, reserved_keywords,
+    Codec, CompressedImageHdu, DitherMethod, Quantize, TileOpts, compress_image_to_hdu,
+    is_reserved_by_compression, reserved_keywords, synthetic_image_header,
 };

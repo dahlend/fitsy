@@ -164,11 +164,11 @@ impl HduDiff {
 /// let mut bytes = Vec::new();
 /// for last in [4.0_f32, 9.0] {
 ///     let px = vec![1.0, 2.0, 3.0, last];
-///     let (h, d) = ImageBuilder::new(vec![2_u64, 2], px)?
+///     let hdu = ImageBuilder::new(vec![2_u64, 2], px)?
 ///         .primary(true)
 ///         .build()?;
 ///     let mut buf: Vec<u8> = Vec::new();
-///     FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+///     FitsWriter::new(&mut buf).write_hdu(&hdu)?;
 ///     bytes.push(buf);
 /// }
 ///
@@ -933,14 +933,14 @@ mod tests {
 
     /// Build a one-image FITS file in memory.
     fn image_file(pixels: Vec<f32>, axes: Vec<u64>) -> FitsFile {
-        let (header, data) = ImageBuilder::new(axes, pixels)
+        let hdu = ImageBuilder::new(axes, pixels)
             .unwrap()
             .primary(true)
             .build()
             .unwrap();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&header, &data).unwrap();
+        w.write_hdu(&hdu).unwrap();
         w.finish().unwrap();
         FitsFile::from_bytes(buf).unwrap()
     }
@@ -1004,12 +1004,13 @@ mod tests {
                 .unwrap()
                 .primary(true)
                 .build()
-                .unwrap();
+                .unwrap()
+                .into_parts();
             header.set("BSCALE", Value::Real(bscale), None).unwrap();
             header.set("BZERO", Value::Real(bzero), None).unwrap();
             let mut buf = Vec::new();
             let mut w = FitsWriter::new(&mut buf);
-            w.write_hdu(&header, &data).unwrap();
+            w.write_hdu_parts(&header, &data).unwrap();
             w.finish().unwrap();
             FitsFile::from_bytes(buf).unwrap()
         };
@@ -1039,7 +1040,7 @@ mod tests {
         use crate::hdu::builder::BinTableBuilder;
 
         fn table_file(ra: [f64; 3]) -> FitsFile {
-            let (primary_h, primary_d) = ImageBuilder::<f32>::new(vec![0_u64; 0], Vec::new())
+            let primary = ImageBuilder::<f32>::new(vec![0_u64; 0], Vec::new())
                 .unwrap()
                 .primary(true)
                 .build()
@@ -1051,11 +1052,11 @@ mod tests {
             for v in ra {
                 rows.extend_from_slice(&v.to_bits().to_be_bytes());
             }
-            let (th, td) = bt.build(3, rows).unwrap();
+            let hdu = bt.build(3, rows).unwrap();
             let mut buf = Vec::new();
             let mut w = FitsWriter::new(&mut buf);
-            w.write_hdu(&primary_h, &primary_d).unwrap();
-            w.write_hdu(&th, &td).unwrap();
+            w.write_hdu(&primary).unwrap();
+            w.write_hdu(&hdu).unwrap();
             w.finish().unwrap();
             FitsFile::from_bytes(buf).unwrap()
         }
@@ -1105,7 +1106,7 @@ mod tests {
         // columns differ in *every* row and only the ordering can
         // decide which differences land in the report.
         fn two_column_file(shift: f64) -> FitsFile {
-            let (ph, pd) = ImageBuilder::<f32>::new(vec![0_u64; 0], Vec::new())
+            let ph = ImageBuilder::<f32>::new(vec![0_u64; 0], Vec::new())
                 .unwrap()
                 .primary(true)
                 .build()
@@ -1122,11 +1123,11 @@ mod tests {
                     rows.extend_from_slice(&v.to_bits().to_be_bytes());
                 }
             }
-            let (th, td) = bt.build(ROWS, rows).unwrap();
+            let hdu = bt.build(ROWS, rows).unwrap();
             let mut buf = Vec::new();
             let mut w = FitsWriter::new(&mut buf);
-            w.write_hdu(&ph, &pd).unwrap();
-            w.write_hdu(&th, &td).unwrap();
+            w.write_hdu(&ph).unwrap();
+            w.write_hdu(&hdu).unwrap();
             w.finish().unwrap();
             FitsFile::from_bytes(buf).unwrap()
         }
@@ -1169,7 +1170,7 @@ mod tests {
         use crate::hdu::builder::BinTableBuilder;
 
         fn scaled_table(tscal: Option<f64>) -> FitsFile {
-            let (ph, pd) = ImageBuilder::<f32>::new(vec![0_u64; 0], Vec::new())
+            let ph = ImageBuilder::<f32>::new(vec![0_u64; 0], Vec::new())
                 .unwrap()
                 .primary(true)
                 .build()
@@ -1181,14 +1182,14 @@ mod tests {
             for v in [1_i32, 2, 3] {
                 rows.extend_from_slice(&v.to_be_bytes());
             }
-            let (mut th, td) = bt.build(3, rows).unwrap();
+            let (mut th, td) = bt.build(3, rows).unwrap().into_parts();
             if let Some(s) = tscal {
                 th.set("TSCAL1", Value::Real(s), None).unwrap();
             }
             let mut buf = Vec::new();
             let mut w = FitsWriter::new(&mut buf);
-            w.write_hdu(&ph, &pd).unwrap();
-            w.write_hdu(&th, &td).unwrap();
+            w.write_hdu(&ph).unwrap();
+            w.write_hdu_parts(&th, &td).unwrap();
             w.finish().unwrap();
             FitsFile::from_bytes(buf).unwrap()
         }

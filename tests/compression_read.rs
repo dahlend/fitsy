@@ -318,9 +318,26 @@ fn unsupported_cmptype_is_explicit() {
     pad_to_block(&mut buf, 0);
 
     let f = FitsFile::from_bytes(buf).unwrap();
-    let err = f.hdu(1).unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("NOSUCH_1"), "got: {msg}");
+
+    // An unusable `ZCMPTYPE` does not cost the caller the table. The
+    // HDU is a conforming BINTABLE, and it reads as one.
+    let Hdu::BinTable(bt) = f.hdu(1).unwrap() else {
+        panic!("an undecodable compressed image must still read as a BINTABLE");
+    };
+    assert_eq!(bt.n_rows(), 1);
+    assert!(bt.column_by_name("COMPRESSED_DATA").is_some());
+    // The kind still reports what the header declares.
+    assert_eq!(f.kind(1).unwrap(), fitsy::HduKind::CompressedImage);
+
+    // Asking for the image names the codec that is not supported.
+    let out = std::env::temp_dir().join("fitsy_test_nosuch_codec.fits");
+    for msg in [
+        format!("{}", f.image(1).unwrap_err()),
+        format!("{}", f.write_decompressed(&out, true, false).unwrap_err()),
+    ] {
+        assert!(msg.contains("NOSUCH_1"), "got: {msg}");
+    }
+    let _ = std::fs::remove_file(&out);
 }
 
 /// Build a single-tile compressed BINTABLE for a 2x2 quantized float

@@ -25,7 +25,7 @@ use fitsy::header::{CardView, Value};
 use fitsy::wcs::celestial::CelestialFrame;
 #[cfg(feature = "compression")]
 use fitsy::{Codec, FitsWriter, TileOpts, compression::Quantize};
-use fitsy::{FitsFile, Hdu, Header};
+use fitsy::{FitsFile, Hdu, HduKind, Header};
 #[cfg(feature = "compression")]
 use std::fs::File;
 
@@ -232,58 +232,72 @@ fn describe_header(h: &Header, index: usize) -> (&'static str, String) {
         Some(Value::Integer(n)) => Some(n),
         _ => None,
     };
-    let axes = |naxis_key: &str, axis_key: &dyn Fn(usize) -> String| -> Vec<i64> {
-        let n = match h.first(naxis_key) {
-            Some(Value::Integer(n)) if n > 0 => n as usize,
-            _ => 0,
-        };
-        (1..=n).filter_map(|i| int(&axis_key(i))).collect()
-    };
-    let join = |dims: &[i64]| {
+    let join = |dims: &[u64]| {
         dims.iter()
-            .map(i64::to_string)
+            .map(u64::to_string)
             .collect::<Vec<_>>()
             .join(" x ")
     };
-    let image_shape = || {
-        let dims = axes("NAXIS", &|i| format!("NAXIS{i}"));
+    // The library reads the geometry, so this summary cannot drift
+    // from what the reader parses. `image` is the header of the image
+    // itself: the HDU's own for a plain image, and the one the `Z`
+    // keywords describe for a compressed one.
+    let image_shape = |image: &Header| {
+        let dims = image.axes().unwrap_or_default();
         if dims.is_empty() {
             "(no data)".to_string()
         } else {
-            format!("{}, BITPIX={}", join(&dims), int("BITPIX").unwrap_or(0))
+            format!(
+                "{}, BITPIX={}",
+                join(&dims),
+                image.bitpix().unwrap_or_default()
+            )
         }
     };
 
-    let xtension = string_card(h, "XTENSION").unwrap_or_default();
-    if index == 0 {
-        // The same predicate the reader dispatches on (Sec.6). The
-        // summary therefore matches the HDU kind the reader parses.
-        if h.is_random_groups() {
-            return (
-                "RandomGrp",
-                format!(
-                    "{} groups, PCOUNT={}, BITPIX={}",
-                    int("GCOUNT").unwrap_or(1),
-                    int("PCOUNT").unwrap_or(0),
-                    int("BITPIX").unwrap_or(0),
-                ),
-            );
-        }
-        return ("Image", image_shape());
-    }
-    match xtension.as_str() {
-        "IMAGE" => ("Image", image_shape()),
-        "TABLE" => (
-            "AsciiTab",
+    let table_shape = || {
+        format!(
+            "{} rows x {} cols",
+            int("NAXIS2").unwrap_or(0),
+            int("TFIELDS").unwrap_or(0)
+        )
+    };
+
+    // The library decides the kind, so this summary always names the
+    // same kind the reader parses.
+    match HduKind::from_header(h, index) {
+        HduKind::Image => ("Image", image_shape(h)),
+        HduKind::RandomGroups => (
+            "RandomGrp",
             format!(
-                "{} rows x {} cols",
-                int("NAXIS2").unwrap_or(0),
-                int("TFIELDS").unwrap_or(0)
+                "{} groups, PCOUNT={}, BITPIX={}",
+                int("GCOUNT").unwrap_or(1),
+                int("PCOUNT").unwrap_or(0),
+                int("BITPIX").unwrap_or(0),
             ),
         ),
-        "BINTABLE" if matches!(h.first("ZIMAGE"), Some(Value::Logical(true))) => {
-            let dims = axes("ZNAXIS", &|i| format!("ZNAXIS{i}"));
-            let tiles = axes("ZNAXIS", &|i| format!("ZTILE{i}"));
+        HduKind::AsciiTable => ("AsciiTab", table_shape()),
+        HduKind::BinTable => ("BinTable", table_shape()),
+        // The kind is recognized without the `compression` feature,
+        // because `ZIMAGE = T` is a header fact. Reading the geometry
+        // out of the `Z` keywords is not, so say so instead.
+        #[cfg(not(feature = "compression"))]
+        HduKind::CompressedImage => (
+            "CompImage",
+            "(build without the `compression` feature)".to_string(),
+        ),
+        #[cfg(feature = "compression")]
+        HduKind::CompressedImage => {
+            let Ok(image) = fitsy::synthetic_image_header(h) else {
+                return ("CompImage", "(unreadable Z keywords)".to_string());
+            };
+            // The tile shape is a property of the compressed table,
+            // not of the image, so it has no image-header equivalent.
+            let n_axes = image.axes().map(|a| a.len()).unwrap_or_default();
+            let tiles: Vec<u64> = (1..=n_axes)
+                .filter_map(|i| int(&format!("ZTILE{i}")))
+                .map(|n| n.max(0) as u64)
+                .collect();
             let tile = if tiles.is_empty() {
                 "?".to_string()
             } else {
@@ -291,23 +305,11 @@ fn describe_header(h: &Header, index: usize) -> (&'static str, String) {
             };
             (
                 "CompImage",
-                format!(
-                    "{}, BITPIX={}, tiles {tile}",
-                    join(&dims),
-                    int("ZBITPIX").unwrap_or(0)
-                ),
+                format!("{}, tiles {tile}", image_shape(&image)),
             )
         }
-        "BINTABLE" => (
-            "BinTable",
-            format!(
-                "{} rows x {} cols",
-                int("NAXIS2").unwrap_or(0),
-                int("TFIELDS").unwrap_or(0)
-            ),
-        ),
-        "" => ("Other", String::new()),
-        other => ("Other", format!("XTENSION={other}")),
+        HduKind::Conforming(x) => ("Other", format!("XTENSION={x}")),
+        _ => ("Other", String::new()),
     }
 }
 
@@ -637,31 +639,18 @@ fn fpack_into(
         let hdu = file.hdu(i)?;
         let is_plain_image = matches!(hdu, Hdu::Image(_));
         if !is_plain_image {
-            writer.write_hdu(hdu.header(), hdu.data_bytes())?;
+            writer.write_hdu(&hdu)?;
             continue;
         }
         let header = hdu.header();
         let axes = header.axes()?;
         if axes.is_empty() || axes.iter().product::<u64>() == 0 {
             // Nothing to compress; keep the HDU as it is.
-            writer.write_hdu(header, hdu.data_bytes())?;
+            writer.write_hdu(&hdu)?;
             continue;
         }
-        if i == 0 {
-            // A compressed image is a BINTABLE extension, so the
-            // primary array moves to extension 1 behind this stub.
-            // The compressed header records the move as ZSIMPLE = T.
-            let mut stub = Header::empty();
-            stub.push("SIMPLE", Value::Logical(true), Some("conforming FITS file"))?;
-            stub.push("BITPIX", Value::Integer(8), None)?;
-            stub.push("NAXIS", Value::Integer(0), None)?;
-            stub.push(
-                "EXTEND",
-                Value::Logical(true),
-                Some("FITS dataset may contain extensions"),
-            )?;
-            writer.write_hdu(&stub, &[])?;
-        }
+        // `write_hdu_compressed` writes the primary stub itself when
+        // the compressed image would otherwise land in slot 0.
         let bitpix = header.bitpix()?;
         let hdu_quantize = if bitpix < 0 { quantize } else { None };
         // Quantized tiles hold i32 samples, so RICE_1 applies.
@@ -678,7 +667,10 @@ fn fpack_into(
                  FITS Tiled Image Convention so will be dropped"
             );
         }
-        writer.write_hdu_compressed(header, hdu.data_bytes(), &opts)?;
+        let Hdu::Image(ref img) = hdu else {
+            unreachable!("checked to be a plain image above");
+        };
+        writer.write_hdu_compressed(img, &opts)?;
         compressed += 1;
     }
     writer.finish()?;
@@ -789,7 +781,9 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("refusing to write output on top of input; pass -o explicitly".into());
     }
     let file = open_fits(&input)?;
-    let decompressed = write_via_temp(&output, |tmp| funpack_into(&file, tmp, checksums))?;
+    let decompressed = write_via_temp(&output, |tmp| {
+        Ok(file.write_decompressed(tmp, true, checksums)?)
+    })?;
     eprintln!(
         "wrote {} (decompressed {decompressed} HDU{})",
         output.display(),
@@ -798,110 +792,9 @@ fn cmd_funpack(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Decompress every tile-compressed image HDU of `file` into a new
-/// FITS file at `dest`, and report how many HDUs were decompressed.
-#[cfg(feature = "compression")]
-fn funpack_into(
-    file: &FitsFile,
-    dest: &Path,
-    checksums: bool,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    // fpack moves a primary array behind an empty stub primary,
-    // because a compressed image is a BINTABLE extension. When the
-    // first extension restores to a primary array (ZSIMPLE = T), drop
-    // the stub so the output matches the original layout.
-    let skip_stub = file.len() >= 2
-        && {
-            let first = file.hdu(0)?;
-            matches!(first, Hdu::Image(_))
-                && first.data_bytes().is_empty()
-                && is_bare_stub(first.header())
-        }
-        && matches!(file.hdu(1)?, Hdu::CompressedImage(ref c) if c.was_primary());
-    let mut sink = File::create(dest)?;
-    let mut writer = FitsWriter::new(&mut sink);
-    if checksums {
-        writer = writer.with_checksums();
-    }
-    let mut decompressed = 0_usize;
-    for i in 0..file.len() {
-        if i == 0 && skip_stub {
-            continue;
-        }
-        let hdu = file.hdu(i)?;
-        match hdu {
-            Hdu::CompressedImage(c) => {
-                let img = c.as_image()?;
-                // `as_image` yields an IMAGE extension header, which
-                // is what this HDU is. Only an image that fpack moved
-                // out of the primary slot, and that is landing back in
-                // that slot, becomes a primary header again.
-                if c.was_primary() && writer.hdu_count() == 0 {
-                    let promoted = promote_to_primary(img.header())?;
-                    writer.write_hdu(&promoted, img.raw_bytes())?;
-                } else {
-                    writer.write_hdu(img.header(), img.raw_bytes())?;
-                }
-                decompressed += 1;
-            }
-            other => {
-                writer.write_hdu(other.header(), other.data_bytes())?;
-            }
-        }
-    }
-    writer.finish()?;
-    Ok(decompressed)
-}
-
 #[cfg(not(feature = "compression"))]
 fn cmd_funpack(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Err("`funpack` requires the `compression` feature (enabled by default)".into())
-}
-
-/// Whether `h` is the empty primary header that `fpack` inserts, and
-/// nothing more.
-///
-/// `fpack` writes `SIMPLE`, `BITPIX`, `NAXIS` and `EXTEND`, plus
-/// `CHECKSUM` and `DATASUM` unless the caller passed `-C`. A stub
-/// that carries any other card holds metadata a caller added, so
-/// `funpack` keeps the HDU rather than dropping it.
-#[cfg(feature = "compression")]
-fn is_bare_stub(h: &Header) -> bool {
-    h.cards().all(|c| {
-        matches!(
-            c.keyword().as_str(),
-            "SIMPLE" | "BITPIX" | "NAXIS" | "EXTEND" | "CHECKSUM" | "DATASUM"
-        )
-    })
-}
-
-/// Rebuild an IMAGE extension header as a primary header, for a
-/// decompressed array that `fpack` moved out of the primary slot.
-#[cfg(feature = "compression")]
-fn promote_to_primary(h: &Header) -> Result<Header, Box<dyn std::error::Error>> {
-    let mut out = Header::empty();
-    out.push("SIMPLE", Value::Logical(true), Some("conforming FITS file"))?;
-    out.push("BITPIX", Value::Integer(h.bitpix()?), None)?;
-    let axes = h.axes()?;
-    out.push("NAXIS", Value::Integer(axes.len() as i64), None)?;
-    for (i, n) in axes.iter().enumerate() {
-        out.push(format!("NAXIS{}", i + 1), Value::Integer(*n as i64), None)?;
-    }
-    // Standard Sec.4.4.1.1: EXTEND follows the last NAXISn card.
-    out.push(
-        "EXTEND",
-        Value::Logical(true),
-        Some("FITS dataset may contain extensions"),
-    )?;
-    for card in h.cards() {
-        // The structural cards above describe the promoted primary;
-        // every other card moves across whole, bytes and all.
-        if !card.is_commentary() && fitsy::header::is_writer_owned_keyword(&card.keyword()) {
-            continue;
-        }
-        out.splice(&card);
-    }
-    Ok(out)
 }
 
 #[cfg(feature = "compression")]
@@ -1060,10 +953,7 @@ fn cmd_stats(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let pixels: Option<Vec<f64>> = match hdu {
             Hdu::Image(ref img) if !img.axes().is_empty() => Some(img.read_physical()?.into_vec()),
             #[cfg(feature = "compression")]
-            Hdu::CompressedImage(ref c) => {
-                let owned = c.as_image()?;
-                Some(decode_owned_physical(&owned)?)
-            }
+            Hdu::CompressedImage(ref c) => Some(c.as_image()?.read_physical()?.into_vec()),
             _ => None,
         };
 
@@ -1153,48 +1043,4 @@ fn pixel_stats(pixels: &[f64]) -> Stats {
         mean,
         std: var.sqrt(),
     }
-}
-
-/// Decode the raw bytes of an [`OwnedImage`] into `f64` pixels in
-/// physical units, with `BZERO` and `BSCALE` applied.
-#[cfg(feature = "compression")]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "matches the error-returning style of the surrounding decode helpers"
-)]
-fn decode_owned_physical(
-    img: &fitsy::compression::OwnedImage,
-) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    use fitsy::data::Scaling;
-    use fitsy::data::encoding::Bitpix;
-    let h = img.header();
-    let scaling = Scaling {
-        bzero: h.bzero(),
-        bscale: h.bscale(),
-        blank: h.blank(),
-    };
-    let bytes = img.raw_bytes();
-    let bp = img.bitpix();
-    let bsize = bp.byte_size();
-    let mut out = Vec::with_capacity(bytes.len() / bsize.max(1));
-    for chunk in bytes.chunks_exact(bsize) {
-        let v: f64 = match bp {
-            Bitpix::U8 => scaling.apply_int(i64::from(chunk[0])),
-            Bitpix::I16 => scaling.apply_int(i64::from(i16::from_be_bytes([chunk[0], chunk[1]]))),
-            Bitpix::I32 => scaling.apply_int(i64::from(i32::from_be_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3],
-            ]))),
-            Bitpix::I64 => scaling.apply_int(i64::from_be_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ])),
-            Bitpix::F32 => scaling.apply_real(f64::from(f32::from_bits(u32::from_be_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3],
-            ])))),
-            Bitpix::F64 => scaling.apply_real(f64::from_bits(u64::from_be_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ]))),
-        };
-        out.push(v);
-    }
-    Ok(out)
 }

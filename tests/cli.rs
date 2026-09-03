@@ -136,10 +136,10 @@ fn funpack_keeps_a_stub_that_carries_metadata() {
         .unwrap();
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&stub, &[]).unwrap();
+    w.write_hdu_parts(&stub, &[]).unwrap();
     for i in 1..f.len() {
         let hdu = f.hdu(i).unwrap();
-        w.write_hdu(hdu.header(), hdu.data_bytes()).unwrap();
+        w.write_hdu(&hdu).unwrap();
     }
     w.finish().unwrap();
     std::fs::write(&packed, &buf).unwrap();
@@ -268,7 +268,7 @@ fn fpack_funpack_round_trip() {
     let Hdu::Image(img) = f.hdu(0).unwrap() else {
         panic!("HDU 0 is not an image");
     };
-    assert_eq!(img.raw_bytes(), &hdu.1[..]);
+    assert_eq!(img.raw_bytes(), hdu.raw_bytes());
     let h = img.header();
     assert!(matches!(
         h.first("SIMPLE"),

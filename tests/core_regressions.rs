@@ -13,7 +13,7 @@ fn write_to_bytes(f: &FitsFile) -> fitsy::error::Result<Vec<u8>> {
     let mut w = FitsWriter::new(&mut buf);
     for i in 0..f.len() {
         let hdu = f.hdu(i)?;
-        w.write_hdu(hdu.header(), hdu.data_bytes())?;
+        w.write_hdu(&hdu)?;
     }
     w.finish()?;
     Ok(buf)

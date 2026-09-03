@@ -1237,7 +1237,7 @@ impl Wcs {
     /// ```
     /// # use fitsy::{FitsWriter, ImageBuilder};
     /// # let path = std::env::temp_dir().join("fitsy_doc_axis_kind.fits");
-    /// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![0.0_f32; 12])?
+    /// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![0.0_f32; 12])?
     /// #     .primary(true)
     /// #     .card("CTYPE1", "RA---TAN", None)
     /// #     .card("CTYPE2", "DEC--TAN", None)
@@ -1249,7 +1249,7 @@ impl Wcs {
     /// #     .card("CDELT2", 0.001, None)
     /// #     .build()?;
     /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&hdu)?;
     /// use fitsy::{AxisKind, FitsFile};
     ///
     /// let file = FitsFile::open(&path)?;

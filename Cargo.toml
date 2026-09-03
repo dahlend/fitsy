@@ -2,7 +2,7 @@
 name = "fitsy"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 authors = ["Dar Dahlen <dardahlen@gmail.com>"]
 description = "Fast FITS file I/O, WCS transforms, and a CLI (info / header / fpack / funpack)"
 license = "MIT OR Apache-2.0"
@@ -39,6 +39,18 @@ faer = ["dep:faer"]
 # `bytemuck` is only used to view numpy's buffer as bytes so a read can
 # land straight in it; it is not pulled in by the default build.
 python = ["dep:pyo3", "dep:numpy", "dep:bytemuck", "compression"]
+
+[[example]]
+name = "compress_image"
+required-features = ["compression"]
+
+[[example]]
+name = "nalgebra_interop"
+required-features = ["nalgebra"]
+
+[[example]]
+name = "faer_interop"
+required-features = ["faer"]
 
 [profile.release]
 # Keeps published wheels small. Set here rather than under

@@ -4,7 +4,7 @@
 //!
 //! Each builder here composes the mandatory keywords of one HDU kind,
 //! so a caller does not spell out `BITPIX`, `NAXIS`, `PCOUNT`,
-//! `GCOUNT` or `TFORMn`. Every builder returns a `(Header, Vec<u8>)`
+//! `GCOUNT` or `TFORMn`. Every builder returns the HDU view type
 //! pair, which
 //! [`FitsWriter::write_hdu`](crate::FitsWriter::write_hdu) accepts
 //! without further work.
@@ -27,6 +27,9 @@
 //! big-endian bytes during `build`, so the returned `Vec<u8>` needs no
 //! further byte-order change.
 
+use super::ascii_table::AsciiTableHdu;
+use super::bintable::BinTableHdu;
+use super::image::ImageHdu;
 use crate::data::encoding::Pixel;
 use crate::data::unsigned::{BZERO_U16, BZERO_U32, BZERO_U64_F64};
 use crate::error::{FitsError, Result};
@@ -78,11 +81,11 @@ impl<T: Pixel> ImageBuilder<T> {
     /// use fitsy::ImageBuilder;
     ///
     /// let pixels: Vec<f32> = (0..(64 * 48)).map(|i| i as f32).collect();
-    /// let (header, data) = ImageBuilder::new(vec![64_u64, 48], pixels)?
+    /// let hdu = ImageBuilder::new(vec![64_u64, 48], pixels)?
     ///     .primary(true)
     ///     .build()?;
-    /// assert_eq!(data.len(), 64 * 48 * 4);
-    /// assert_eq!(header.naxis()?, 2);
+    /// assert_eq!(hdu.raw_bytes().len(), 64 * 48 * 4);
+    /// assert_eq!(hdu.header().naxis()?, 2);
     /// # Ok::<(), fitsy::FitsError>(())
     /// ```
     pub fn new(axes: impl Into<Vec<u64>>, pixels: impl Into<Vec<T>>) -> Result<Self> {
@@ -157,7 +160,7 @@ impl<T: Pixel> ImageBuilder<T> {
     ///   [`card`](Self::card) is not a legal FITS keyword, or when a
     ///   `from_u16`, `from_u32` or `from_u64` builder also received a
     ///   `BSCALE` or `BZERO` card. Those two cards are managed here.
-    pub fn build(self) -> Result<(Header, Vec<u8>)> {
+    pub fn build(self) -> Result<ImageHdu<'static>> {
         let bitpix = T::BITPIX.as_i64();
         let mut h = Header::empty();
         if self.is_primary {
@@ -210,7 +213,7 @@ impl<T: Pixel> ImageBuilder<T> {
         for p in &self.pixels {
             p.write_be(&mut data);
         }
-        Ok((h, data))
+        ImageHdu::new(h, data)
     }
 }
 
@@ -584,7 +587,7 @@ impl BinTableBuilder {
     ///
     /// The same conditions as
     /// [`build_with_heap`](Self::build_with_heap).
-    pub fn build(self, n_rows: usize, data: Vec<u8>) -> Result<(Header, Vec<u8>)> {
+    pub fn build(self, n_rows: usize, data: Vec<u8>) -> Result<BinTableHdu<'static>> {
         self.build_with_heap(n_rows, data, &[])
     }
 
@@ -611,7 +614,7 @@ impl BinTableBuilder {
         n_rows: usize,
         row_bytes: Vec<u8>,
         heap_bytes: &[u8],
-    ) -> Result<(Header, Vec<u8>)> {
+    ) -> Result<BinTableHdu<'static>> {
         let row = self.row_bytes();
         let expected = row
             .checked_mul(n_rows)
@@ -662,7 +665,7 @@ impl BinTableBuilder {
         }
         let mut out = row_bytes;
         out.extend_from_slice(heap_bytes);
-        Ok((h, out))
+        BinTableHdu::new(h, out)
     }
 }
 
@@ -739,12 +742,12 @@ struct AsciiColSpec {
 ///     AsciiColumnData::Float(vec![1.5, 2.25]),
 /// )?;
 /// b.unit("Jy")?;
-/// let (header, data) = b.build()?;
+/// let hdu = b.build()?;
 ///
 /// // Fields pack with no padding: 8 + 9 = 17 bytes per row, 2 rows.
-/// assert_eq!(header.naxisn(1)?, 17);
-/// assert_eq!(header.naxisn(2)?, 2);
-/// assert_eq!(data.len(), 34);
+/// assert_eq!(hdu.header().naxisn(1)?, 17);
+/// assert_eq!(hdu.header().naxisn(2)?, 2);
+/// assert_eq!(hdu.data_bytes().len(), 34);
 /// # Ok::<(), fitsy::FitsError>(())
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -920,7 +923,7 @@ impl AsciiTableBuilder {
     ///
     /// [`FitsError::Header`] when a keyword passed to
     /// [`card`](Self::card) is not a legal FITS keyword.
-    pub fn build(self) -> Result<(Header, Vec<u8>)> {
+    pub fn build(self) -> Result<AsciiTableHdu<'static>> {
         if self.columns.is_empty() {
             return Err(FitsError::Data(
                 "AsciiTableBuilder: at least one column is required".into(),
@@ -996,7 +999,7 @@ impl AsciiTableBuilder {
         for line in self.history {
             h.push_commentary(CommentaryKind::History, &line)?;
         }
-        Ok((h, data))
+        AsciiTableHdu::new(h, data)
     }
 }
 
@@ -1116,11 +1119,12 @@ mod tests {
             .card("OBJECT", Value::String("synthetic".into()), Some("test"))
             .history("created by ImageBuilder")
             .build()
-            .unwrap();
+            .unwrap()
+            .into_parts();
 
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -1152,8 +1156,8 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary.0, &primary.1).unwrap();
-        w.write_hdu(&ext.0, &ext.1).unwrap();
+        w.write_hdu(&primary).unwrap();
+        w.write_hdu(&ext).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -1194,12 +1198,12 @@ mod tests {
             row_bytes.extend_from_slice(&flux.to_bits().to_be_bytes());
             row_bytes.extend_from_slice(name);
         }
-        let (h, data) = bt.build(3, row_bytes).unwrap();
+        let (h, data) = bt.build(3, row_bytes).unwrap().into_parts();
 
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary.0, &primary.1).unwrap();
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu(&primary).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -1225,10 +1229,11 @@ mod tests {
             .unwrap()
             .primary(true)
             .build()
-            .unwrap();
+            .unwrap()
+            .into_parts();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -1248,10 +1253,11 @@ mod tests {
             .unwrap()
             .primary(true)
             .build()
-            .unwrap();
+            .unwrap()
+            .into_parts();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
         let parsed = FitsFile::from_bytes(buf).unwrap();
         let Hdu::Image(img) = parsed.hdu(0).unwrap() else {
@@ -1270,10 +1276,11 @@ mod tests {
             .unwrap()
             .primary(true)
             .build()
-            .unwrap();
+            .unwrap()
+            .into_parts();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
         let parsed = FitsFile::from_bytes(buf).unwrap();
         let Hdu::Image(img) = parsed.hdu(0).unwrap() else {
@@ -1325,7 +1332,10 @@ mod tests {
             }
         }
 
-        let (h, data) = bt.build_with_heap(payloads.len(), row_data, &heap).unwrap();
+        let (h, data) = bt
+            .build_with_heap(payloads.len(), row_data, &heap)
+            .unwrap()
+            .into_parts();
 
         // Sanity check on the emitted header.
         assert!(matches!(h.first("PCOUNT"), Some(Value::Integer(p)) if p > 0));
@@ -1336,8 +1346,8 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary.0, &primary.1).unwrap();
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu(&primary).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -1388,11 +1398,14 @@ mod tests {
             }
         }
 
-        let (h, data) = bt.build_with_heap(payloads.len(), row_data, &heap).unwrap();
+        let (h, data) = bt
+            .build_with_heap(payloads.len(), row_data, &heap)
+            .unwrap()
+            .into_parts();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary.0, &primary.1).unwrap();
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu(&primary).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -1456,12 +1469,12 @@ mod tests {
         )
         .unwrap();
         bt.extname("CAT");
-        let (h, data) = bt.build().unwrap();
+        let (h, data) = bt.build().unwrap().into_parts();
 
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary.0, &primary.1).unwrap();
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu(&primary).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
 
         let parsed = FitsFile::from_bytes(buf).unwrap();

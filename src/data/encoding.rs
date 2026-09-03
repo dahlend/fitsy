@@ -196,6 +196,41 @@ impl Pixel for f64 {
     }
 }
 
+/// Number of elements the axis list `axes` describes.
+///
+/// An empty list is `NAXIS = 0`, which Standard Sec.4.4.1.1 defines as
+/// no data array at all. The empty product is 1, so a plain fold would
+/// claim one phantom element; this returns 0. An axis of length 0
+/// gives 0 by the product itself.
+///
+/// # Errors
+///
+/// [`FitsError::Data`] when the product overflows `u64`.
+pub(crate) fn axis_product(axes: &[u64]) -> Result<u64> {
+    if axes.is_empty() {
+        return Ok(0);
+    }
+    axes.iter()
+        .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
+        .ok_or_else(|| FitsError::Data("axis product overflows u64".into()))
+}
+
+/// Number of elements a caller-supplied region shape describes.
+///
+/// Unlike [`axis_product`] this does not special-case an empty list:
+/// a shape is a request, not a declaration of `NAXIS`, and callers
+/// validate its rank against the array before they get here.
+///
+/// # Errors
+///
+/// [`FitsError::Data`] when the product overflows `u64`.
+pub(crate) fn shape_product(shape: &[u64]) -> Result<u64> {
+    shape
+        .iter()
+        .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
+        .ok_or_else(|| FitsError::Data("shape product overflows u64".into()))
+}
+
 /// An image array decoded into memory.
 ///
 /// This pairs a flat element vector with the axis lengths, in FITS
@@ -232,15 +267,7 @@ impl<T> ImageData<T> {
     /// `data`, since the empty product would otherwise demand one
     /// element (Sec.4.4.1.1).
     pub fn new(data: Vec<T>, axes: Vec<u64>) -> Result<Self> {
-        // `NAXIS = 0` means no data (Sec.4.4.1.1), but the empty
-        // product is 1, which would demand a one-element array.
-        let expected: u64 = if axes.is_empty() {
-            0
-        } else {
-            axes.iter()
-                .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-                .ok_or_else(|| FitsError::Data("axis product overflows u64".into()))?
-        };
+        let expected = axis_product(&axes)?;
         if expected != data.len() as u64 {
             return Err(FitsError::Data(format!(
                 "axis product {expected} does not match data length {}",

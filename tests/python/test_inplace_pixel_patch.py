@@ -163,3 +163,98 @@ def test_section_setitem_rejects_fancy_indexing_in_update_mode(tmp_path: Path) -
         # Negative step is not supported by the in-place path.
         with pytest.raises(ValueError, match="in-place patch path"):
             f[0].section[::-1, :] = np.zeros((4, 4), dtype=np.int16)
+
+
+# ------------------------- scaled images -----------------------------
+#
+# `BZERO`/`BSCALE` are meant to be invisible: `data` reports physical
+# values, and a write takes the same units back. These files are built
+# with fitsy rather than astropy, which the suite does not depend on.
+
+
+def _write_scaled(path: Path, raw: np.ndarray, bzero: float, bscale: float) -> None:
+    """Write `raw` as stored integers under `physical = bzero + bscale * raw`."""
+    fitsy.write(
+        str(path),
+        [fitsy.image(raw, header={"BZERO": bzero, "BSCALE": bscale})],
+        overwrite=True,
+    )
+
+
+def test_scaled_image_round_trips_without_double_scaling(tmp_path: Path) -> None:
+    """Reading physical values and writing them back must not scale twice.
+
+    ``hdu.data`` reports ``BZERO + BSCALE * raw``. Writing that array
+    keeps the physical values, so the cards that described the integer
+    storage are dropped rather than applied a second time.
+    """
+    src = tmp_path / "scaled.fits"
+    raw = np.arange(12, dtype=np.int16).reshape(3, 4)
+    _write_scaled(src, raw, 100.0, 0.5)
+    physical = 100.0 + 0.5 * raw
+
+    out = tmp_path / "rt.fits"
+    with fitsy.open(str(src)) as f:
+        np.testing.assert_allclose(np.asarray(f[0].data), physical)
+        f[0].data = np.asarray(f[0].data)
+        f.writeto(str(out))
+
+    with fitsy.open(str(out)) as f:
+        np.testing.assert_allclose(np.asarray(f[0].data), physical)
+        assert "BZERO" not in f[0].header
+        assert "BSCALE" not in f[0].header
+
+
+def test_reading_a_scaled_image_does_not_rewrite_it(tmp_path: Path) -> None:
+    """``mode='update'`` must not change a file that was only read."""
+    path = tmp_path / "scaled.fits"
+    _write_scaled(path, np.arange(12, dtype=np.int16).reshape(3, 4), 100.0, 0.5)
+    before = path.read_bytes()
+
+    with fitsy.open(str(path), mode="update") as f:
+        _ = np.asarray(f[0].data)
+
+    assert path.read_bytes() == before, "a read rewrote the file"
+
+
+def test_section_write_takes_physical_units_on_a_scaled_image(tmp_path: Path) -> None:
+    """A patch is written in the units ``data`` reports, not stored ones."""
+    path = tmp_path / "scaled.fits"
+    _write_scaled(path, np.arange(12, dtype=np.int16).reshape(3, 4), 100.0, 0.5)
+
+    with fitsy.open(str(path), mode="update") as f:
+        f[0].section[0:1, 0:2] = np.array([[200.0, 200.5]])
+
+    with fitsy.open(str(path)) as f:
+        # The storage is untouched: still BITPIX 16 with its scaling.
+        assert f[0].header["BITPIX"] == 16
+        assert f[0].header["BZERO"] == 100.0
+        got = np.asarray(f[0].data)
+    np.testing.assert_allclose(got[0, :2], [200.0, 200.5])
+    np.testing.assert_allclose(got[0, 2:], [101.0, 101.5])
+
+
+@pytest.mark.parametrize("dtype", ["uint16", "uint32", "uint64"])
+def test_unsigned_patch_is_exact_at_the_top_of_the_range(
+    tmp_path: Path, dtype: str
+) -> None:
+    """The unsigned convention must not round-trip through float.
+
+    ``uint64`` values near ``2**64`` are not representable in ``f64``,
+    so a patch staged as a float would collapse neighbouring values
+    onto each other.
+    """
+    dt = np.dtype(dtype)
+    big = int(np.iinfo(dt).max)
+    path = tmp_path / f"{dtype}.fits"
+    _write(path, np.array([[big - 3, big - 2], [big - 1, big]], dtype=dt))
+
+    with fitsy.open(str(path), mode="update") as f:
+        assert np.asarray(f[0].data).dtype == dt
+        f[0].section[0:1, 0:2] = np.array([[big - 9, big - 8]], dtype=dt)
+
+    with fitsy.open(str(path)) as f:
+        got = np.asarray(f[0].data)
+    assert int(got[0, 0]) == big - 9
+    assert int(got[0, 1]) == big - 8
+    assert int(got[1, 1]) == big, "the untouched pixels are unchanged"

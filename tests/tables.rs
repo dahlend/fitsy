@@ -605,7 +605,7 @@ fn bintable_tdisp_round_trip() {
     row.extend_from_slice(&1_i32.to_be_bytes());
     row.extend_from_slice(&1.5_f64.to_be_bytes());
     row.extend_from_slice(b"ALPHA   ");
-    let (h, data) = bt.build(1, row).unwrap();
+    let (h, data) = bt.build(1, row).unwrap().into_parts();
 
     assert_eq!(h.optional_string("TDISP1").as_deref(), Some("I6.4"));
     assert_eq!(h.optional_string("TDISP2").as_deref(), Some("E12.5E3"));
@@ -613,8 +613,8 @@ fn bintable_tdisp_round_trip() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&primary.0, &primary.1).unwrap();
-    w.write_hdu(&h, &data).unwrap();
+    w.write_hdu(&primary).unwrap();
+    w.write_hdu_parts(&h, &data).unwrap();
     w.finish().unwrap();
 
     let f = FitsFile::from_bytes(buf).unwrap();
@@ -655,15 +655,15 @@ fn ascii_table_tdisp_round_trip() {
     )
     .unwrap();
     b.display("F9.3").unwrap();
-    let (h, data) = b.build().unwrap();
+    let (h, data) = b.build().unwrap().into_parts();
 
     assert_eq!(h.optional_string("TDISP1").as_deref(), Some("A8"));
     assert_eq!(h.optional_string("TDISP2").as_deref(), Some("F9.3"));
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&primary.0, &primary.1).unwrap();
-    w.write_hdu(&h, &data).unwrap();
+    w.write_hdu(&primary).unwrap();
+    w.write_hdu_parts(&h, &data).unwrap();
     w.finish().unwrap();
 
     let f = FitsFile::from_bytes(buf).unwrap();

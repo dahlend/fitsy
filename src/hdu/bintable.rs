@@ -39,6 +39,8 @@
 //! column with `TZEROn = -128` gives [`BinValue::Int`]. Any other
 //! non-default scaling gives [`BinValue::Float`].
 
+use std::borrow::Cow;
+
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value::Value;
@@ -374,7 +376,7 @@ impl IntStorage {
 /// use fitsy::{FitsFile, FitsWriter, Hdu, ImageBuilder};
 ///
 /// // Build a one-column table and write it in memory.
-/// let (ph, pd) = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
+/// let primary = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
 ///     .primary(true)
 ///     .build()?;
 /// let mut b = BinTableBuilder::new();
@@ -384,12 +386,12 @@ impl IntStorage {
 /// for v in [1.5_f64, 2.5, 3.5] {
 ///     rows.extend_from_slice(&v.to_be_bytes());
 /// }
-/// let (th, td) = b.build(3, rows)?;
+/// let hdu = b.build(3, rows)?;
 ///
 /// let mut buf: Vec<u8> = Vec::new();
 /// let mut w = FitsWriter::new(&mut buf);
-/// w.write_hdu(&ph, &pd)?;
-/// w.write_hdu(&th, &td)?;
+/// w.write_hdu(&primary)?;
+/// w.write_hdu(&hdu)?;
 /// w.finish()?;
 ///
 /// // Read one cell back.
@@ -406,7 +408,7 @@ impl IntStorage {
 pub struct BinTableHdu<'a> {
     header: Header,
     /// Bytes covering the row table (and its heap).
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     row_size: usize,
     n_rows: usize,
     columns: Vec<BinColumn>,
@@ -430,7 +432,8 @@ impl<'a> BinTableHdu<'a> {
     /// - [`FitsError::Data`] when the row size times the row count
     ///   overflows, when `data.len()` is smaller than the header
     ///   declares, or when the columns do not fit inside `NAXIS1`.
-    pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
+    pub fn new(header: Header, data: impl Into<Cow<'a, [u8]>>) -> Result<Self> {
+        let data = data.into();
         if header.bitpix()? != 8 {
             return Err(FitsError::Value {
                 keyword: "BITPIX".into(),
@@ -679,10 +682,22 @@ impl<'a> BinTableHdu<'a> {
     /// Raw data bytes (table rows followed by the heap, exactly as
     /// they appear in the file). The slice length equals
     /// `NAXIS1 * NAXIS2 + PCOUNT` (or whatever the on-disk extent
+    /// Consume the HDU and return its header and data section.
+    ///
+    /// This is the inverse of [`new`](Self::new), and the escape hatch
+    /// for an interface that holds the two apart, such as
+    /// [`FitsWriter::write_hdu_parts`](crate::FitsWriter::write_hdu_parts).
+    /// The bytes are copied when they are borrowed and moved when they
+    /// are owned.
+    #[must_use]
+    pub fn into_parts(self) -> (Header, Vec<u8>) {
+        (self.header, self.data.into_owned())
+    }
+
     /// turned out to be).
     #[must_use]
     pub fn data_bytes(&self) -> &[u8] {
-        self.data
+        &self.data
     }
 
     /// Iterate `count` consecutive rows from `start`, yielding the raw

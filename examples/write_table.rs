@@ -42,12 +42,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         buf[..n].copy_from_slice(&name.as_bytes()[..n]);
         row_bytes.extend_from_slice(&buf);
     }
-    let (h, data) = bt.build(rows_in.len(), row_bytes)?;
+    let table = bt.build(rows_in.len(), row_bytes)?;
 
     let mut out = std::fs::File::create(&path)?;
     let mut w = FitsWriter::new(&mut out);
-    w.write_hdu(&primary.0, &primary.1)?;
-    w.write_hdu(&h, &data)?;
+    w.write_hdu(&primary)?;
+    w.write_hdu(&table)?;
     w.finish()?;
 
     println!("wrote {} ({} rows)", path.display(), rows_in.len());

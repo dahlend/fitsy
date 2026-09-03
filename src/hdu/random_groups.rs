@@ -36,6 +36,8 @@
 //! Sec.6.4 discourages this HDU type for a new file. Legacy radio
 //! interferometry data still uses it.
 
+use std::borrow::Cow;
+
 use crate::data::encoding::{Bitpix, Pixel};
 use crate::error::{FitsError, Result};
 use crate::header::Header;
@@ -73,7 +75,7 @@ impl GroupParameter {
 #[derive(Debug, Clone)]
 pub struct RandomGroupsHdu<'a> {
     header: Header,
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     bitpix: Bitpix,
     /// Number of parameters per group (`PCOUNT`).
     pcount: u64,
@@ -93,7 +95,8 @@ impl<'a> RandomGroupsHdu<'a> {
     /// If the header is not random groups (Sec.6.1.1 requires
     /// `GROUPS = T` and `NAXIS1 = 0`), or `data` does not match the
     /// extent `GCOUNT`, `PCOUNT` and the axes imply.
-    pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
+    pub fn new(header: Header, data: impl Into<Cow<'a, [u8]>>) -> Result<Self> {
+        let data = data.into();
         let bitpix = Bitpix::from_i64(header.bitpix()?)?;
         let naxis = header.naxis()?;
         if naxis < 2 {
@@ -332,6 +335,6 @@ impl<'a> RandomGroupsHdu<'a> {
     /// Raw data bytes for the entire data section.
     #[must_use]
     pub fn raw_bytes(&self) -> &[u8] {
-        self.data
+        &self.data
     }
 }

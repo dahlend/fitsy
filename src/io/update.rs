@@ -23,7 +23,9 @@
 //! file and renames it.
 //!
 //! An HDU cannot change size here. A resize would move every later
-//! HDU, and the cached offsets would then be wrong.
+//! HDU, and the cached offsets would then be wrong. This rules out a
+//! tile-compressed image, whose tiles change byte length when they
+//! are rewritten.
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -37,6 +39,61 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 
+/// Encode physical values into the big-endian stored form of `meta`.
+///
+/// Each value is inverted through `BZERO`, `BSCALE` and `BLANK`, then
+/// narrowed to the type `BITPIX` names. An integer that does not fit
+/// that type is an error rather than a wrapped value.
+fn encode_physical(meta: &ImageMeta, pixels: &[f64]) -> Result<Vec<u8>> {
+    let s = &meta.scaling;
+    let mut be = Vec::with_capacity(pixels.len() * meta.bitpix.byte_size());
+    macro_rules! narrow {
+        ($t:ty, $v:expr) => {{
+            let raw = s.unapply_int($v)?;
+            let fitted = <$t>::try_from(raw).map_err(|_| {
+                FitsError::Data(format!(
+                    "physical value {} scales to {raw}, outside the range of {}",
+                    $v,
+                    stringify!($t)
+                ))
+            })?;
+            fitted.write_be(&mut be);
+        }};
+    }
+    for &v in pixels {
+        match meta.bitpix {
+            Bitpix::U8 => narrow!(u8, v),
+            Bitpix::I16 => narrow!(i16, v),
+            Bitpix::I32 => narrow!(i32, v),
+            Bitpix::I64 => {
+                s.unapply_int(v)?.write_be(&mut be);
+            }
+            Bitpix::F32 => {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "BITPIX = -32 stores a single-precision pixel"
+                )]
+                (s.unapply_real(v)? as f32).write_be(&mut be);
+            }
+            Bitpix::F64 => s.unapply_real(v)?.write_be(&mut be),
+        }
+    }
+    Ok(be)
+}
+
+/// Whether one HDU can take a patch, and why not when it cannot.
+#[derive(Debug, Clone)]
+enum Patchable {
+    /// An image HDU, with its pixel layout cached.
+    Image(ImageMeta),
+    /// A tile-compressed image. A rewritten tile does not keep its
+    /// byte length, so a patch would resize the HDU.
+    #[cfg(feature = "compression")]
+    Compressed,
+    /// Any other HDU.
+    No,
+}
+
 /// Image-HDU pixel layout cached at open time.
 #[derive(Debug, Clone)]
 struct ImageMeta {
@@ -46,6 +103,8 @@ struct ImageMeta {
     axes: Vec<u64>,
     /// Pixel encoding from `BITPIX`.
     bitpix: Bitpix,
+    /// `BZERO`, `BSCALE` and `BLANK`, cached at open.
+    scaling: crate::data::Scaling,
 }
 
 /// Updater for in-place pixel patch writes.
@@ -63,15 +122,31 @@ struct ImageMeta {
 /// HDU, and the cached offsets would then be wrong. Each patch is
 /// bounds-checked against the cached axis lengths and the file
 /// length.
+///
+/// [`write_image_subarray_physical`](Self::write_image_subarray_physical)
+/// writes in the units the header describes, inverting `BZERO`,
+/// `BSCALE` and `BLANK`.
+/// [`write_image_subarray`](Self::write_image_subarray) writes stored
+/// values, the counterpart of
+/// [`ImageHdu::read_raw`](crate::ImageHdu::read_raw).
+///
+/// A tile-compressed image takes no patch either. A rewritten tile
+/// does not keep its byte length.
+/// [`write_image_subarray`](Self::write_image_subarray) reports this.
+/// [`image_axes`](Self::image_axes) and
+/// [`image_bitpix`](Self::image_bitpix) return `None` for such an HDU.
+/// Decompress the file first, with
+/// [`FitsFile::write_decompressed`](crate::FitsFile::write_decompressed).
 #[derive(Debug)]
 pub struct FitsUpdater {
     file: File,
     /// File length cached at open time. Used to bounds-check writes
     /// without an extra `metadata()` call per patch.
     len: u64,
-    /// One entry per HDU. `None` for non-image HDUs (we only support
+    /// One entry per HDU. Not `Patchable::Image` for HDUs that take
+    /// no patch (we only support
     /// image patches today).
-    images: Vec<Option<ImageMeta>>,
+    images: Vec<Patchable>,
     /// Bumped whenever the inner state is replaced. A caller caching
     /// `(updater, hdu_idx)` across rewrites records the tag and
     /// refuses the patch once it advances.
@@ -127,13 +202,21 @@ impl FitsUpdater {
                     let data_offset = probe.data_offset(i).ok_or_else(|| {
                         FitsError::Header(format!("missing data span for HDU {i}"))
                     })?;
-                    Some(ImageMeta {
+                    let h = img.header();
+                    Patchable::Image(ImageMeta {
                         data_offset,
                         axes: img.axes().to_vec(),
                         bitpix: img.bitpix(),
+                        scaling: crate::data::Scaling {
+                            bzero: h.bzero(),
+                            bscale: h.bscale(),
+                            blank: h.blank(),
+                        },
                     })
                 }
-                _ => None,
+                #[cfg(feature = "compression")]
+                Hdu::CompressedImage(_) => Patchable::Compressed,
+                _ => Patchable::No,
             };
             images.push(entry);
         }
@@ -143,20 +226,9 @@ impl FitsUpdater {
         // Sanity-check that the file is at least as large as the
         // greatest (data_offset + data_size) we will ever poke.
         for (i, m) in images.iter().enumerate() {
-            if let Some(meta) = m {
-                // Sec.4.4.1.1: `NAXIS = 0` means the HDU carries no data
-                // array at all. Folding an empty axis list would yield
-                // the empty product, 1, and claim a phantom pixel.
-                let elems: u64 = if meta.axes.is_empty() {
-                    0
-                } else {
-                    meta.axes
-                        .iter()
-                        .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
-                        .ok_or_else(|| {
-                            FitsError::Data(format!("HDU {i} pixel count overflows u64"))
-                        })?
-                };
+            if let Patchable::Image(meta) = m {
+                let elems = crate::data::encoding::axis_product(&meta.axes)
+                    .map_err(|_| FitsError::Data(format!("HDU {i} pixel count overflows u64")))?;
                 let bytes = elems
                     .checked_mul(meta.bitpix.byte_size() as u64)
                     .and_then(|b| meta.data_offset.checked_add(b))
@@ -232,17 +304,19 @@ impl FitsUpdater {
     /// the HDU is not an image (or `i` is out of range).
     #[must_use]
     pub fn image_axes(&self, i: usize) -> Option<&[u64]> {
-        self.images
-            .get(i)
-            .and_then(|m| m.as_ref().map(|m| m.axes.as_slice()))
+        match self.images.get(i) {
+            Some(Patchable::Image(m)) => Some(m.axes.as_slice()),
+            _ => None,
+        }
     }
 
     /// `BITPIX` of image HDU `i`, or `None` if not an image.
     #[must_use]
     pub fn image_bitpix(&self, i: usize) -> Option<Bitpix> {
-        self.images
-            .get(i)
-            .and_then(|m| m.as_ref().map(|m| m.bitpix))
+        match self.images.get(i) {
+            Some(Patchable::Image(m)) => Some(m.bitpix),
+            _ => None,
+        }
     }
 
     /// Write a rectangular pixel patch into image HDU `i`.
@@ -254,6 +328,13 @@ impl FitsUpdater {
     /// The `pixels` argument holds `shape.iter().product()` elements
     /// in C order, with `NAXIS1` varying fastest. This is the layout
     /// of a numpy array whose shape is the reverse of `shape`.
+    ///
+    /// These are stored values, the ones
+    /// [`ImageHdu::read_raw`](crate::ImageHdu::read_raw) returns. When
+    /// the header declares `BZERO`, `BSCALE` or `BLANK`, a stored
+    /// value is not the value a reader sees, and
+    /// [`Self::write_image_subarray_physical`] is the method that
+    /// takes the units the header describes.
     ///
     /// # Crash safety
     ///
@@ -270,6 +351,9 @@ impl FitsUpdater {
     /// - The region escapes the array.
     /// - `pixels.len()` does not match the product of `shape`.
     /// - A byte offset overflows `u64`.
+    /// - HDU `i` is a tile-compressed image. Such an HDU takes no
+    ///   in-place patch, because a rewritten tile does not keep its
+    ///   byte length.
     ///
     /// [`FitsError::HduMismatch`] when `T` does not match the `BITPIX`
     /// of the HDU. [`FitsError::Io`] when the write fails.
@@ -280,38 +364,76 @@ impl FitsUpdater {
         shape: &[u64],
         pixels: &[T],
     ) -> Result<()> {
-        use crate::hdu::subarray::{checked_strides, next_subarray_index, validate_subarray_shape};
-
-        let meta = self
-            .images
-            .get(i)
-            .and_then(|m| m.as_ref())
-            .ok_or_else(|| {
-                FitsError::Data(format!(
-                    "FitsUpdater: HDU {i} is not an image (or out of range)"
-                ))
-            })?
-            .clone();
+        let meta = self.patchable_image(i)?;
         if T::BITPIX != meta.bitpix {
             return Err(FitsError::HduMismatch {
                 expected: T::BITPIX.rust_type_name(),
                 found: meta.bitpix.rust_type_name().into(),
             });
         }
-        validate_subarray_shape(&meta.axes, start, shape)?;
+        Self::validate_patch(&meta, start, shape, pixels.len())?;
         if shape.contains(&0) {
             return Ok(());
         }
-        let expected: u64 = shape
-            .iter()
-            .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| FitsError::Data("shape product overflows u64".into()))?;
-        if pixels.len() as u64 != expected {
-            return Err(FitsError::Data(format!(
-                "pixels.len() = {} but shape implies {expected} elements",
-                pixels.len(),
-            )));
+        let mut be = Vec::with_capacity(pixels.len() * meta.bitpix.byte_size());
+        for px in pixels {
+            px.write_be(&mut be);
         }
+        self.patch_bytes(&meta, start, shape, &be)
+    }
+
+    /// Write a rectangular pixel patch in physical units.
+    ///
+    /// The `pixels` argument holds `shape.iter().product()` values in
+    /// the units the header describes, the ones
+    /// [`ImageHdu::read_physical`](crate::ImageHdu::read_physical)
+    /// returns. This inverts `BZERO`, `BSCALE` and `BLANK` before it
+    /// writes, so a caller reads and writes the same numbers whatever
+    /// the file stores. An integer image rounds to the nearest stored
+    /// value, and a `NaN` writes the `BLANK` sentinel.
+    ///
+    /// [`Self::write_image_subarray`] is the raw counterpart, for a
+    /// caller holding stored values.
+    ///
+    /// # Crash safety
+    ///
+    /// The conditions of [`Self::write_image_subarray`].
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`Self::write_image_subarray`], and
+    /// [`FitsError::Data`] when a value does not fit the stored type,
+    /// when a `NaN` reaches an integer image that declares no `BLANK`,
+    /// or when `BSCALE` is zero.
+    pub fn write_image_subarray_physical(
+        &mut self,
+        i: usize,
+        start: &[u64],
+        shape: &[u64],
+        pixels: &[f64],
+    ) -> Result<()> {
+        let meta = self.patchable_image(i)?;
+        Self::validate_patch(&meta, start, shape, pixels.len())?;
+        if shape.contains(&0) {
+            return Ok(());
+        }
+        let be = encode_physical(&meta, pixels)?;
+        self.patch_bytes(&meta, start, shape, &be)
+    }
+
+    /// Write `be`, the big-endian encoding of a patch, into the file.
+    ///
+    /// The `be` argument holds the patch pixels in order. Rows run
+    /// along `NAXIS1`, so this splits `be` into one row per write.
+    fn patch_bytes(
+        &mut self,
+        meta: &ImageMeta,
+        start: &[u64],
+        shape: &[u64],
+        be: &[u8],
+    ) -> Result<()> {
+        use crate::hdu::subarray::{checked_strides, next_subarray_index};
+
         let bsize = meta.bitpix.byte_size();
 
         let strides = checked_strides(&meta.axes)?;
@@ -361,26 +483,58 @@ impl FitsUpdater {
             }
         }
 
-        // ---- Pass 2: pre-encode every row of the patch into one
-        // contiguous big-endian buffer, then issue the data pwrites
-        // row by row.
+        // ---- Pass 2: issue the data pwrites, one row at a time.
         let total_bytes = row_offsets
             .len()
             .checked_mul(row_bytes)
             .ok_or_else(|| FitsError::Data("total byte count overflows usize".to_string()))?;
-        let mut new_bytes = Vec::with_capacity(total_bytes);
-        for px in pixels {
-            px.write_be(&mut new_bytes);
-        }
         debug_assert_eq!(
-            new_bytes.len(),
+            be.len(),
             total_bytes,
             "encoded patch buffer must equal rows * row_bytes"
         );
 
         for (i, &off) in row_offsets.iter().enumerate() {
-            let chunk = &new_bytes[i * row_bytes..(i + 1) * row_bytes];
+            let chunk = &be[i * row_bytes..(i + 1) * row_bytes];
             pwrite_all(&self.file, off, chunk)?;
+        }
+        Ok(())
+    }
+
+    /// The cached layout of image HDU `i`, or the reason there is
+    /// none.
+    fn patchable_image(&self, i: usize) -> Result<ImageMeta> {
+        match self.images.get(i) {
+            Some(Patchable::Image(m)) => Ok(m.clone()),
+            #[cfg(feature = "compression")]
+            Some(Patchable::Compressed) => Err(FitsError::Data(format!(
+                "FitsUpdater: HDU {i} is a tile-compressed image, which takes \
+                 no in-place patch: a rewritten tile does not keep its byte \
+                 length. Decompress the file first, with \
+                 `FitsFile::write_decompressed`"
+            ))),
+            _ => Err(FitsError::Data(format!(
+                "FitsUpdater: HDU {i} is not an image (or out of range)"
+            ))),
+        }
+    }
+
+    /// Check a patch region and its element count against the HDU.
+    fn validate_patch(
+        meta: &ImageMeta,
+        start: &[u64],
+        shape: &[u64],
+        n_pixels: usize,
+    ) -> Result<()> {
+        crate::hdu::subarray::validate_subarray_shape(&meta.axes, start, shape)?;
+        if shape.contains(&0) {
+            return Ok(());
+        }
+        let expected = crate::data::encoding::shape_product(shape)?;
+        if n_pixels as u64 != expected {
+            return Err(FitsError::Data(format!(
+                "pixels.len() = {n_pixels} but shape implies {expected} elements",
+            )));
         }
         Ok(())
     }

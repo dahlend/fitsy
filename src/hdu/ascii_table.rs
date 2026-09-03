@@ -34,6 +34,8 @@
 //! is itself all spaces therefore matches a blank field alone, which
 //! is how a writer opts a column out of the blank-means-zero rule.
 
+use std::borrow::Cow;
+
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 
@@ -182,7 +184,7 @@ impl AsciiFormat {
 /// use fitsy::{AsciiCell, AsciiFormat, AsciiTableBuilder};
 /// use fitsy::{FitsFile, FitsWriter, Hdu, ImageBuilder};
 ///
-/// let (ph, pd) = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
+/// let primary = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
 ///     .primary(true)
 ///     .build()?;
 /// let mut b = AsciiTableBuilder::new();
@@ -194,12 +196,12 @@ impl AsciiFormat {
 /// // TNULL is the only marker of an undefined ASCII-table value.
 /// b.tnull("---")?;
 /// b.extname("CATALOG");
-/// let (th, td) = b.build()?;
+/// let hdu = b.build()?;
 ///
 /// let mut buf: Vec<u8> = Vec::new();
 /// let mut w = FitsWriter::new(&mut buf);
-/// w.write_hdu(&ph, &pd)?;
-/// w.write_hdu(&th, &td)?;
+/// w.write_hdu(&primary)?;
+/// w.write_hdu(&hdu)?;
 /// w.finish()?;
 ///
 /// let file = FitsFile::from_bytes(buf)?;
@@ -214,7 +216,7 @@ impl AsciiFormat {
 #[derive(Debug, Clone)]
 pub struct AsciiTableHdu<'a> {
     header: Header,
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     row_size: usize,
     n_rows: usize,
     columns: Vec<AsciiColumn>,
@@ -237,7 +239,8 @@ impl<'a> AsciiTableHdu<'a> {
     /// - [`FitsError::Data`] when the row size times the row count
     ///   overflows `usize`, or when `data.len()` does not equal that
     ///   product.
-    pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
+    pub fn new(header: Header, data: impl Into<Cow<'a, [u8]>>) -> Result<Self> {
+        let data = data.into();
         // Validate the mandatory shape: BITPIX=8, NAXIS=2.
         if header.bitpix()? != 8 {
             return Err(FitsError::Value {
@@ -379,10 +382,22 @@ impl<'a> AsciiTableHdu<'a> {
     pub fn header(&self) -> &Header {
         &self.header
     }
+    /// Consume the HDU and return its header and data section.
+    ///
+    /// This is the inverse of [`new`](Self::new), and the escape hatch
+    /// for an interface that holds the two apart, such as
+    /// [`FitsWriter::write_hdu_parts`](crate::FitsWriter::write_hdu_parts).
+    /// The bytes are copied when they are borrowed and moved when they
+    /// are owned.
+    #[must_use]
+    pub fn into_parts(self) -> (Header, Vec<u8>) {
+        (self.header, self.data.into_owned())
+    }
+
     /// Raw data bytes (the entire data section, `n_rows * row_size`).
     #[must_use]
     pub fn data_bytes(&self) -> &[u8] {
-        self.data
+        &self.data
     }
     #[must_use]
     /// Bytes per row, from `NAXIS1`.

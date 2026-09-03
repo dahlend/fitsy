@@ -1776,7 +1776,7 @@ fn wave_tab_axis_resolved_from_bintable() {
     for w in wavelens {
         row_bytes.extend_from_slice(&w.to_bits().to_be_bytes());
     }
-    let (mut bt_header, bt_data) = bt.build(1, row_bytes).unwrap();
+    let (mut bt_header, bt_data) = bt.build(1, row_bytes).unwrap().into_parts();
     bt_header
         .push("EXTNAME", Value::String("WCS-TAB".into()), None)
         .unwrap();
@@ -1784,8 +1784,8 @@ fn wave_tab_axis_resolved_from_bintable() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&primary.0, &primary.1).unwrap();
-    w.write_hdu(&bt_header, &bt_data).unwrap();
+    w.write_hdu(&primary).unwrap();
+    w.write_hdu_parts(&bt_header, &bt_data).unwrap();
     w.finish().unwrap();
 
     let file = FitsFile::from_bytes(buf).unwrap();
@@ -1883,7 +1883,7 @@ fn tab_extlevel_round_trips() {
     for w in [4e-7_f64, 4.5e-7, 5.5e-7, 7e-7, 9e-7] {
         row.extend_from_slice(&w.to_bits().to_be_bytes());
     }
-    let (mut bh, bd) = bt.build(1, row).unwrap();
+    let (mut bh, bd) = bt.build(1, row).unwrap().into_parts();
     bh.push("EXTNAME", Value::String("WCS-TAB".into()), None)
         .unwrap();
     bh.push("EXTVER", Value::Integer(1), None).unwrap();
@@ -1891,8 +1891,8 @@ fn tab_extlevel_round_trips() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&primary.0, &primary.1).unwrap();
-    w.write_hdu(&bh, &bd).unwrap();
+    w.write_hdu(&primary).unwrap();
+    w.write_hdu_parts(&bh, &bd).unwrap();
     w.finish().unwrap();
     let file = FitsFile::from_bytes(buf).unwrap();
 
@@ -1939,7 +1939,7 @@ fn unresolved_tab_axis_errors_on_use() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&primary.0, &primary.1).unwrap();
+    w.write_hdu(&primary).unwrap();
     w.finish().unwrap();
 
     let file = FitsFile::from_bytes(buf).unwrap();
@@ -3454,15 +3454,15 @@ fn tab_axis_extrapolation_is_bounded() {
     for w in wavelens {
         row.extend_from_slice(&w.to_bits().to_be_bytes());
     }
-    let (mut th, td) = bt.build(1, row).unwrap();
+    let (mut th, td) = bt.build(1, row).unwrap().into_parts();
     th.push("EXTNAME", Value::String("WCS-TAB".into()), None)
         .unwrap();
     th.push("EXTVER", Value::Integer(1), None).unwrap();
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&primary.0, &primary.1).unwrap();
-    w.write_hdu(&th, &td).unwrap();
+    w.write_hdu(&primary).unwrap();
+    w.write_hdu_parts(&th, &td).unwrap();
     w.finish().unwrap();
     let file = FitsFile::from_bytes(buf).unwrap();
     let wcs = file.wcs(0, ' ').unwrap().expect("WCS present");

@@ -19,7 +19,9 @@
 //! # Layout
 //!
 //! [`CompressedImageHdu`] wraps such a table.
-//! [`CompressedImageHdu::as_image`] decodes it into an [`OwnedImage`].
+//! [`CompressedImageHdu::as_image`] decodes it into an [`ImageHdu`]
+//! that owns its pixel bytes, which is the same type an uncompressed
+//! image uses.
 //! [`compress_image_to_hdu`] runs the write path.
 //!
 //! Each submodule holds one codec: `rice`, `hcompress`, `plio` and
@@ -52,6 +54,7 @@ use flate2::read::GzDecoder;
 use crate::data::encoding::Bitpix;
 use crate::error::{FitsError, Result};
 use crate::hdu::bintable::{BinColumn, BinFieldKind, BinTableHdu, BinValue};
+use crate::hdu::image::ImageHdu;
 use crate::header::Header;
 use crate::header::card::is_indexed;
 use crate::header::value::Value;
@@ -61,6 +64,13 @@ use self::quantize::NULL_VALUE;
 
 /// gzip RFC 1952 magic bytes.
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// `EXTNAME` of a compressed table that the caller did not name, and
+/// that the source image did not name either.
+///
+/// The write path emits it, and [`synthesize_image_header`] drops it
+/// again, because it names the table rather than the image.
+const DEFAULT_EXTNAME: &str = "COMPRESSED_IMAGE";
 
 /// Inflate `buf` when it starts with the gzip magic bytes. Return it
 /// unchanged otherwise.
@@ -87,9 +97,23 @@ pub fn maybe_gunzip(buf: Vec<u8>) -> Result<Vec<u8>> {
 /// the [`FitsFile`](crate::FitsFile) that produced it, so it cannot
 /// outlive that file, and it decodes no tile until asked.
 ///
-/// Call [`as_image`](Self::as_image) for a decoded [`OwnedImage`], or
+/// Call [`as_image`](Self::as_image) for a decoded [`ImageHdu`], or
 /// [`synthetic_image_header`](Self::synthetic_image_header) for the
-/// header alone.
+/// header alone. [`FitsFile::image_header`](crate::FitsFile::image_header)
+/// reaches that header without reading the data section at all.
+///
+/// # Editing the header
+///
+/// A card the convention does not own is stored in the table header
+/// as it stands, and reads back under the same name. An edit
+/// therefore needs no decompression. Clone
+/// [`as_bintable`](Self::as_bintable)`.header()`, change the card,
+/// and write the HDU back with the data bytes it already holds. No
+/// tile is re-encoded.
+///
+/// Edit only a card the image owns. The `Z` keywords, the
+/// `TFORM`/`TTYPE` family and the table geometry describe the table,
+/// and [`reserved_keywords`] names them.
 #[derive(Debug, Clone)]
 pub struct CompressedImageHdu<'a> {
     inner: BinTableHdu<'a>,
@@ -412,20 +436,26 @@ impl<'a> CompressedImageHdu<'a> {
     /// FITS keyword. [`FitsError::Value`] when a `Z` keyword holds a
     /// value of the wrong type.
     pub fn synthetic_image_header(&self) -> Result<Header> {
-        synthesize_image_header(self.inner.header())
+        synthetic_image_header(self.inner.header())
     }
 
-    /// Decompress every tile and wrap the result as an
-    /// [`OwnedImage`], which owns its pixel bytes.
+    /// Decompress every tile and wrap the result as an [`ImageHdu`]
+    /// that owns its pixel bytes.
+    ///
+    /// The result is the same type an uncompressed image uses, so the
+    /// caller reads pixels through [`ImageHdu::read_raw`],
+    /// [`ImageHdu::read_physical`] and the rest.
     ///
     /// # Errors
     ///
     /// The conditions of [`Self::decompress`] and of
-    /// [`Self::synthetic_image_header`].
-    pub fn as_image(&self) -> Result<OwnedImage> {
+    /// [`Self::synthetic_image_header`], and [`FitsError::Data`] when
+    /// the decompressed byte count does not match the size that the
+    /// recovered header declares.
+    pub fn as_image(&self) -> Result<ImageHdu<'static>> {
         let bytes = self.decompress()?;
         let header = self.synthetic_image_header()?;
-        OwnedImage::new(header, bytes)
+        ImageHdu::new(header, bytes)
     }
 
     /// Decompress every tile into one big-endian byte buffer, laid
@@ -548,63 +578,6 @@ impl<'a> CompressedImageHdu<'a> {
             )?;
         }
         Ok(out)
-    }
-}
-
-/// A decompressed image returned from
-/// [`CompressedImageHdu::as_image`]. Owns its byte buffer.
-#[derive(Debug, Clone)]
-pub struct OwnedImage {
-    header: Header,
-    bytes: Vec<u8>,
-    bitpix: Bitpix,
-    axes: Vec<u64>,
-}
-
-impl OwnedImage {
-    fn new(header: Header, bytes: Vec<u8>) -> Result<Self> {
-        let bitpix = Bitpix::from_i64(header.bitpix()?)?;
-        let axes = header.axes()?;
-        Ok(Self {
-            header,
-            bytes,
-            bitpix,
-            axes,
-        })
-    }
-    #[must_use]
-    /// The HDU's header.
-    pub fn header(&self) -> &Header {
-        &self.header
-    }
-    #[must_use]
-    /// Pixel encoding of the *decompressed* image, from `ZBITPIX`.
-    pub fn bitpix(&self) -> Bitpix {
-        self.bitpix
-    }
-    #[must_use]
-    /// `ZNAXISn` in FITS order, fastest-varying axis first.
-    pub fn axes(&self) -> &[u64] {
-        &self.axes
-    }
-    /// Big-endian raw pixel bytes (`NAXISn` product * |BITPIX|/8).
-    #[must_use]
-    pub fn raw_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-    /// Read the WCS of this image for alternate descriptor `alt`.
-    ///
-    /// This function reads the recovered image header alone. It
-    /// resolves no `-TAB` lookup extension, because that needs the
-    /// whole file. Call [`FitsFile::wcs`](crate::FitsFile::wcs) for
-    /// that.
-    ///
-    /// # Errors
-    ///
-    /// The conditions of
-    /// [`Wcs::from_header`](crate::wcs::Wcs::from_header).
-    pub fn wcs(&self, alt: char) -> Result<Option<crate::wcs::Wcs>> {
-        crate::wcs::Wcs::from_header(&self.header, alt)
     }
 }
 
@@ -1264,7 +1237,25 @@ pub fn reserved_keywords(header: &Header) -> Vec<String> {
     out
 }
 
-fn synthesize_image_header(bt: &Header) -> Result<Header> {
+/// Build an image-HDU header from the `Z` keywords of a compressed
+/// table header.
+///
+/// This reads `bt` alone and decodes no tile.
+/// [`FitsFile::image_header`](crate::FitsFile::image_header) calls it
+/// on a header that [`FitsFile::open`](crate::FitsFile::open) already
+/// loaded.
+///
+/// The convention of Sec.10.4 is inverted here: `ZBITPIX` becomes
+/// `BITPIX`, `ZNAXISn` becomes `NAXISn`, `ZCTYPEn` becomes `CTYPEn`,
+/// and so on. A card the convention does not own moves across
+/// unchanged.
+///
+/// # Errors
+///
+/// [`FitsError::Header`] when a rewritten keyword is not a legal FITS
+/// keyword. [`FitsError::Value`] when a `Z` keyword holds a value of
+/// the wrong type.
+pub fn synthetic_image_header(bt: &Header) -> Result<Header> {
     let mut out = Header::empty();
     let bitpix = bt.optional_int("ZBITPIX").unwrap_or(8);
     let znaxis = bt.optional_int("ZNAXIS").unwrap_or(0);
@@ -1313,6 +1304,16 @@ fn synthesize_image_header(bt: &Header) -> Result<Header> {
             continue;
         }
         let keyword = entry.keyword();
+        // `EXTNAME = COMPRESSED_IMAGE` names the compressed table, not
+        // the image inside it. A writer that is given no name emits
+        // this one, so it carries no information and does not belong
+        // in the recovered header. Any other `EXTNAME` came from the
+        // image, so it does carry through.
+        if keyword == "EXTNAME"
+            && matches!(entry.value(), Some(Value::String(ref v)) if v == DEFAULT_EXTNAME)
+        {
+            continue;
+        }
         let Some(mapped) = z_to_image_keyword(&keyword) else {
             continue;
         };
@@ -1361,11 +1362,12 @@ fn synthesize_image_header(bt: &Header) -> Result<Header> {
 ///   image, such as `RICE_1` on a floating-point or 64-bit image.
 /// - [`FitsError::Header`] when a generated keyword is illegal.
 /// - [`FitsError::Io`] when a tile fails to compress.
-pub fn compress_image_to_hdu(
-    header: &Header,
-    data: &[u8],
-    opts: &TileOpts,
-) -> Result<(Header, Vec<u8>)> {
+pub fn compress_image_to_hdu(img: &ImageHdu<'_>, opts: &TileOpts) -> Result<BinTableHdu<'static>> {
+    // `ImageHdu` already holds a header and a data section that agree,
+    // so the only shape left to check is that there is an array here
+    // at all.
+    let header = img.header();
+    let data = img.raw_bytes();
     let bitpix = header.bitpix()?;
     let axes = header.axes()?;
     if axes.is_empty() {
@@ -1374,14 +1376,6 @@ pub fn compress_image_to_hdu(
         ));
     }
     let bytes_per = (bitpix.unsigned_abs() / 8) as usize;
-    let n_pixels: u64 = axes.iter().product();
-    if data.len() != bytes_per * n_pixels as usize {
-        return Err(FitsError::Data(format!(
-            "compress_image_to_hdu: data is {} bytes; expected {} (BITPIX={bitpix}, n_pixels={n_pixels})",
-            data.len(),
-            bytes_per * n_pixels as usize,
-        )));
-    }
     if opts.quantize.is_some() && bitpix > 0 {
         return Err(FitsError::NonStandard(format!(
             "quantization applies to floating-point images; got BITPIX={bitpix}"
@@ -1520,7 +1514,7 @@ pub fn compress_image_to_hdu(
             max_fallback: any_fallback.then_some(max_fallback),
         },
     )?;
-    Ok((h, out))
+    BinTableHdu::new(h, out)
 }
 
 /// One compressed tile, keyed to the column that stores it.
@@ -1798,7 +1792,7 @@ fn build_zimage_header(
     });
     h.push(
         "EXTNAME",
-        Value::String(extname.unwrap_or_else(|| "COMPRESSED_IMAGE".to_string())),
+        Value::String(extname.unwrap_or_else(|| DEFAULT_EXTNAME.to_string())),
         Some("name of this binary table extension"),
     )?;
     // Carry every other card of the source image, per Sec.10.2.
@@ -2000,18 +1994,32 @@ impl<W: std::io::Write> crate::io::writer::FitsWriter<W> {
     /// `EXTNAME` of the resulting table. Pass `&TileOpts::default()`
     /// for `GZIP_1` with the default tile shape.
     ///
+    /// # The primary stub
+    ///
+    /// A compressed image is a `BINTABLE` extension, so it cannot
+    /// occupy the primary slot. When this is the first HDU of the
+    /// file, this function writes an empty primary HDU ahead of it.
+    /// The compressed header records the move as `ZSIMPLE = T`, and
+    /// [`FitsFile::write_decompressed`](crate::FitsFile::write_decompressed)
+    /// reverses it.
+    ///
+    /// A caller who wants a primary HDU of their own writes it first,
+    /// through [`write_hdu`](Self::write_hdu). This function then adds
+    /// no stub. The stub carries `SIMPLE`, `BITPIX`, `NAXIS` and
+    /// `EXTEND`, and no other card.
+    ///
     /// # Errors
     ///
     /// The conditions of [`compress_image_to_hdu`] and of
     /// [`write_hdu`](Self::write_hdu).
-    pub fn write_hdu_compressed(
-        &mut self,
-        header: &Header,
-        data: &[u8],
-        opts: &TileOpts,
-    ) -> Result<()> {
-        let (cz_h, cz_data) = compress_image_to_hdu(header, data, opts)?;
-        self.write_hdu(&cz_h, &cz_data)
+    pub fn write_hdu_compressed(&mut self, img: &ImageHdu<'_>, opts: &TileOpts) -> Result<()> {
+        // Compress before the stub is written, so a failure here
+        // leaves no HDU behind.
+        let table = compress_image_to_hdu(img, opts)?;
+        if self.hdu_count() == 0 {
+            self.write_hdu_parts(&Header::empty_primary(), &[])?;
+        }
+        self.write_hdu(&table)
     }
 }
 

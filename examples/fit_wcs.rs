@@ -36,7 +36,7 @@ fn main() -> Result<(), fitsy::FitsError> {
         println!("  point {i}: ({dx:+.3}\", {dy:+.3}\")");
     }
 
-    // The fitted Wcs is fully usable for forward / inverse transforms.
+    // The fitted Wcs transforms in both directions.
     // `fit_wcs` always emits RA on axis 1 and Dec on axis 2.
     let world = fit.wcs.pixel_to_world(&[150.0, 150.0])?;
     println!("center: RA={:.4}  Dec={:.4}", world[0], world[1]);

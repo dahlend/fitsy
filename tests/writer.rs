@@ -33,7 +33,7 @@ fn build_minimal_primary_from_scratch_round_trips() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&h, &[]).unwrap();
+    w.write_hdu_parts(&h, &[]).unwrap();
     w.finish().unwrap();
 
     // Parse it back via the public reader.
@@ -73,7 +73,7 @@ fn primary_with_image_data_round_trips() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&h, &data).unwrap();
+    w.write_hdu_parts(&h, &data).unwrap();
     w.finish().unwrap();
 
     let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -97,7 +97,7 @@ fn long_string_round_trips_via_writer() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&h, &[]).unwrap();
+    w.write_hdu_parts(&h, &[]).unwrap();
     w.finish().unwrap();
 
     let parsed = FitsFile::from_bytes(buf).unwrap();
@@ -119,7 +119,7 @@ fn embedded_quote_round_trips() {
 
     let mut buf = Vec::new();
     let mut w = FitsWriter::new(&mut buf);
-    w.write_hdu(&h, &[]).unwrap();
+    w.write_hdu_parts(&h, &[]).unwrap();
     w.finish().unwrap();
 
     let parsed = FitsFile::from_bytes(buf).unwrap();

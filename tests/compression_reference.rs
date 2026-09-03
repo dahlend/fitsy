@@ -244,7 +244,8 @@ fn rice_encoder_matches_reference_streams() {
         let opts = TileOpts::new()
             .codec(fitsy::Codec::rice())
             .tile(tile.to_vec());
-        let (bh, bytes) = compress_image_to_hdu(&h, &data, &opts).unwrap();
+        let img = fitsy::ImageHdu::new(h, data.clone()).unwrap();
+        let (bh, bytes) = compress_image_to_hdu(&img, &opts).unwrap().into_parts();
 
         // The heap holds the tile payloads in row order in both
         // files, so heap equality is stream equality.

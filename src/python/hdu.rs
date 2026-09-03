@@ -281,7 +281,7 @@ impl PyImageHdu {
             None
         } else {
             let shape: Vec<usize> = axes.iter().rev().map(|&n| n as usize).collect();
-            let arr = decode_be_to_array(py, bitpix, &bytes, &shape);
+            let arr = raw_bytes_to_array(py, &bytes, bitpix, &shape)?;
             if read_only {
                 freeze_array(py, &arr)?;
             }
@@ -322,6 +322,39 @@ impl PyImageHdu {
             Some(arr) => build_image(arr.bind(py), is_primary, user_header),
             None => Ok((empty_image_header(is_primary, user_header), Vec::new())),
         }
+    }
+
+    /// Whether a scaled HDU's cached array still matches the file.
+    ///
+    /// The cache holds physical values, so this decodes the data
+    /// section the same way the read path did and compares the two
+    /// arrays. `NaN` compares equal to `NaN`, because an undefined
+    /// pixel is a value here rather than a failure.
+    ///
+    /// This costs one decode of the HDU. A false answer costs a whole
+    /// rewrite, so the decode is the cheaper of the two.
+    fn scaled_cache_matches_source(
+        &self,
+        py: Python<'_>,
+        arr: &Py<PyAny>,
+        binding: &ReadBinding,
+    ) -> bool {
+        let Ok(img) = binding.file.image(binding.hdu_idx) else {
+            return false;
+        };
+        let Ok(fresh) = read_pixels(py, &img, self.bitpix, &binding.axes) else {
+            return false;
+        };
+        let Ok(np) = py.import("numpy") else {
+            return false;
+        };
+        let kwargs = pyo3::types::PyDict::new(py);
+        if kwargs.set_item("equal_nan", true).is_err() {
+            return false;
+        }
+        np.call_method("array_equal", (arr.bind(py), fresh), Some(&kwargs))
+            .and_then(|r| r.extract::<bool>())
+            .unwrap_or(false)
     }
 
     /// Re-stamp `BITPIX` + `NAXIS*` cards in the header to match the
@@ -402,48 +435,112 @@ pub(super) fn bitpix_numpy_dtype(b: Bitpix) -> &'static str {
     }
 }
 
-/// Decode big-endian raw pixel bytes into a numpy array.
-fn decode_be_to_array(py: Python<'_>, bitpix: Bitpix, bytes: &[u8], shape: &[usize]) -> Py<PyAny> {
-    // `N` is the pixel width in bytes. The `const` block rejects an
-    // `N` that does not match `T` at compile time, so the width
-    // cannot desync from the type it decodes.
-    fn dec<const N: usize, T: crate::data::Pixel>(bytes: &[u8]) -> Vec<T> {
-        const { assert!(N == size_of::<T>(), "chunk width must equal the pixel size") };
-        bytes
-            .as_chunks::<N>()
-            .0
-            .iter()
-            .map(|c| T::from_be_bytes(c))
-            .collect()
+/// Build a NAXIS=0 image header (no data section).
+fn empty_image_header(is_primary: bool, user: crate::Header) -> crate::Header {
+    let mut h = if is_primary {
+        crate::Header::empty_primary()
+    } else {
+        crate::Header::empty_image_extension()
+    };
+    super::writer::splice_user_cards(&mut h, &user);
+    h
+}
+
+/// How a `section` patch is staged, mirroring the dtype the reader
+/// returns for the same HDU.
+///
+/// The read path has three cases, and a write must match each one or
+/// the numbers a caller sets are not the numbers they read.
+#[derive(Debug, Clone, Copy)]
+enum PatchMode {
+    /// Identity scaling: the caller's values are the stored values.
+    Raw,
+    /// The unsigned-integer or signed-byte convention. The caller's
+    /// values are in the reader's integer dtype, and convert to the
+    /// stored type by an exact integer offset. Going through `f64`
+    /// here would lose precision near the top of `uint64`.
+    Offset,
+    /// Anything else: the caller's values are physical, and the
+    /// updater inverts `BZERO`, `BSCALE` and `BLANK`.
+    Physical,
+}
+
+impl PatchMode {
+    /// Decide the mode from the scaling the header declares.
+    fn of(bitpix: Bitpix, bzero: f64, bscale: f64, blank: Option<i64>) -> Self {
+        if bzero == 0.0 && bscale == 1.0 && blank.is_none() {
+            return Self::Raw;
+        }
+        if bscale == 1.0 && blank.is_none() {
+            let offset_convention = match bitpix {
+                Bitpix::I16 => (bzero - 32_768.0).abs() < f64::EPSILON,
+                Bitpix::I32 => (bzero - 2_147_483_648.0).abs() < 1.0,
+                Bitpix::I64 => (bzero - 9_223_372_036_854_775_808.0).abs() < 4096.0,
+                Bitpix::U8 => (bzero + 128.0).abs() < f64::EPSILON,
+                Bitpix::F32 | Bitpix::F64 => false,
+            };
+            if offset_convention {
+                return Self::Offset;
+            }
+        }
+        Self::Physical
     }
-    match bitpix {
-        Bitpix::U8 => to_array(py, dec::<1, u8>(bytes), shape),
-        Bitpix::I16 => to_array(py, dec::<2, i16>(bytes), shape),
-        Bitpix::I32 => to_array(py, dec::<4, i32>(bytes), shape),
-        Bitpix::I64 => to_array(py, dec::<8, i64>(bytes), shape),
-        Bitpix::F32 => to_array(py, dec::<4, f32>(bytes), shape),
-        Bitpix::F64 => to_array(py, dec::<8, f64>(bytes), shape),
+
+    /// The numpy dtype a patch is staged in for this mode.
+    fn dtype(self, bitpix: Bitpix) -> &'static str {
+        match self {
+            Self::Raw => bitpix_numpy_dtype(bitpix),
+            Self::Offset => match bitpix {
+                Bitpix::U8 => "int8",
+                Bitpix::I16 => "uint16",
+                Bitpix::I32 => "uint32",
+                Bitpix::I64 => "uint64",
+                Bitpix::F32 | Bitpix::F64 => unreachable!("no float offset convention"),
+            },
+            Self::Physical => "float64",
+        }
+    }
+
+    /// Bytes per staged element.
+    fn elem_size(self, bitpix: Bitpix) -> usize {
+        match self {
+            Self::Raw | Self::Offset => bitpix.byte_size(),
+            Self::Physical => size_of::<f64>(),
+        }
     }
 }
 
-/// Build a NAXIS=0 image header (no data section).
-fn empty_image_header(is_primary: bool, user: crate::Header) -> crate::Header {
-    use crate::Value;
-    let mut h = crate::Header::empty();
-    if is_primary {
-        let _ = h.set("SIMPLE", Value::Logical(true), Some("conforming FITS"));
-        let _ = h.set("BITPIX", Value::Integer(8), None);
-        let _ = h.set("NAXIS", Value::Integer(0), None);
-        let _ = h.set("EXTEND", Value::Logical(true), None);
-    } else {
-        let _ = h.set("XTENSION", Value::String("IMAGE".into()), None);
-        let _ = h.set("BITPIX", Value::Integer(8), None);
-        let _ = h.set("NAXIS", Value::Integer(0), None);
-        let _ = h.set("PCOUNT", Value::Integer(0), None);
-        let _ = h.set("GCOUNT", Value::Integer(1), None);
+/// Convert staged offset-convention bytes into the stored form.
+///
+/// The arithmetic is exact: it flips the sign bit, which is what
+/// `BZERO = 2^(N-1)` means. `read_pixels` applies the same offset in
+/// the other direction.
+fn offset_to_stored(bitpix: Bitpix, staged: &[u8]) -> Vec<u8> {
+    match bitpix {
+        Bitpix::U8 => staged
+            .iter()
+            .flat_map(|&b| ((b as i8).wrapping_add(-128) as u8).to_ne_bytes())
+            .collect(),
+        Bitpix::I16 => staged
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|c| (u16::from_ne_bytes(*c) ^ 0x8000).to_ne_bytes())
+            .collect(),
+        Bitpix::I32 => staged
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|c| (u32::from_ne_bytes(*c) ^ 0x8000_0000).to_ne_bytes())
+            .collect(),
+        Bitpix::I64 => staged
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .flat_map(|c| (u64::from_ne_bytes(*c) ^ 0x8000_0000_0000_0000).to_ne_bytes())
+            .collect(),
+        Bitpix::F32 | Bitpix::F64 => staged.to_vec(),
     }
-    super::writer::splice_user_cards(&mut h, &user);
-    h
 }
 
 /// Decode `img`'s pixels into a numpy array, choosing the dtype from
@@ -494,9 +591,16 @@ fn read_pixels(
     // BZERO=2^(N-1) or -2^(N-1)). fitsy returns the corresponding
     // unsigned (or int8) dtype in this case, instead of the general
     // float path below.
-    if bscale == 1.0 && blank.is_none() {
+    //
+    // `PatchMode::of` decides this, so the write path in
+    // `PyImageSection::__setitem__` stages a patch in the same dtype
+    // this returns. One predicate, so the two cannot disagree.
+    if matches!(
+        PatchMode::of(bitpix, bzero, bscale, blank),
+        PatchMode::Offset
+    ) {
         match bitpix {
-            Bitpix::I16 if (bzero - 32_768.0).abs() < f64::EPSILON => {
+            Bitpix::I16 => {
                 let raw = img.read_raw::<i16>().into_py_result()?.into_vec();
                 let conv: Vec<u16> = raw
                     .into_iter()
@@ -504,7 +608,7 @@ fn read_pixels(
                     .collect();
                 return Ok(to_array(py, conv, &shape));
             }
-            Bitpix::I32 if (bzero - 2_147_483_648.0).abs() < 1.0 => {
+            Bitpix::I32 => {
                 let raw = img.read_raw::<i32>().into_py_result()?.into_vec();
                 let conv: Vec<u32> = raw
                     .into_iter()
@@ -512,7 +616,7 @@ fn read_pixels(
                     .collect();
                 return Ok(to_array(py, conv, &shape));
             }
-            Bitpix::I64 if (bzero - 9_223_372_036_854_775_808.0).abs() < 4096.0 => {
+            Bitpix::I64 => {
                 let raw = img.read_raw::<i64>().into_py_result()?.into_vec();
                 let conv: Vec<u64> = raw
                     .into_iter()
@@ -520,7 +624,7 @@ fn read_pixels(
                     .collect();
                 return Ok(to_array(py, conv, &shape));
             }
-            Bitpix::U8 if (bzero + 128.0).abs() < f64::EPSILON => {
+            Bitpix::U8 => {
                 let raw = img.read_raw::<u8>().into_py_result()?.into_vec();
                 let conv: Vec<i8> = raw
                     .into_iter()
@@ -731,9 +835,13 @@ impl PyImageHdu {
 
     /// Whether the cached pixel array still matches the bytes on disk.
     ///
-    /// Returns `false` when that cannot be established (no read source,
-    /// or a scaled HDU whose cache is not a straight image of the data
-    /// section), so the caller falls back to rewriting.
+    /// Returns `false` when that cannot be established (no read
+    /// source), so the caller falls back to rewriting.
+    ///
+    /// A scaled HDU is compared in physical units, because that is what
+    /// the cache holds. Comparing it against the stored integers would
+    /// never match, and merely reading `data` would then rewrite the
+    /// file in a different `BITPIX`.
     pub(crate) fn data_matches_source(&self, py: Python<'_>) -> bool {
         let Some(arr) = self.data_if_loaded(py) else {
             return true; // never materialized, so nothing to write back
@@ -743,7 +851,7 @@ impl PyImageHdu {
         };
         let header = header_with_layout(&self.header.lock(), &self.axes, self.bitpix);
         if header.bzero() != 0.0 || header.bscale() != 1.0 || header.blank().is_some() {
-            return false;
+            return self.scaled_cache_matches_source(py, &arr, binding);
         }
         let bound = arr.bind(py);
         let (file, idx) = (&binding.file, binding.hdu_idx);
@@ -768,11 +876,13 @@ impl PyImageHdu {
     /// available RAM.
     ///
     /// In-place writes require contiguous slicing (``start:stop``
-    /// with step 1) on an HDU with identity scaling
-    /// (``BSCALE=1``, ``BZERO=0``, no ``BLANK``). Anything else
-    /// (fancy indexing, negative steps, scaled HDUs) raises a
-    /// ``ValueError`` -- assign through ``hdu.data[...]`` to
-    /// trigger a full-file rewrite instead.
+    /// with step 1). Fancy indexing and negative steps raise a
+    /// ``ValueError`` -- assign through ``hdu.data[...]`` to trigger
+    /// a full-file rewrite instead.
+    ///
+    /// A scaled HDU (``BSCALE``, ``BZERO`` or ``BLANK``) is written
+    /// in the same physical units :attr:`data` reports. fitsy inverts
+    /// the scaling and leaves the stored ``BITPIX`` alone.
     ///
     /// If ``hdu.data`` has already been accessed (and is therefore
     /// resident in memory), reads and writes go through the
@@ -1324,8 +1434,8 @@ impl PyRandomGroups {
         let (params_be, data_be) = slab.split_at(p_bytes);
         let p_shape = vec![self.n_params as usize];
         let d_shape = vec![self.data_per_group as usize];
-        let params = decode_be_to_array(py, self.bitpix, params_be, &p_shape);
-        let data = decode_be_to_array(py, self.bitpix, data_be, &d_shape);
+        let params = raw_bytes_to_array(py, params_be, self.bitpix, &p_shape)?;
+        let data = raw_bytes_to_array(py, data_be, self.bitpix, &d_shape)?;
         // Decoded fresh on every call and with no write-back path, so an
         // edit could never persist. Freeze both, matching the table
         // accessors, so a write raises instead of vanishing.
@@ -1523,7 +1633,7 @@ impl PyImageSection {
                             self.bitpix,
                         )
                         .into_py_result()?;
-                    let arr = decode_be_to_array(py, self.bitpix, &bytes, &np_region_shape);
+                    let arr = raw_bytes_to_array(py, &bytes, self.bitpix, &np_region_shape)?;
                     // Apply numpy integer-index squeeze semantics:
                     // axes selected with a plain integer collapse.
                     let final_shape: Vec<usize> = np_region_shape
@@ -1610,19 +1720,10 @@ impl PyImageSection {
         // performance trap (see CHANGELOG / docs).
         if let Some(binding) = self.update_binding.clone() {
             let np_shape: Vec<usize> = self.axes.iter().rev().map(|&n| n as usize).collect();
-            let scaling_identity = {
+            let mode = {
                 let h = self.header.lock();
-                h.bzero() == 0.0 && h.bscale() == 1.0 && h.blank().is_none()
+                PatchMode::of(self.bitpix, h.bzero(), h.bscale(), h.blank())
             };
-            if !scaling_identity {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "section[...] = value: cannot patch in place because this HDU has \
-                     non-identity scaling (BSCALE != 1, BZERO != 0, or BLANK is set). \
-                     Assign through `hdu.data[...] = value` to materialize the array, \
-                     apply the scaled write in memory, and persist via the next \
-                     `flush()` (which rewrites the file).",
-                ));
-            }
             let parsed = parse_region_key(&key, &np_shape)?;
             let Some((np_start, np_region_shape, _squeeze)) = parsed else {
                 return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1642,12 +1743,14 @@ impl PyImageSection {
                 return Ok(());
             }
             let np = py.import("numpy")?;
-            let dtype_str = bitpix_numpy_dtype(self.bitpix);
-            let target = np.call_method1("empty", (np_region_shape.clone(), dtype_str))?;
+            // Stage the patch in the dtype the reader returns for this
+            // HDU, so a caller writes back the numbers `data` gave.
+            let target =
+                np.call_method1("empty", (np_region_shape.clone(), mode.dtype(self.bitpix)))?;
             target.set_item((), &value)?;
             let bytes_value = target.call_method0("tobytes")?;
             let raw: Vec<u8> = bytes_value.extract()?;
-            let bsize = self.bitpix.byte_size();
+            let bsize = mode.elem_size(self.bitpix);
             let expected_elems: u64 = fits_shape.iter().product();
             if raw.len() as u64 != expected_elems * bsize as u64 {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -1694,14 +1797,38 @@ impl PyImageSection {
                          will be persisted on the next flush().",
                     ));
                 }
-                Ok(write_patch_be(
-                    &mut updater,
-                    hdu_idx,
-                    &fits_start,
-                    &fits_shape,
-                    bitpix,
-                    &raw,
-                ))
+                match mode {
+                    PatchMode::Raw => Ok(write_patch_be(
+                        &mut updater,
+                        hdu_idx,
+                        &fits_start,
+                        &fits_shape,
+                        bitpix,
+                        &raw,
+                    )),
+                    PatchMode::Offset => Ok(write_patch_be(
+                        &mut updater,
+                        hdu_idx,
+                        &fits_start,
+                        &fits_shape,
+                        bitpix,
+                        &offset_to_stored(bitpix, &raw),
+                    )),
+                    PatchMode::Physical => {
+                        let physical: Vec<f64> = raw
+                            .as_chunks::<8>()
+                            .0
+                            .iter()
+                            .map(|c| f64::from_ne_bytes(*c))
+                            .collect();
+                        Ok(updater.write_image_subarray_physical(
+                            hdu_idx,
+                            &fits_start,
+                            &fits_shape,
+                            &physical,
+                        ))
+                    }
+                }
             });
             match res {
                 Ok(inner) => {

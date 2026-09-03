@@ -29,6 +29,7 @@
 use std::io::{self, Write};
 
 use crate::error::{FitsError, Result};
+use crate::hdu::HduBytes;
 use crate::header::Header;
 use crate::header::value::Value;
 use crate::io::block::{BLOCK_SIZE, pad_to_block};
@@ -40,13 +41,13 @@ use crate::io::block::{BLOCK_SIZE, pad_to_block};
 /// ```
 /// use fitsy::{FitsWriter, ImageBuilder};
 ///
-/// let (primary, pdata) = ImageBuilder::new(vec![2_u64, 2], vec![1.0_f32; 4])?
+/// let hdu = ImageBuilder::new(vec![2_u64, 2], vec![1.0_f32; 4])?
 ///     .primary(true)
 ///     .build()?;
 ///
 /// let mut buf: Vec<u8> = Vec::new();
 /// let mut w = FitsWriter::new(&mut buf);
-/// w.write_hdu(&primary, &pdata)?;
+/// w.write_hdu(&hdu)?;
 /// assert_eq!(w.hdu_count(), 1);
 /// w.finish()?;
 ///
@@ -102,8 +103,10 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write one HDU: the header bytes, then the padded data bytes.
     ///
-    /// The `data` argument holds the raw data section with no padding.
-    /// This function adds the padding to the next 2880-byte block.
+    /// The `hdu` argument is anything that pairs a header with a data
+    /// section: what a builder returns, an [`Hdu`](crate::Hdu) read
+    /// from a file, or a `(Header, Vec<u8>)` pair. The padding to the
+    /// next 2880-byte block is added here.
     ///
     /// # Errors
     ///
@@ -116,7 +119,19 @@ impl<W: Write> FitsWriter<W> {
     /// - `data.len()` does not match the size those keywords imply.
     ///
     /// [`FitsError::Io`] when the write fails.
-    pub fn write_hdu(&mut self, header: &Header, data: &[u8]) -> Result<()> {
+    pub fn write_hdu(&mut self, hdu: &impl HduBytes) -> Result<()> {
+        self.write_hdu_parts(hdu.header(), hdu.data_bytes())
+    }
+
+    /// Write one HDU from a header and a data section held apart.
+    ///
+    /// [`write_hdu`](Self::write_hdu) is the usual call. Use this one
+    /// when the two are not paired in a type.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`write_hdu`](Self::write_hdu).
+    pub fn write_hdu_parts(&mut self, header: &Header, data: &[u8]) -> Result<()> {
         let is_primary = self.hdu_count == 0;
         validate_mandatory(header, is_primary)?;
         validate_data_size(header, data.len())?;
@@ -244,7 +259,7 @@ impl<W: Write> FitsWriter<W> {
 /// ```
 pub fn write(
     path: impl AsRef<std::path::Path>,
-    hdus: &[(Header, Vec<u8>)],
+    hdus: &[impl HduBytes],
     overwrite: bool,
 ) -> Result<()> {
     use std::fs::OpenOptions;
@@ -264,8 +279,8 @@ pub fn write(
     }
     let file = opts.open(path.as_ref())?;
     let mut writer = FitsWriter::new(BufWriter::new(file));
-    for (header, data) in hdus {
-        writer.write_hdu(header, data)?;
+    for hdu in hdus {
+        writer.write_hdu(hdu)?;
     }
     writer.finish()?;
     Ok(())
@@ -404,7 +419,7 @@ mod tests {
         let h = primary(0, &[]);
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&h, &[]).unwrap();
+        w.write_hdu_parts(&h, &[]).unwrap();
         w.finish().unwrap();
         assert_eq!(buf.len(), BLOCK_SIZE);
         assert_eq!(&buf[..6], b"SIMPLE");
@@ -415,7 +430,7 @@ mod tests {
         let h = Header::empty();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        assert!(w.write_hdu(&h, &[]).is_err());
+        assert!(w.write_hdu_parts(&h, &[]).is_err());
     }
 
     #[test]
@@ -424,7 +439,7 @@ mod tests {
         let data = vec![0xAA_u8; 7];
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
         // Header (1 block) + data block.
         assert_eq!(buf.len(), 2 * BLOCK_SIZE);
@@ -450,8 +465,8 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary_h, &[]).unwrap();
-        w.write_hdu(&h, b"abc").unwrap();
+        w.write_hdu_parts(&primary_h, &[]).unwrap();
+        w.write_hdu_parts(&h, b"abc").unwrap();
         w.finish().unwrap();
         // Last 2880 - 3 bytes should be ASCII spaces.
         let tail = &buf[buf.len() - (BLOCK_SIZE - 3)..];
@@ -464,8 +479,8 @@ mod tests {
         let bogus = Header::empty();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary_h, &[]).unwrap();
-        assert!(w.write_hdu(&bogus, &[]).is_err());
+        w.write_hdu_parts(&primary_h, &[]).unwrap();
+        assert!(w.write_hdu_parts(&bogus, &[]).is_err());
     }
 
     #[test]
@@ -474,7 +489,7 @@ mod tests {
         let data = vec![0xAA_u8; 7];
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf).with_checksums();
-        w.write_hdu(&h, &data).unwrap();
+        w.write_hdu_parts(&h, &data).unwrap();
         w.finish().unwrap();
         // Verify via the high-level reader.
         let parsed = crate::FitsFile::from_bytes(buf).unwrap();
@@ -492,7 +507,7 @@ mod tests {
         let h = primary(1, &[10]);
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        let err = w.write_hdu(&h, &[0_u8; 7]).unwrap_err();
+        let err = w.write_hdu_parts(&h, &[0_u8; 7]).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("data section"), "got: {msg}");
     }
@@ -508,8 +523,8 @@ mod tests {
         // PCOUNT + GCOUNT deliberately omitted.
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        w.write_hdu(&primary_h, &[]).unwrap();
-        let err = w.write_hdu(&h, &[]).unwrap_err();
+        w.write_hdu_parts(&primary_h, &[]).unwrap();
+        let err = w.write_hdu_parts(&h, &[]).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("PCOUNT"), "got: {msg}");
     }
@@ -522,7 +537,7 @@ mod tests {
         h.push("NAXIS", Value::Integer(0), None).unwrap();
         let mut buf = Vec::new();
         let mut w = FitsWriter::new(&mut buf);
-        let err = w.write_hdu(&h, &[]).unwrap_err();
+        let err = w.write_hdu_parts(&h, &[]).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("BITPIX"), "got: {msg}");
     }

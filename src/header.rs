@@ -574,6 +574,104 @@ impl Header {
             self.append_card_bytes(&bytes);
         }
     }
+
+    /// The header of an empty primary HDU: `SIMPLE = T`,
+    /// `BITPIX = 8`, `NAXIS = 0`, `EXTEND = T`, and no data.
+    ///
+    /// A file needs a primary HDU before any extension. This is the
+    /// header that goes in front of one.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. Every card it writes is a fixed,
+    /// valid keyword and value.
+    #[must_use]
+    pub fn empty_primary() -> Self {
+        let mut h = Self::empty();
+        let build = |h: &mut Self| -> Result<()> {
+            h.push("SIMPLE", Value::Logical(true), Some("conforming FITS file"))?;
+            h.push("BITPIX", Value::Integer(8), None)?;
+            h.push("NAXIS", Value::Integer(0), None)?;
+            // Standard Sec.4.4.1.1: EXTEND follows the last NAXISn
+            // card. NAXIS is 0 here, so it follows NAXIS.
+            h.push(
+                "EXTEND",
+                Value::Logical(true),
+                Some("FITS dataset may contain extensions"),
+            )?;
+            Ok(())
+        };
+        build(&mut h).expect("fixed cards of an empty primary header are valid");
+        h
+    }
+
+    /// The header of an empty `IMAGE` extension: `XTENSION = 'IMAGE'`,
+    /// `BITPIX = 8`, `NAXIS = 0`, and the `PCOUNT`/`GCOUNT` that
+    /// Standard Sec.7.1 requires of every extension.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. Every card it writes is a fixed,
+    /// valid keyword and value.
+    #[must_use]
+    pub fn empty_image_extension() -> Self {
+        let mut h = Self::empty();
+        let build = |h: &mut Self| -> Result<()> {
+            h.push("XTENSION", Value::String("IMAGE".into()), None)?;
+            h.push("BITPIX", Value::Integer(8), None)?;
+            h.push("NAXIS", Value::Integer(0), None)?;
+            h.push("PCOUNT", Value::Integer(0), None)?;
+            h.push("GCOUNT", Value::Integer(1), None)?;
+            Ok(())
+        };
+        build(&mut h).expect("fixed cards of an empty IMAGE extension are valid");
+        h
+    }
+
+    /// Rebuild this `IMAGE` extension header as a primary header.
+    ///
+    /// The result declares `SIMPLE = T` in place of `XTENSION`, and
+    /// carries no `PCOUNT` or `GCOUNT`, which Standard Sec.7.1
+    /// defines for an extension alone. `EXTEND` follows the last
+    /// `NAXISn` card, per Standard Sec.4.4.1.1. Every other card
+    /// moves across unchanged, including commentary.
+    ///
+    /// Call this when an image moves into the primary slot.
+    /// [`FitsFile::write_decompressed`](crate::FitsFile::write_decompressed)
+    /// calls it for a decompressed image that lands there.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::MissingMandatory`] when this header omits
+    ///   `BITPIX` or `NAXIS`.
+    /// - [`FitsError::Value`] when `BITPIX` or a `NAXISn` card holds a
+    ///   value of the wrong type.
+    /// - [`FitsError::Header`] when a card of the result is not a
+    ///   legal FITS card.
+    pub fn promote_to_primary(&self) -> Result<Self> {
+        let mut out = Self::empty();
+        out.push("SIMPLE", Value::Logical(true), Some("conforming FITS file"))?;
+        out.push("BITPIX", Value::Integer(self.bitpix()?), None)?;
+        let axes = self.axes()?;
+        out.push("NAXIS", Value::Integer(axes.len() as i64), None)?;
+        for (i, n) in axes.iter().enumerate() {
+            out.push(format!("NAXIS{}", i + 1), Value::Integer(*n as i64), None)?;
+        }
+        out.push(
+            "EXTEND",
+            Value::Logical(true),
+            Some("FITS dataset may contain extensions"),
+        )?;
+        for card in self.cards() {
+            // The cards above describe the promoted primary. Every
+            // other card moves across whole, bytes and all.
+            if !card.is_commentary() && is_writer_owned_keyword(&card.keyword()) {
+                continue;
+            }
+            out.splice(&card);
+        }
+        Ok(out)
+    }
 }
 
 /// True when the last physical card of `span` leaves its string open,
@@ -1517,5 +1615,41 @@ mod tests {
         assert_eq!(h.remove("OBJECT"), 0);
         // Commentary cards are not touched.
         assert_eq!(h.comments().count(), 1);
+    }
+
+    #[test]
+    fn promote_to_primary_rebuilds_the_structural_cards() {
+        let mut h = Header::empty();
+        h.push("XTENSION", Value::String("IMAGE".into()), None)
+            .unwrap();
+        h.push("BITPIX", Value::Integer(16), None).unwrap();
+        h.push("NAXIS", Value::Integer(2), None).unwrap();
+        h.push("NAXIS1", Value::Integer(8), None).unwrap();
+        h.push("NAXIS2", Value::Integer(6), None).unwrap();
+        h.push("PCOUNT", Value::Integer(0), None).unwrap();
+        h.push("GCOUNT", Value::Integer(1), None).unwrap();
+        h.push("OBJECT", Value::String("target".into()), None)
+            .unwrap();
+        h.push_commentary(CommentaryKind::History, "processed")
+            .unwrap();
+
+        let out = h.promote_to_primary().unwrap();
+
+        assert_eq!(out.first("SIMPLE"), Some(Value::Logical(true)));
+        assert!(out.first("XTENSION").is_none());
+        // Sec.7.1 defines PCOUNT and GCOUNT for an extension alone.
+        assert!(out.first("PCOUNT").is_none());
+        assert!(out.first("GCOUNT").is_none());
+        assert_eq!(out.first("BITPIX"), Some(Value::Integer(16)));
+        assert_eq!(out.first("NAXIS"), Some(Value::Integer(2)));
+        assert_eq!(out.first("NAXIS2"), Some(Value::Integer(6)));
+        assert_eq!(out.first("OBJECT"), Some(Value::String("target".into())));
+        assert_eq!(out.history().count(), 1);
+
+        // Sec.4.4.1.1: EXTEND follows the last NAXISn card.
+        let keywords: Vec<String> = out.cards().map(|c| c.keyword()).collect();
+        let extend = keywords.iter().position(|k| k == "EXTEND").unwrap();
+        let naxis2 = keywords.iter().position(|k| k == "NAXIS2").unwrap();
+        assert_eq!(extend, naxis2 + 1);
     }
 }

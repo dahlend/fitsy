@@ -45,5 +45,5 @@ pub use bintable::{BinColumn, BinFieldKind, BinFormat, BinTableHdu, BinValue, In
 pub use builder::{AsciiColumnData, AsciiTableBuilder, BinTableBuilder, ImageBuilder};
 pub use file::FitsFile;
 pub use image::{ImageHdu, ImagePixels};
-pub use kind::{ConformingHdu, Hdu};
+pub use kind::{ConformingHdu, Hdu, HduBytes, HduKind};
 pub use random_groups::{GroupParameter, RandomGroupsHdu};

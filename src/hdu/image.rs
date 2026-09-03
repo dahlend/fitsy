@@ -2,8 +2,8 @@
 //!
 //! # Purpose
 //!
-//! [`ImageHdu`] holds one image: its header, and a borrowed view of
-//! its raw data bytes. It decodes those bytes on demand.
+//! [`ImageHdu`] holds one image: its header, and its raw data bytes.
+//! It decodes those bytes on demand.
 //!
 //! # Layout
 //!
@@ -23,14 +23,22 @@
 //!
 //! # Design constraints
 //!
-//! An [`ImageHdu`] borrows its data bytes from the [`FitsFile`] that
-//! produced it, so it cannot outlive that file.
+//! An [`ImageHdu`] holds its data bytes in a [`Cow`]. One type
+//! therefore serves an image read in place and an image decoded into
+//! a fresh allocation. An image read from a [`FitsFile`] borrows that
+//! file's buffer, so it cannot outlive the file.
+//! [`ImageHdu::into_owned`] copies the bytes and releases the borrow.
+//! A tile-compressed image decoded by [`as_image`] owns its bytes
+//! already.
 //!
 //! Scaling always runs in `f64`, including for
 //! [`ImageHdu::read_physical_f32`]. Only the final store narrows the
 //! value. This keeps the arithmetic identical between the two.
 //!
 //! [`FitsFile`]: crate::FitsFile
+//! [`as_image`]: crate::compression::CompressedImageHdu::as_image
+
+use std::borrow::Cow;
 
 use crate::data::encoding::{Bitpix, ImageData, Pixel};
 use crate::data::scaling::Scaling;
@@ -40,10 +48,12 @@ use crate::io::block::pad_to_block;
 
 /// One image HDU.
 ///
-/// This borrows its data section from the
-/// [`FitsFile`](crate::FitsFile) that produced it, so it cannot
-/// outlive that file. It reads `BITPIX` and the axis lengths from the
-/// header at construction, and decodes pixels only when asked.
+/// This holds its data section, either borrowed from the
+/// [`FitsFile`](crate::FitsFile) that produced it or owned. A
+/// borrowed image cannot outlive that file.
+/// [`into_owned`](Self::into_owned) copies the bytes and releases the
+/// borrow. It reads `BITPIX` and the axis lengths from the header at
+/// construction, and decodes pixels only when asked.
 ///
 /// [`read_physical`](Self::read_physical) is the usual decoder. The
 /// module documentation compares it with the other three.
@@ -52,11 +62,11 @@ use crate::io::block::pad_to_block;
 ///
 /// ```
 /// # use fitsy::{FitsWriter, ImageBuilder};
-/// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
 /// #     .primary(true)
 /// #     .build()?;
 /// # let mut buf: Vec<u8> = Vec::new();
-/// # FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+/// # FitsWriter::new(&mut buf).write_hdu(&hdu)?;
 /// use fitsy::{Bitpix, FitsFile, Hdu};
 ///
 /// let file = FitsFile::from_bytes(buf)?;
@@ -72,7 +82,7 @@ use crate::io::block::pad_to_block;
 #[derive(Debug, Clone)]
 pub struct ImageHdu<'a> {
     header: Header,
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     bitpix: Bitpix,
     axes: Vec<u64>,
     n_elements: u64,
@@ -81,8 +91,9 @@ pub struct ImageHdu<'a> {
 impl<'a> ImageHdu<'a> {
     /// Construct from a parsed header and the raw data section.
     ///
-    /// The `data` slice must cover the data section without its
-    /// trailing block padding.
+    /// The `data` argument covers the data section without its
+    /// trailing block padding. Pass a `&[u8]` to borrow the bytes, or
+    /// a `Vec<u8>` to own them.
     ///
     /// # Errors
     ///
@@ -93,16 +104,11 @@ impl<'a> ImageHdu<'a> {
     /// - [`FitsError::Data`] when the pixel count or the byte count
     ///   overflows `u64`, or when `data.len()` does not equal the size
     ///   that the header declares.
-    pub fn new(header: Header, data: &'a [u8]) -> Result<Self> {
+    pub fn new(header: Header, data: impl Into<Cow<'a, [u8]>>) -> Result<Self> {
+        let data = data.into();
         let bitpix = Bitpix::from_i64(header.bitpix()?)?;
         let axes = header.axes()?;
-        let n_elements: u64 = if axes.is_empty() || axes.contains(&0) {
-            0
-        } else {
-            axes.iter()
-                .try_fold(1_u64, |acc, &a| acc.checked_mul(a))
-                .ok_or_else(|| FitsError::Data("image pixel count overflows u64".into()))?
-        };
+        let n_elements = crate::data::encoding::axis_product(&axes)?;
         let needed = n_elements
             .checked_mul(bitpix.byte_size() as u64)
             .ok_or_else(|| FitsError::Data("image data size overflows u64".into()))?;
@@ -149,7 +155,45 @@ impl<'a> ImageHdu<'a> {
     /// Raw data bytes (big-endian, unscaled).
     #[must_use]
     pub fn raw_bytes(&self) -> &[u8] {
-        self.data
+        &self.data
+    }
+
+    /// Take ownership of the data bytes, so the result borrows
+    /// nothing.
+    ///
+    /// This copies the bytes when they are borrowed, and moves them
+    /// when they are owned. Call it to keep an image after the
+    /// [`FitsFile`](crate::FitsFile) it came from goes out of scope.
+    #[must_use]
+    pub fn into_owned(self) -> ImageHdu<'static> {
+        ImageHdu {
+            header: self.header,
+            data: Cow::Owned(self.data.into_owned()),
+            bitpix: self.bitpix,
+            axes: self.axes,
+            n_elements: self.n_elements,
+        }
+    }
+
+    /// Consume the HDU and return its header and data section.
+    ///
+    /// This is the inverse of [`new`](Self::new), and the escape hatch
+    /// for an interface that holds the two apart, such as
+    /// [`FitsWriter::write_hdu_parts`](crate::FitsWriter::write_hdu_parts).
+    /// The bytes are copied when they are borrowed and moved when they
+    /// are owned.
+    #[must_use]
+    pub fn into_parts(self) -> (Header, Vec<u8>) {
+        (self.header, self.data.into_owned())
+    }
+
+    /// Consume the HDU and return its raw data bytes.
+    ///
+    /// This copies the bytes when they are borrowed, and moves them
+    /// when they are owned. It discards the header.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data.into_owned()
     }
 
     /// Decode the array into native primitives, with no scaling.
@@ -198,11 +242,11 @@ impl<'a> ImageHdu<'a> {
     /// ```
     /// # use fitsy::{FitsWriter, ImageBuilder};
     /// # let path = std::env::temp_dir().join("fitsy_doc_raw_dyn.fits");
-    /// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+    /// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
     /// #     .primary(true)
     /// #     .build()?;
     /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&hdu)?;
     /// use fitsy::{FitsError, FitsFile, Hdu, ImagePixels};
     ///
     /// let f = FitsFile::open(&path)?;
@@ -244,11 +288,11 @@ impl<'a> ImageHdu<'a> {
     /// ```
     /// # use fitsy::{FitsWriter, ImageBuilder};
     /// # let path = std::env::temp_dir().join("fitsy_doc_physical.fits");
-    /// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![2.5_f32; 12])?
+    /// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![2.5_f32; 12])?
     /// #     .primary(true)
     /// #     .build()?;
     /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&hdu)?;
     /// use fitsy::{FitsError, FitsFile, Hdu};
     ///
     /// let f = FitsFile::open(&path)?;

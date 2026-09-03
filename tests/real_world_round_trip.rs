@@ -76,7 +76,7 @@ fn round_trip_preserves_all_real_world_files() {
                 let mut writer = FitsWriter::new(std::io::BufWriter::new(f));
                 for (h, d) in &owned {
                     writer
-                        .write_hdu(h, d)
+                        .write_hdu_parts(h, d)
                         .map_err(|e| format!("write_hdu: {e}"))?;
                 }
                 writer.finish().map_err(|e| format!("finish: {e}"))?;

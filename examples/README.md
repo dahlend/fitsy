@@ -28,6 +28,9 @@ cargo run --example write_table
 cargo run --example wcs
 cargo run --example fit_wcs
 cargo run --example ascii_table
+cargo run --example compress_image
+cargo run --example nalgebra_interop --features nalgebra
+cargo run --example faer_interop --features faer
 ```
 
 - `read_image.rs` -- opens an image, inspects the header, and decodes
@@ -42,6 +45,12 @@ cargo run --example ascii_table
 - `fit_wcs.rs` -- fits a celestial WCS from pixel and sky pairs.
 - `ascii_table.rs` -- writes and reads an ASCII `TABLE` extension,
   including the `TNULL` sentinel for an undefined numeric cell.
+- `compress_image.rs` -- writes a tile-compressed image (`.fz`), reads
+  and edits its header without decoding a tile, decompresses it, and
+  unpacks the whole file.
+- `nalgebra_interop.rs` -- pixels and the WCS as `nalgebra` matrices,
+  and back. Needs `--features nalgebra`.
+- `faer_interop.rs` -- the same with `faer`. Needs `--features faer`.
 
 ## Python examples
 

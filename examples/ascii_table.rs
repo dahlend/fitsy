@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A file needs a primary HDU. An ASCII table is an extension, so
     // write an empty image first.
-    let (primary_header, primary_data) = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
+    let primary = ImageBuilder::new(Vec::<u64>::new(), Vec::<f32>::new())?
         .primary(true)
         .build()?;
 
@@ -50,12 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     b.unit("Jy")?;
     b.extname("CATALOG");
-    let (table_header, table_data) = b.build()?;
+    let table = b.build()?;
 
     let mut out = std::fs::File::create(&path)?;
     let mut w = FitsWriter::new(&mut out);
-    w.write_hdu(&primary_header, &primary_data)?;
-    w.write_hdu(&table_header, &table_data)?;
+    w.write_hdu(&primary)?;
+    w.write_hdu(&table)?;
     w.finish()?;
 
     // Read it back.

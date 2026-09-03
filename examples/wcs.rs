@@ -62,16 +62,15 @@ fn main() -> Result<(), fitsy::FitsError> {
     let (sx, sy) = wcs.pixel_scale_at(724.0, 1086.0)?;
     println!("pixel scale: {sx:.4}\" x {sy:.4}\"/px");
 
-    // Full N-axis pixel_to_world / world_to_pixel (useful when the
-    // image has non-celestial axes, e.g. spectral).
+    // Full N-axis pixel_to_world / world_to_pixel. These transform
+    // every axis the WCS declares, celestial or not.
     let world = wcs.pixel_to_world(&[724.0, 1086.0])?;
     println!("world:  {world:?}");
 
     // The batch form takes the points flat: NAXIS values per point,
     // end to end, and returns the same layout. It builds its working
-    // buffers once, so it beats calling the single-point form in a
-    // loop. A point outside the projection becomes NaN rather than
-    // failing the whole call.
+    // buffers once rather than once per point. A point outside the
+    // projection becomes NaN rather than failing the whole call.
     // Each point comes back in axis order, so `lon` and `lat` from
     // `axis_kinds` above still say which value is which -- the batch
     // form changes the layout, not the meaning of a slot.
@@ -81,8 +80,8 @@ fn main() -> Result<(), fitsy::FitsError> {
         println!("batch:  lon={:.4} lat={:.4}", point[lon], point[lat]);
     }
 
-    // Parsing straight from a Header skips -TAB resolution. It costs
-    // less when the image carries no tabular axis.
+    // Parsing straight from a Header skips -TAB resolution, so it
+    // reads no other HDU.
     if let Hdu::Image(img) = f.hdu(0)? {
         let _wcs2 = Wcs::from_header(img.header(), ' ')?.expect("no WCS");
     }

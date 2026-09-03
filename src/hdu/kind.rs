@@ -4,7 +4,10 @@
 //! lifetime `'a` is the lifetime of the [`FitsFile`](crate::FitsFile)
 //! that produced the HDU.
 
+use std::borrow::Cow;
+
 use crate::header::Header;
+use crate::header::value::Value;
 
 use super::ascii_table::AsciiTableHdu;
 use super::bintable::BinTableHdu;
@@ -21,11 +24,11 @@ use super::random_groups::RandomGroupsHdu;
 ///
 /// ```
 /// # use fitsy::{FitsWriter, ImageBuilder};
-/// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
 /// #     .primary(true)
 /// #     .build()?;
 /// # let mut buf: Vec<u8> = Vec::new();
-/// # FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+/// # FitsWriter::new(&mut buf).write_hdu(&hdu)?;
 /// use fitsy::{FitsFile, Hdu};
 ///
 /// let file = FitsFile::from_bytes(buf)?;
@@ -63,6 +66,179 @@ pub enum Hdu<'a> {
     Conforming(ConformingHdu<'a>),
 }
 
+/// One HDU's header and its data section.
+///
+/// Every HDU view implements this, and so does a `(Header, Vec<u8>)`
+/// pair. [`FitsWriter::write_hdu`](crate::FitsWriter::write_hdu) takes
+/// it, so what a builder returns goes to the writer whole.
+pub trait HduBytes {
+    /// The HDU's header.
+    fn header(&self) -> &Header;
+    /// The data section, without trailing block padding.
+    fn data_bytes(&self) -> &[u8];
+}
+
+impl HduBytes for (Header, Vec<u8>) {
+    fn header(&self) -> &Header {
+        &self.0
+    }
+    fn data_bytes(&self) -> &[u8] {
+        &self.1
+    }
+}
+
+impl HduBytes for Hdu<'_> {
+    fn header(&self) -> &Header {
+        Self::header(self)
+    }
+    fn data_bytes(&self) -> &[u8] {
+        Self::data_bytes(self)
+    }
+}
+
+impl HduBytes for ImageHdu<'_> {
+    fn header(&self) -> &Header {
+        Self::header(self)
+    }
+    fn data_bytes(&self) -> &[u8] {
+        self.raw_bytes()
+    }
+}
+
+impl HduBytes for RandomGroupsHdu<'_> {
+    fn header(&self) -> &Header {
+        Self::header(self)
+    }
+    fn data_bytes(&self) -> &[u8] {
+        self.raw_bytes()
+    }
+}
+
+impl HduBytes for AsciiTableHdu<'_> {
+    fn header(&self) -> &Header {
+        Self::header(self)
+    }
+    fn data_bytes(&self) -> &[u8] {
+        Self::data_bytes(self)
+    }
+}
+
+impl HduBytes for BinTableHdu<'_> {
+    fn header(&self) -> &Header {
+        Self::header(self)
+    }
+    fn data_bytes(&self) -> &[u8] {
+        Self::data_bytes(self)
+    }
+}
+
+impl HduBytes for ConformingHdu<'_> {
+    fn header(&self) -> &Header {
+        Self::header(self)
+    }
+    fn data_bytes(&self) -> &[u8] {
+        Self::data_bytes(self)
+    }
+}
+
+/// What kind of HDU a header describes.
+///
+/// [`HduKind::from_header`] decides this from the header alone, so a
+/// caller surveys a file without reading one data byte.
+/// [`FitsFile::kind`](crate::FitsFile::kind) is the accessor that
+/// applies it to an open file.
+///
+/// This mirrors the variants of [`Hdu`]. It differs in one place:
+/// [`HduKind::CompressedImage`] is reported whether or not the
+/// `compression` feature is enabled, because `ZIMAGE = T` is a header
+/// fact and needs no codec.
+///
+/// # Examples
+///
+/// ```
+/// # use fitsy::{FitsWriter, ImageBuilder};
+/// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// #     .primary(true)
+/// #     .build()?;
+/// # let mut buf: Vec<u8> = Vec::new();
+/// # FitsWriter::new(&mut buf).write_hdu(&hdu)?;
+/// use fitsy::{FitsFile, HduKind};
+///
+/// let file = FitsFile::from_bytes(buf)?;
+/// assert_eq!(file.kind(0)?, HduKind::Image);
+/// # Ok::<(), fitsy::FitsError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HduKind {
+    /// Primary array or `IMAGE` extension (Standard Sec.7.1).
+    Image,
+    /// Random Groups primary HDU (Standard Sec.6).
+    RandomGroups,
+    /// `TABLE` extension (Standard Sec.7.2).
+    AsciiTable,
+    /// `BINTABLE` extension (Standard Sec.7.3).
+    BinTable,
+    /// A `BINTABLE` carrying a tile-compressed image (`ZIMAGE = T`,
+    /// Standard Sec.10).
+    CompressedImage,
+    /// An `XTENSION` this crate does not model. Holds its value.
+    Conforming(String),
+    /// An extension header with no readable `XTENSION` card.
+    Unknown,
+}
+
+impl HduKind {
+    /// Decide the kind of the HDU that `header` describes.
+    ///
+    /// The `index` argument is the HDU's position in the file. Index 0
+    /// is the primary HDU, which declares `SIMPLE` rather than
+    /// `XTENSION`, so it is an image unless it declares Random Groups.
+    #[must_use]
+    pub fn from_header(header: &Header, index: usize) -> Self {
+        if index == 0 {
+            return if header.is_random_groups() {
+                Self::RandomGroups
+            } else {
+                Self::Image
+            };
+        }
+        match header.first("XTENSION") {
+            Some(Value::String(s)) if s == "IMAGE" => Self::Image,
+            Some(Value::String(s)) if s == "TABLE" => Self::AsciiTable,
+            Some(Value::String(s)) if s == "BINTABLE" => {
+                if matches!(header.first("ZIMAGE"), Some(Value::Logical(true))) {
+                    Self::CompressedImage
+                } else {
+                    Self::BinTable
+                }
+            }
+            Some(Value::String(s)) => Self::Conforming(s.clone()),
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether this kind holds pixels, compressed or not.
+    #[must_use]
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::Image | Self::CompressedImage)
+    }
+}
+
+impl std::fmt::Display for HduKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Image => f.write_str("IMAGE"),
+            Self::RandomGroups => f.write_str("RANDOM-GROUPS"),
+            Self::AsciiTable => f.write_str("TABLE"),
+            Self::BinTable => f.write_str("BINTABLE"),
+            Self::CompressedImage => f.write_str("compressed IMAGE"),
+            Self::Conforming(s) => write!(f, "{s}"),
+            Self::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
 /// An HDU whose `XTENSION` is not specifically handled by this crate.
 ///
 /// Construct via [`ConformingHdu::new`]. Inspect via [`header`](Self::header),
@@ -71,7 +247,7 @@ pub enum Hdu<'a> {
 pub struct ConformingHdu<'a> {
     header: Header,
     /// Raw data bytes (size already validated against header).
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     /// Value of the `XTENSION` keyword.
     xtension: String,
 }
@@ -83,10 +259,10 @@ impl<'a> ConformingHdu<'a> {
     /// trailing block padding. The `xtension` argument holds the
     /// `XTENSION` value, already trimmed of its padding spaces.
     #[must_use]
-    pub fn new(header: Header, data: &'a [u8], xtension: String) -> Self {
+    pub fn new(header: Header, data: impl Into<Cow<'a, [u8]>>, xtension: String) -> Self {
         Self {
             header,
-            data,
+            data: data.into(),
             xtension,
         }
     }
@@ -100,7 +276,7 @@ impl<'a> ConformingHdu<'a> {
     /// The raw data bytes (no padding).
     #[must_use]
     pub fn data_bytes(&self) -> &[u8] {
-        self.data
+        &self.data
     }
 
     /// The `XTENSION` keyword value, trimmed.
@@ -110,7 +286,7 @@ impl<'a> ConformingHdu<'a> {
     }
 }
 
-impl Hdu<'_> {
+impl<'a> Hdu<'a> {
     /// Borrow the parsed header of this HDU.
     #[must_use]
     pub fn header(&self) -> &Header {
@@ -122,6 +298,22 @@ impl Hdu<'_> {
             #[cfg(feature = "compression")]
             Hdu::CompressedImage(h) => h.as_bintable().header(),
             Hdu::Conforming(h) => h.header(),
+        }
+    }
+
+    /// Borrow this HDU as a binary table, when it is one.
+    ///
+    /// A tile-compressed image is a `BINTABLE` that carries
+    /// `ZIMAGE = T`, so it answers `Some` here too. A caller that
+    /// reads columns, rows or the heap reaches both kinds through
+    /// this one accessor.
+    #[must_use]
+    pub fn bintable(&self) -> Option<&BinTableHdu<'a>> {
+        match self {
+            Self::BinTable(t) => Some(t),
+            #[cfg(feature = "compression")]
+            Self::CompressedImage(c) => Some(c.as_bintable()),
+            _ => None,
         }
     }
 

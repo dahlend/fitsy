@@ -12,20 +12,20 @@
 //! ```
 //! # use fitsy::FitsWriter;
 //! # let path = std::env::temp_dir().join("fitsy_doc_append.fits");
-//! # let (h, d) = fitsy::ImageBuilder::new(vec![4_u64, 4], vec![0_u8; 16])?
+//! # let hdu = fitsy::ImageBuilder::new(vec![4_u64, 4], vec![0_u8; 16])?
 //! #     .primary(true)
 //! #     .build()?;
 //! # let mut out = std::fs::File::create(&path)?;
-//! # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+//! # FitsWriter::new(&mut out).write_hdu(&hdu)?;
 //! # drop(out);
 //! use fitsy::{FitsAppender, ImageBuilder};
 //!
 //! let pixels = vec![0_u8; 32 * 32];
-//! let (header, data) = ImageBuilder::new(vec![32_u64, 32], pixels)?
+//! let hdu = ImageBuilder::new(vec![32_u64, 32], pixels)?
 //!     .build()?;
 //!
 //! let mut app = FitsAppender::open(&path)?;
-//! app.append_hdu(&header, &data)?;
+//! app.append_hdu(&hdu)?;
 //! assert_eq!(app.finish()?, 2);
 //! # std::fs::remove_file(&path)?;
 //! # Ok::<(), fitsy::FitsError>(())
@@ -37,7 +37,6 @@ use std::path::Path;
 
 use crate::error::{FitsError, Result};
 use crate::hdu::file::FitsFile;
-use crate::header::Header;
 use crate::io::writer::FitsWriter;
 
 /// Streaming appender that adds HDUs to the end of an existing
@@ -97,11 +96,28 @@ impl FitsAppender {
     /// [`FitsWriter::write_hdu`]. The header must declare `XTENSION`,
     /// because a file holds one primary HDU and it already has one.
     ///
+    /// To append a tile-compressed image, encode it first with
+    /// [`compress_image_to_hdu`](crate::compress_image_to_hdu) and
+    /// pass the header and data that it returns. The file already has
+    /// a primary HDU, so the result needs no stub.
+    ///
     /// # Errors
     ///
     /// The conditions of [`FitsWriter::write_hdu`].
-    pub fn append_hdu(&mut self, header: &Header, data: &[u8]) -> Result<()> {
-        self.inner.write_hdu(header, data)
+    pub fn append_hdu(&mut self, hdu: &impl crate::hdu::HduBytes) -> Result<()> {
+        self.inner.write_hdu(hdu)
+    }
+
+    /// Append one HDU from a header and a data section held apart.
+    ///
+    /// [`append_hdu`](Self::append_hdu) is the usual call. Use this
+    /// one when the two are not paired in a type.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`FitsWriter::write_hdu`].
+    pub fn append_hdu_parts(&mut self, header: &crate::header::Header, data: &[u8]) -> Result<()> {
+        self.inner.write_hdu_parts(header, data)
     }
 
     /// Number of HDUs that existed before this appender was opened.

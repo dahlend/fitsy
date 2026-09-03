@@ -637,7 +637,7 @@ impl PyFitsFile {
             );
             if needs_synth_primary {
                 let (h, d) = empty_primary_header_and_bytes();
-                writer.write_hdu(&h, &d).into_py_result()?;
+                writer.write_hdu_parts(&h, &d).into_py_result()?;
                 emitted_primary = true;
             }
             for slot in &snapshot {
@@ -667,7 +667,7 @@ impl PyFitsFile {
                     WritetoSlot::Materialized(p) => {
                         let is_primary = !emitted_primary;
                         let (header, data) = encode_hdu(py, p, is_primary)?;
-                        writer.write_hdu(&header, &data).into_py_result()?;
+                        writer.write_hdu_parts(&header, &data).into_py_result()?;
                         emitted_primary = true;
                     }
                 }
@@ -1279,7 +1279,7 @@ impl PyFitsFile {
             };
             if needs_synth_primary {
                 let (h, d) = empty_primary_header_and_bytes();
-                w.write_hdu(&h, &d).into_py_result()?;
+                w.write_hdu_parts(&h, &d).into_py_result()?;
                 emitted_primary = true;
             }
             for slot in &snapshot {
@@ -1306,7 +1306,7 @@ impl PyFitsFile {
                     WritetoSlot::Materialized(p) => {
                         let is_primary = !emitted_primary;
                         let (header, data) = encode_hdu(py, p, is_primary)?;
-                        w.write_hdu(&header, &data).into_py_result()?;
+                        w.write_hdu_parts(&header, &data).into_py_result()?;
                         emitted_primary = true;
                     }
                 }
@@ -1790,13 +1790,7 @@ fn is_image_like(py: Python<'_>, hdu: &Py<PyAny>) -> bool {
 /// Build an empty primary image header (`NAXIS = 0`) for the
 /// auto-prepend case.
 fn empty_primary_header_and_bytes() -> (crate::Header, Vec<u8>) {
-    use crate::Value;
-    let mut h = crate::Header::empty();
-    let _ = h.set("SIMPLE", Value::Logical(true), Some("conforming FITS"));
-    let _ = h.set("BITPIX", Value::Integer(8), None);
-    let _ = h.set("NAXIS", Value::Integer(0), None);
-    let _ = h.set("EXTEND", Value::Logical(true), None);
-    (h, Vec::new())
+    (crate::Header::empty_primary(), Vec::new())
 }
 
 /// Encode one HDU's current Python state into header + bytes
@@ -1907,12 +1901,12 @@ fn wrap_hdu(
             // image view (BITPIX/NAXISn rewritten from Z*).
             let _ = header;
             let owned = c.as_image().into_py_result()?;
-            let mut py_img = PyImageHdu::from_built_bytes(
-                py,
-                owned.header().clone(),
-                owned.raw_bytes().to_vec(),
-                read_only,
-            )?;
+            // `into_bytes` moves the decompressed buffer into the
+            // numpy-backed HDU. A copy here would double the peak
+            // memory of every compressed image the user opens.
+            let owned_header = owned.header().clone();
+            let mut py_img =
+                PyImageHdu::from_built_bytes(py, owned_header, owned.into_bytes(), read_only)?;
             // No `update_binding`: tile-compressed images cannot be
             // patched in place. Mutations fall through the cache +
             // dirty path so `flush()` rewrites the file.

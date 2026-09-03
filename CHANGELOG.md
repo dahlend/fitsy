@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+One type now holds an image, whether it was read in place or decoded
+from tiles. The three types that stood in for that are gone. The
+library also gains both halves of the `fpack` round trip, which until
+now lived in the `fitsy` binary, and reads the header of a compressed
+image without decoding a tile.
+
+### Added
+
+- `FitsFile::write_decompressed`, decompressing a whole file. `fitsy
+  funpack` calls it.
+- `FitsFile::image_header`, the image header of a plain or compressed
+  HDU, read without its data section.
+- `HduKind` and `FitsFile::kind`, naming what an HDU is from its
+  header alone.
+- `Header::promote_to_primary`, rebuilding an `IMAGE` extension header
+  as a primary one.
+- `Header::empty_primary` and `Header::empty_image_extension`, the two
+  headers that carry no data.
+- `Hdu::bintable`, reaching the table under a plain or a compressed
+  HDU.
+- `synthetic_image_header`, rewriting the `Z` keywords of a compressed
+  table into an image header.
+- `ImageHdu::into_owned` and `ImageHdu::into_bytes`, releasing the
+  borrow of the file that produced the image.
+- `HduBytes`, the trait pairing a header with a data section.
+  `FitsWriter::write_hdu` and `FitsAppender::append_hdu` take it.
+- `into_parts` on each HDU view, the inverse of `new`.
+- `FitsWriter::write_hdu_parts` and `FitsAppender::append_hdu_parts`,
+  for a header and a data section held apart.
+- `FitsUpdater::write_image_subarray_physical`, patching an image in
+  the units its header describes.
+- `Scaling::unapply_int`, `Scaling::unapply_real` and
+  `Scaling::is_identity`, inverting `BZERO`, `BSCALE` and `BLANK`.
+
+### Changed
+
+- Every HDU view owns or borrows its bytes. `ImageHdu` therefore holds
+  a decompressed image, and each `new` takes either form.
+- Every builder returns the HDU view type it describes, rather than a
+  `(Header, Vec<u8>)` pair. A header and a data section that disagree
+  are no longer representable, and the size check that
+  `compress_image_to_hdu` carried is gone.
+- `compress_image_to_hdu` takes an `ImageHdu` and returns a
+  `BinTableHdu`. `FitsWriter::write_hdu_compressed` takes an
+  `ImageHdu`.
+- `fitsy::write` takes any slice of `HduBytes`.
+- `FitsFile::image` and `CompressedImageHdu::as_image` return
+  `ImageHdu`.
+- `FitsFile::iter_decompressed` yields `Hdu`, the item type of
+  `FitsFile::iter`.
+- `FitsWriter::write_hdu_compressed` writes the primary stub itself.
+- `FitsFile::hdu` yields a `BINTABLE` for a compressed image whose `Z`
+  keywords do not parse, rather than failing. `FitsFile::image` still
+  reports why the image is unavailable.
+- `FitsUpdater` names a tile-compressed HDU as the reason it takes no
+  patch.
+- `FitsFile::image` no longer needs the `compression` feature. Without
+  it, a compressed HDU is named as the reason the image is
+  unavailable.
+
+- In Python, `hdu.section[...] = value` writes in the units
+  `hdu.data` reports, whatever the header declares. It previously
+  raised for a scaled image.
+
+### Fixed
+
+- Writing a decoded image back no longer scales it twice. `hdu.data`
+  reports physical values, so a float array drops the `BZERO`,
+  `BSCALE` and `BLANK` cards that described the integer storage. A
+  read-modify-write round trip previously corrupted every pixel of a
+  scaled image. This matches astropy.
+- Reading `hdu.data` from a scaled image opened `mode='update'` no
+  longer rewrites the file on close. The cached array is compared in
+  physical units, so an unmodified image is recognized as unmodified
+  and keeps its `BITPIX`.
+- `FitsFile::wcs` reads the header of a compressed image without
+  decompressing it.
+- A recovered image header drops `EXTNAME = COMPRESSED_IMAGE`, which
+  names the table rather than the image. This matches astropy.
+- The Python bindings decode pixels through one path, which allocates
+  the array once, and write the same `SIMPLE` comment the Rust API
+  writes.
+
+### Removed
+
+- `OwnedImage`, `ImageOrOwned` and `Decompressed`. `ImageHdu` replaces
+  all three.
+
 ## [v0.4.0]
 
 Fitsy can now compress .fz fits files! This involved some structural
@@ -32,6 +122,8 @@ readable by cfitsio.
 - `reserved_keywords` and `is_reserved_by_compression`: the cards
   compressing a header would not carry.
 - `CommentaryKind::from_keyword` and `header::is_writer_owned_keyword`.
+- Examples: `compress_image` writes and reads a `.fz`, and
+  `nalgebra_interop` / `faer_interop` move pixels through a matrix.
 
 ### Fixed
 

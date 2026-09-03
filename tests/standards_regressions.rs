@@ -315,12 +315,12 @@ fn appender_open_does_not_truncate() {
     );
 
     // Appending overwrites the tail and trims what it did not cover.
-    let (header, data) = ImageBuilder::new(vec![4_u64, 4], vec![0_u8; 16])
+    let hdu = ImageBuilder::new(vec![4_u64, 4], vec![0_u8; 16])
         .unwrap()
         .build()
         .unwrap();
     let mut app = FitsAppender::open(&path).unwrap();
-    app.append_hdu(&header, &data).unwrap();
+    app.append_hdu(&hdu).unwrap();
     let n = app.finish().unwrap();
     assert_eq!(n, 2);
     let len = std::fs::metadata(&path).unwrap().len();

@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("BITPIX: {:?}", img.bitpix());
     println!("axes (NAXIS1, NAXIS2): {:?}", img.axes());
 
-    // A few common header keywords.
+    // A few header keywords.
     let hdr = img.header();
     if let Some(date) = hdr.first("DATE-OBS") {
         println!("DATE-OBS: {date:?}");

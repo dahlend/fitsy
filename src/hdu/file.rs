@@ -55,7 +55,7 @@ use crate::error::{FitsError, Result};
 use crate::hdu::ascii_table::AsciiTableHdu;
 use crate::hdu::bintable::BinTableHdu;
 use crate::hdu::image::ImageHdu;
-use crate::hdu::kind::{ConformingHdu, Hdu};
+use crate::hdu::kind::{ConformingHdu, Hdu, HduKind};
 use crate::header::Header;
 use crate::header::value::Value;
 use crate::io::block::pad_to_block;
@@ -71,11 +71,11 @@ use crate::io::source::ByteSource;
 ///
 /// ```
 /// # use fitsy::{FitsWriter, ImageBuilder};
-/// # let (h, d) = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
+/// # let hdu = ImageBuilder::new(vec![4_u64, 3], vec![7_i16; 12])?
 /// #     .primary(true)
 /// #     .build()?;
 /// # let mut buf: Vec<u8> = Vec::new();
-/// # FitsWriter::new(&mut buf).write_hdu(&h, &d)?;
+/// # FitsWriter::new(&mut buf).write_hdu(&hdu)?;
 /// use fitsy::{FitsFile, Hdu};
 ///
 /// let file = FitsFile::from_bytes(buf)?;
@@ -155,11 +155,11 @@ impl FitsFile {
     /// ```
     /// # use fitsy::{FitsWriter, ImageBuilder};
     /// # let path = std::env::temp_dir().join("fitsy_doc_open.fits");
-    /// # let (h, d) = ImageBuilder::new(vec![2_u64, 2], vec![0.0_f32; 4])?
+    /// # let hdu = ImageBuilder::new(vec![2_u64, 2], vec![0.0_f32; 4])?
     /// #     .primary(true)
     /// #     .build()?;
     /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&hdu)?;
     /// use fitsy::FitsFile;
     ///
     /// let f = FitsFile::open(&path)?;
@@ -602,10 +602,7 @@ impl FitsFile {
         })?;
         validate_subarray_shape(axes, start, shape)?;
         let bsize = bitpix.byte_size();
-        let total_elems: u64 = shape
-            .iter()
-            .try_fold(1_u64, |acc, &n| acc.checked_mul(n))
-            .ok_or_else(|| FitsError::Data("shape product overflows u64".into()))?;
+        let total_elems = crate::data::encoding::shape_product(shape)?;
         let total_bytes = (total_elems as usize)
             .checked_mul(bsize)
             .ok_or_else(|| FitsError::Data("total bytes overflows usize".into()))?;
@@ -803,15 +800,24 @@ impl FitsFile {
         } else if xtension == "TABLE" {
             Ok(Hdu::AsciiTable(AsciiTableHdu::new(header, data)?))
         } else if xtension == "BINTABLE" {
-            let bt = BinTableHdu::new(header, data)?;
             #[cfg(feature = "compression")]
-            {
-                if matches!(bt.header().first("ZIMAGE"), Some(Value::Logical(true))) {
-                    return Ok(Hdu::CompressedImage(
-                        crate::compression::CompressedImageHdu::from_bintable(bt)?,
-                    ));
-                }
+            if matches!(header.first("ZIMAGE"), Some(Value::Logical(true))) {
+                // Keep a copy: an unusable `Z` keyword must not cost
+                // the caller the table. The clone is a few KB of
+                // header bytes, next to a data section already read.
+                let fallback = header.clone();
+                let bt = BinTableHdu::new(header, data)?;
+                return match crate::compression::CompressedImageHdu::from_bintable(bt) {
+                    Ok(c) => Ok(Hdu::CompressedImage(c)),
+                    // `ZIMAGE = T`, but the geometry keywords do not
+                    // parse. The table is still a conforming BINTABLE,
+                    // so yield it and keep its rows and heap readable.
+                    // `FitsFile::image` re-runs the parse and reports
+                    // why the image is unavailable.
+                    Err(_) => Ok(Hdu::BinTable(BinTableHdu::new(fallback, data)?)),
+                };
             }
+            let bt = BinTableHdu::new(header, data)?;
             Ok(Hdu::BinTable(bt))
         } else {
             Ok(Hdu::Conforming(ConformingHdu::new(header, data, xtension)))
@@ -829,11 +835,11 @@ impl FitsFile {
     /// ```
     /// # use fitsy::{FitsWriter, ImageBuilder};
     /// # let path = std::env::temp_dir().join("fitsy_doc_iter.fits");
-    /// # let (h, d) = ImageBuilder::new(vec![2_u64, 2], vec![0.0_f32; 4])?
+    /// # let hdu = ImageBuilder::new(vec![2_u64, 2], vec![0.0_f32; 4])?
     /// #     .primary(true)
     /// #     .build()?;
     /// # let mut out = std::fs::File::create(&path)?;
-    /// # FitsWriter::new(&mut out).write_hdu(&h, &d)?;
+    /// # FitsWriter::new(&mut out).write_hdu(&hdu)?;
     /// use fitsy::{FitsFile, Hdu};
     ///
     /// let f = FitsFile::open(&path)?;
@@ -932,7 +938,7 @@ impl FitsFile {
     /// # use fitsy::{BinFieldKind, BinTableBuilder, FitsWriter, ImageBuilder};
     /// # let path = std::env::temp_dir().join("fitsy_doc_by_name.fits");
     /// # let empty: Vec<f32> = Vec::new();
-    /// # let (ph, pd) = ImageBuilder::new(Vec::<u64>::new(), empty)?
+    /// # let primary = ImageBuilder::new(Vec::<u64>::new(), empty)?
     /// #     .primary(true)
     /// #     .build()?;
     /// # let mut b = BinTableBuilder::new();
@@ -942,10 +948,10 @@ impl FitsFile {
     /// # for v in [1.0_f64, 2.0, 3.0] {
     /// #     rows.extend_from_slice(&v.to_be_bytes());
     /// # }
-    /// # let (th, td) = b.build(3, rows)?;
+    /// # let hdu = b.build(3, rows)?;
     /// # let mut w = FitsWriter::new(std::fs::File::create(&path)?);
-    /// # w.write_hdu(&ph, &pd)?;
-    /// # w.write_hdu(&th, &td)?;
+    /// # w.write_hdu(&primary)?;
+    /// # w.write_hdu(&hdu)?;
     /// # w.finish()?;
     /// use fitsy::{FitsFile, Hdu};
     ///
@@ -979,16 +985,24 @@ impl FitsFile {
     }
 
     /// Iterator that transparently decompresses tile-compressed image
-    /// HDUs. Each `Hdu::CompressedImage` is materialized as an
-    /// [`OwnedImage`](crate::OwnedImage); all other HDUs are yielded
-    /// as `Decompressed::Hdu(_)` unchanged.
+    /// HDUs.
+    ///
+    /// Each [`Hdu::CompressedImage`] is decoded and yielded as
+    /// [`Hdu::Image`]. Every other HDU is yielded unchanged. The item
+    /// type is the one [`FitsFile::iter`] yields, so a caller writes
+    /// the same match for both iterators.
+    ///
+    /// The yielded HDU does not record that it arrived compressed. A
+    /// caller who needs that iterates with [`FitsFile::iter`] and
+    /// matches [`Hdu::CompressedImage`].
     #[cfg(feature = "compression")]
-    pub fn iter_decompressed(&self) -> impl Iterator<Item = Result<Decompressed<'_>>> {
-        self.iter().map(|r| {
-            r.and_then(|h| match h {
-                Hdu::CompressedImage(c) => c.as_image().map(Decompressed::Image),
-                other => Ok(Decompressed::Hdu(other)),
-            })
+    pub fn iter_decompressed(&self) -> impl Iterator<Item = Result<Hdu<'_>>> {
+        self.iter().enumerate().map(|(i, r)| {
+            r.and_then(|h| require_compressed(h, i))
+                .and_then(|h| match h {
+                    Hdu::CompressedImage(c) => c.as_image().map(Hdu::Image),
+                    other => Ok(other),
+                })
         })
     }
 
@@ -1009,31 +1023,118 @@ impl FitsFile {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write(&self, path: impl AsRef<Path>, overwrite: bool) -> Result<()> {
         use crate::io::writer::FitsWriter;
-        use std::fs::OpenOptions;
         use std::io::BufWriter;
 
-        let mut opts = OpenOptions::new();
-        opts.write(true).create(true);
-        if overwrite {
-            opts.truncate(true);
-        } else {
-            opts.create_new(true);
-        }
-        let file = opts.open(path.as_ref())?;
+        let file = create_for_write(path.as_ref(), overwrite)?;
         let mut w = FitsWriter::new(BufWriter::new(file));
         for i in 0..self.len() {
-            let hdu = self.hdu(i)?;
-            w.write_hdu(hdu.header(), hdu.data_bytes())?;
+            w.write_hdu(&self.hdu(i)?)?;
         }
         w.finish()?;
         Ok(())
     }
 
+    /// Decompress every tile-compressed image HDU and write the
+    /// result to `path`. Return how many HDUs were decompressed.
+    ///
+    /// Every other HDU is copied through. The `checksums` argument
+    /// stamps a fresh `CHECKSUM` and `DATASUM` on each HDU this call
+    /// writes. A `.fz` file carries sums over the compressed bytes,
+    /// which do not describe the decompressed HDU, so pass `true`.
+    ///
+    /// # The primary stub
+    ///
+    /// A tile-compressed image is a `BINTABLE` extension, so it
+    /// cannot occupy the primary slot. [`write_hdu_compressed`]
+    /// writes an empty primary HDU in front of it, and records the
+    /// move as `ZSIMPLE = T`. This function reverses the move. The
+    /// output therefore can hold one HDU fewer than this file does.
+    ///
+    /// [`write_hdu_compressed`]: crate::FitsWriter::write_hdu_compressed
+    ///
+    /// The stub is dropped only when all three of these hold:
+    ///
+    /// - HDU 0 is an image with an empty data section.
+    /// - HDU 0 carries no card other than `SIMPLE`, `BITPIX`,
+    ///   `NAXIS`, `EXTEND`, `CHECKSUM` and `DATASUM`.
+    /// - HDU 1 is a tile-compressed image with `ZSIMPLE = T`.
+    ///
+    /// [`Header::promote_to_primary`] rebuilds the first four
+    /// keywords from the image that takes the slot. The two sums
+    /// cover the stub, which is gone. A stub that carries any other
+    /// card is written out like any other HDU.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::Io`] when `path` cannot be created or written.
+    ///   An `overwrite` value of `false` gives
+    ///   [`std::io::ErrorKind::AlreadyExists`] when `path` exists.
+    /// - [`FitsError::Data`] when a tile fails to decompress.
+    /// - The conditions of [`FitsFile::hdu`] for each HDU, because
+    ///   this function re-reads every HDU before it writes.
+    #[cfg(all(feature = "compression", not(target_arch = "wasm32")))]
+    pub fn write_decompressed(
+        &self,
+        path: impl AsRef<Path>,
+        overwrite: bool,
+        checksums: bool,
+    ) -> Result<usize> {
+        use crate::io::writer::FitsWriter;
+        use std::io::BufWriter;
+
+        let skip_stub = self.len() >= 2
+            && {
+                let first = self.hdu(0)?;
+                matches!(first, Hdu::Image(_))
+                    && first.data_bytes().is_empty()
+                    && is_bare_stub(first.header())
+            }
+            && matches!(self.hdu(1)?, Hdu::CompressedImage(ref c) if c.was_primary());
+
+        let file = create_for_write(path.as_ref(), overwrite)?;
+        let mut w = FitsWriter::new(BufWriter::new(file));
+        if checksums {
+            w = w.with_checksums();
+        }
+        let mut decompressed = 0_usize;
+        for i in 0..self.len() {
+            if i == 0 && skip_stub {
+                continue;
+            }
+            match require_compressed(self.hdu(i)?, i)? {
+                Hdu::CompressedImage(c) => {
+                    let img = c.as_image()?;
+                    // `as_image` recovers an IMAGE extension header,
+                    // which is what this HDU is. Only an image that
+                    // was moved out of the primary slot, and that is
+                    // landing back in it, becomes a primary header.
+                    if c.was_primary() && w.hdu_count() == 0 {
+                        let promoted = img.header().promote_to_primary()?;
+                        w.write_hdu(&ImageHdu::new(promoted, img.raw_bytes())?)?;
+                    } else {
+                        w.write_hdu(&img)?;
+                    }
+                    decompressed += 1;
+                }
+                other => {
+                    w.write_hdu(&other)?;
+                }
+            }
+        }
+        w.finish()?;
+        Ok(decompressed)
+    }
+
     /// Return HDU `i` as an image, decompressing it when needed.
     ///
-    /// An [`Hdu::Image`] comes back as [`ImageOrOwned::Borrowed`]. An
-    /// [`Hdu::CompressedImage`] is decoded first and comes back as
-    /// [`ImageOrOwned::Owned`].
+    /// An [`Hdu::Image`] borrows the file buffer. An
+    /// [`Hdu::CompressedImage`] is decoded first, and the result owns
+    /// its bytes. Both come back as [`ImageHdu`], so the caller reads
+    /// pixels the same way in either case.
+    ///
+    /// The result borrows this file. Call
+    /// [`ImageHdu::into_owned`] to keep the image after the file goes
+    /// out of scope.
     ///
     /// # Errors
     ///
@@ -1041,14 +1142,75 @@ impl FitsFile {
     ///   nor a tile-compressed image.
     /// - [`FitsError::Data`] when a tile fails to decompress.
     /// - The conditions of [`FitsFile::hdu`].
-    #[cfg(feature = "compression")]
-    pub fn image(&self, i: usize) -> Result<ImageOrOwned<'_>> {
-        match self.hdu(i)? {
-            Hdu::Image(img) => Ok(ImageOrOwned::Borrowed(img)),
-            Hdu::CompressedImage(c) => Ok(ImageOrOwned::Owned(c.as_image()?)),
+    pub fn image(&self, i: usize) -> Result<ImageHdu<'_>> {
+        #[cfg(not(feature = "compression"))]
+        if matches!(self.kind(i)?, HduKind::CompressedImage) {
+            return Err(FitsError::HduMismatch {
+                expected: "IMAGE (enable the `compression` feature to read a compressed one)",
+                found: "compressed IMAGE".into(),
+            });
+        }
+        #[cfg(feature = "compression")]
+        let hdu = require_compressed(self.hdu(i)?, i)?;
+        #[cfg(not(feature = "compression"))]
+        let hdu = self.hdu(i)?;
+        match hdu {
+            Hdu::Image(img) => Ok(img),
+            #[cfg(feature = "compression")]
+            Hdu::CompressedImage(c) => c.as_image(),
             other => Err(FitsError::HduMismatch {
                 expected: "IMAGE or compressed-IMAGE",
                 found: format!("{other:?}").chars().take(64).collect(),
+            }),
+        }
+    }
+
+    /// What kind of HDU `i` is, reading no data bytes.
+    ///
+    /// This decides from the header bytes that [`FitsFile::open`]
+    /// already loaded. Surveying a whole file therefore reads no
+    /// data. [`HduKind::CompressedImage`] is reported whether or not
+    /// the `compression` feature is enabled.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`FitsFile::parsed_header`].
+    pub fn kind(&self, i: usize) -> Result<HduKind> {
+        Ok(HduKind::from_header(&self.parsed_header(i)?, i))
+    }
+
+    /// The image header of HDU `i`, reading no pixel bytes.
+    ///
+    /// An [`Hdu::Image`] gives its header as it stands. A
+    /// tile-compressed image gives the header its `Z` keywords
+    /// describe, through
+    /// [`synthetic_image_header`](crate::synthetic_image_header).
+    ///
+    /// This reads the header bytes that [`FitsFile::open`] already
+    /// loaded. It reads no data section and decodes no tile. Call
+    /// [`FitsFile::image`] when the pixels are wanted too.
+    ///
+    /// # Errors
+    ///
+    /// - [`FitsError::HduMismatch`] when HDU `i` is neither an image
+    ///   nor a tile-compressed image.
+    /// - The conditions of [`FitsFile::parsed_header`], and of
+    ///   [`synthetic_image_header`](crate::synthetic_image_header) for
+    ///   a compressed image.
+    pub fn image_header(&self, i: usize) -> Result<Header> {
+        let header = self.parsed_header(i)?;
+        match HduKind::from_header(&header, i) {
+            HduKind::Image => Ok(header),
+            #[cfg(feature = "compression")]
+            HduKind::CompressedImage => crate::compression::synthetic_image_header(&header),
+            #[cfg(not(feature = "compression"))]
+            HduKind::CompressedImage => Err(FitsError::HduMismatch {
+                expected: "IMAGE (enable the `compression` feature to read a compressed one)",
+                found: "compressed IMAGE".into(),
+            }),
+            other => Err(FitsError::HduMismatch {
+                expected: "IMAGE or compressed-IMAGE",
+                found: other.to_string(),
             }),
         }
     }
@@ -1074,25 +1236,10 @@ impl FitsFile {
     /// - The conditions of [`FitsFile::parsed_header`].
     pub fn wcs(&self, i: usize, alt: char) -> Result<Option<crate::wcs::Wcs>> {
         // A WCS is entirely in the header, and headers are already
-        // loaded; `hdu(i)` would read the data section too. Tile
-        // compression is the exception: the real header is only
-        // recovered by decoding the image.
-        let header = self.parsed_header(i)?;
-        let header = match hdu_kind(&header, i) {
-            HduKind::Image => header,
-            #[cfg(feature = "compression")]
-            HduKind::CompressedImage => match self.hdu(i)? {
-                Hdu::CompressedImage(c) => c.as_image()?.header().clone(),
-                // `ZIMAGE = T` but not decodable: use the raw header.
-                _ => header,
-            },
-            HduKind::Other(kind) => {
-                return Err(FitsError::HduMismatch {
-                    expected: "IMAGE",
-                    found: kind,
-                });
-            }
-        };
+        // loaded. `image_header` rewrites the `Z` keywords of a
+        // compressed image without reading its data section, so this
+        // costs the same for a `.fz` file as for a `.fits` one.
+        let header = self.image_header(i)?;
         let Some(mut wcs) = crate::wcs::Wcs::from_header(&header, alt)? else {
             return Ok(None);
         };
@@ -1284,17 +1431,6 @@ impl FitsFile {
     }
 }
 
-/// Output of [`FitsFile::image`]: either a borrowed plain `ImageHdu`
-/// or an owned decompressed image.
-#[cfg(feature = "compression")]
-#[derive(Debug, Clone)]
-pub enum ImageOrOwned<'a> {
-    /// An image HDU read in place, borrowing the file buffer.
-    Borrowed(ImageHdu<'a>),
-    /// An image decompressed into a fresh allocation.
-    Owned(crate::compression::OwnedImage),
-}
-
 /// Per-HDU result returned by [`FitsFile::verify_checksums`]. A
 /// `None` means the corresponding keyword was absent (FITS standard
 /// permits omitting either independently).
@@ -1308,49 +1444,61 @@ pub struct ChecksumReport {
     pub datasum_ok: Option<bool>,
 }
 
-/// One item from [`FitsFile::iter_decompressed`].
+/// Undo the degradation that [`FitsFile::hdu`] applies to a compressed
+/// image whose `Z` keywords do not parse.
 ///
-/// A tile-compressed image arrives as [`Decompressed::Image`], already
-/// decoded into an [`OwnedImage`](crate::OwnedImage). Every other HDU
-/// arrives unchanged as [`Decompressed::Hdu`].
+/// `hdu` yields such an HDU as a `BINTABLE`, because it is one, and a
+/// caller reading rows and the heap is served. An operation that
+/// promises an image is not: it re-runs the parse here, so the caller
+/// reads why the image is unavailable rather than "not an image".
 #[cfg(feature = "compression")]
-#[derive(Debug, Clone)]
-pub enum Decompressed<'a> {
-    /// A regular HDU, returned untouched.
-    Hdu(Hdu<'a>),
-    /// A tile-compressed image HDU that has been fully decompressed.
-    Image(crate::compression::OwnedImage),
-}
-
-/// HDU kind, decided from the header alone.
-#[derive(Debug)]
-enum HduKind {
-    Image,
-    #[cfg(feature = "compression")]
-    CompressedImage,
-    Other(String),
-}
-
-fn hdu_kind(header: &Header, index: usize) -> HduKind {
-    if index == 0 {
-        return if header.is_random_groups() {
-            HduKind::Other("RANDOM-GROUPS".into())
-        } else {
-            HduKind::Image
-        };
-    }
-    match header.first("XTENSION") {
-        Some(Value::String(s)) if s == "IMAGE" => HduKind::Image,
-        Some(Value::String(s)) if s == "BINTABLE" => {
-            #[cfg(feature = "compression")]
-            if matches!(header.first("ZIMAGE"), Some(Value::Logical(true))) {
-                return HduKind::CompressedImage;
-            }
-            HduKind::Other(s.clone())
+fn require_compressed(hdu: Hdu<'_>, index: usize) -> Result<Hdu<'_>> {
+    match hdu {
+        Hdu::BinTable(bt)
+            if matches!(
+                HduKind::from_header(bt.header(), index),
+                HduKind::CompressedImage
+            ) =>
+        {
+            Ok(Hdu::CompressedImage(
+                crate::compression::CompressedImageHdu::from_bintable(bt)?,
+            ))
         }
-        Some(Value::String(s)) => HduKind::Other(s.clone()),
-        _ => HduKind::Other("unknown".into()),
+        other => Ok(other),
     }
+}
+
+/// Open `path` for writing, and honor `overwrite`.
+#[cfg(not(target_arch = "wasm32"))]
+fn create_for_write(path: &Path, overwrite: bool) -> Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    if overwrite {
+        opts.truncate(true);
+    } else {
+        opts.create_new(true);
+    }
+    Ok(opts.open(path)?)
+}
+
+/// Whether `h` is the empty primary header that
+/// [`write_hdu_compressed`] inserts, and nothing more.
+///
+/// [`write_hdu_compressed`]: crate::FitsWriter::write_hdu_compressed
+///
+/// The writer emits `SIMPLE`, `BITPIX`, `NAXIS` and `EXTEND`, plus
+/// `CHECKSUM` and `DATASUM` when it stamps them. A stub that carries
+/// any other card holds metadata that a caller added, so
+/// [`FitsFile::write_decompressed`] keeps the HDU rather than dropping
+/// it.
+#[cfg(feature = "compression")]
+fn is_bare_stub(h: &Header) -> bool {
+    h.cards().all(|c| {
+        matches!(
+            c.keyword().as_str(),
+            "SIMPLE" | "BITPIX" | "NAXIS" | "EXTEND" | "CHECKSUM" | "DATASUM"
+        )
+    })
 }
 
 fn require_simple_t(h: &Header, lenient: bool) -> Result<()> {

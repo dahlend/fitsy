@@ -12,6 +12,8 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 
 use numpy::{PyReadonlyArrayDyn, PyUntypedArrayMethods};
+
+use crate::data::Bitpix;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -87,9 +89,14 @@ pub struct PyAsciiTableBuilder {
 /// ``int8``, ``uint16``, ``uint32`` and ``uint64`` have no direct
 /// FITS type. fitsy stores each one under the FITS unsigned-integer
 /// convention, which a conforming reader decodes back to the
-/// original values. fitsy keeps a ``BZERO`` or ``BSCALE`` card that
-/// `header` supplies, in place of the card it would compute. A
-/// ``bool`` array is stored as ``BITPIX = 8``.
+/// original values. A ``bool`` array is stored as ``BITPIX = 8``.
+///
+/// A float array holds physical values, so a ``BZERO``, ``BSCALE`` or
+/// ``BLANK`` card in `header` is dropped. Those cards describe
+/// integer storage that the array no longer has, and keeping one
+/// would scale the values a second time when the file is read back.
+/// An integer array keeps the card that `header` supplies, in place
+/// of the card fitsy would compute.
 ///
 /// Pass ``primary=False`` to every :func:`image` call after the
 /// first item passed to :func:`write`. :func:`write` raises
@@ -208,8 +215,10 @@ pub fn compressed_image(
     let mut opts = TileOpts::new();
     opts.tile = tile_shape;
     opts.extname = Some(extname.unwrap_or_else(|| "COMPRESSED_IMAGE".to_string()));
-    let (bin_header, bin_bytes) =
-        compress_image_to_hdu(&img_header, &raw, &opts).into_py_result()?;
+    let img = crate::ImageHdu::new(img_header, raw).into_py_result()?;
+    let (bin_header, bin_bytes) = compress_image_to_hdu(&img, &opts)
+        .into_py_result()?
+        .into_parts();
     Ok(PyBinTableBuilder {
         header: bin_header,
         data: bin_bytes,
@@ -378,11 +387,22 @@ fn with_unsigned_scaling(mut extra: Header, bzero: f64) -> Header {
 ///
 /// Returns the error from [`ImageBuilder::build`] if a copied card
 /// fails validation.
-fn apply_extra_header<T>(builder: ImageBuilder<T>, extra: Header) -> PyResult<(Header, Vec<u8>)>
+fn apply_extra_header<T>(builder: ImageBuilder<T>, mut extra: Header) -> PyResult<(Header, Vec<u8>)>
 where
     T: crate::data::Pixel,
 {
-    let (mut header, data) = builder.build().into_py_result()?;
+    let (mut header, data) = builder.build().into_py_result()?.into_parts();
+    // A float array holds physical values. `BZERO` and `BSCALE` from
+    // the source header describe integer storage that is no longer
+    // here, so carrying them would scale the values a second time on
+    // the next read. `BLANK` marks an undefined integer (Sec.4.4.2.2)
+    // and has no meaning for a float array, whose undefined pixels are
+    // already `NaN`. Drop all three, as astropy does.
+    if matches!(T::BITPIX, Bitpix::F32 | Bitpix::F64) {
+        for keyword in ["BZERO", "BSCALE", "BLANK"] {
+            extra.remove(keyword);
+        }
+    }
     splice_user_cards(&mut header, &extra);
     Ok((header, data))
 }
@@ -576,7 +596,10 @@ pub fn bintable(
             }
         }
     }
-    let (h, data) = bt.build_with_heap(n, buf, &heap).into_py_result()?;
+    let (h, data) = bt
+        .build_with_heap(n, buf, &heap)
+        .into_py_result()?
+        .into_parts();
     Ok(PyBinTableBuilder { header: h, data })
 }
 
@@ -945,7 +968,7 @@ pub fn write(
         && first.extract::<PyRef<'_, PyImageBuilder>>().is_err()
     {
         let (h, d) = empty_primary_image();
-        w.write_hdu(&h, &d).into_py_result()?;
+        w.write_hdu_parts(&h, &d).into_py_result()?;
         emitted_primary = true;
     }
     for item in hdus.iter() {
@@ -953,11 +976,17 @@ pub fn write(
         if !emitted_primary {
             // The first emitted HDU must declare SIMPLE. An image
             // builder built with `primary=True` already does; see
-            // `promote_to_primary` for why nothing else is done here.
-            promote_to_primary(&mut h);
+            // An image builder built with `primary=True` already
+            // carries `SIMPLE = T`, so its header needs no change. A
+            // table builder never reaches here: `write()` prepends
+            // `empty_primary_image` when the first item is not an
+            // image builder. Rewriting a table header's `XTENSION`
+            // into `SIMPLE` would leave it without `EXTEND` and
+            // produce an invalid primary HDU, so nothing tries.
+            let _ = &mut h;
             emitted_primary = true;
         }
-        w.write_hdu(&h, &data).into_py_result()?;
+        w.write_hdu_parts(&h, &data).into_py_result()?;
     }
     w.finish()
         .map_err(|e| super::err_to_py(crate::error::FitsError::Io(e)))?;
@@ -967,27 +996,7 @@ pub fn write(
 /// Build a zero-axis primary HDU with no data, for `write()` to emit
 /// when the caller's first HDU is not an image builder.
 fn empty_primary_image() -> (Header, Vec<u8>) {
-    use crate::Value;
-    let mut h = Header::empty();
-    let _ = h.set("SIMPLE", Value::Logical(true), Some("conforming FITS"));
-    let _ = h.set("BITPIX", Value::Integer(8), None);
-    let _ = h.set("NAXIS", Value::Integer(0), None);
-    let _ = h.set("EXTEND", Value::Logical(true), None);
-    (h, Vec::new())
-}
-
-/// No-op placeholder for the first emitted HDU's header.
-///
-/// An image builder built with `primary=True` already carries
-/// `SIMPLE = T`; this function does nothing to it. A bintable or
-/// ascii-table builder is never passed here: `write()` only reaches
-/// this call when the first item is an image builder, and prepends
-/// [`empty_primary_image`] otherwise. Rewriting a table header's
-/// `XTENSION` into `SIMPLE` would still leave it missing `EXTEND`
-/// and produce an invalid primary HDU, so this function does not
-/// attempt it.
-fn promote_to_primary(h: &mut Header) {
-    let _ = h;
+    (Header::empty_primary(), Vec::new())
 }
 
 #[pymethods]
@@ -1101,7 +1110,7 @@ pub fn ascii_table(
             bt.tnull(tn).into_py_result()?;
         }
     }
-    let (h, data) = bt.build().into_py_result()?;
+    let (h, data) = bt.build().into_py_result()?.into_parts();
     Ok(PyAsciiTableBuilder { header: h, data })
 }
 

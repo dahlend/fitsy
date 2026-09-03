@@ -96,7 +96,11 @@ mod na {
         use fitsy::ImageBuilder;
         // 3 fast (NAXIS1) x 2 slow (NAXIS2): nrows=2, ncols=3.
         let m = DMatrix::<f32>::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let (header, data) = ImageBuilder::from_dmatrix(&m).unwrap().build().unwrap();
+        let (header, data) = ImageBuilder::from_dmatrix(&m)
+            .unwrap()
+            .build()
+            .unwrap()
+            .into_parts();
         assert_eq!(header.naxis().unwrap(), 2);
         assert_eq!(header.naxisn(1).unwrap(), 3);
         assert_eq!(header.naxisn(2).unwrap(), 2);
@@ -193,7 +197,11 @@ mod fa {
         use fitsy::ImageBuilder;
         // 3 fast (NAXIS1) x 2 slow (NAXIS2): nrows=2, ncols=3.
         let m = Mat::<f64>::from_fn(2, 3, |r, c| (r * 3 + c + 1) as f64);
-        let (header, data) = ImageBuilder::from_faer(&m).unwrap().build().unwrap();
+        let (header, data) = ImageBuilder::from_faer(&m)
+            .unwrap()
+            .build()
+            .unwrap()
+            .into_parts();
         assert_eq!(header.naxis().unwrap(), 2);
         assert_eq!(header.naxisn(1).unwrap(), 3);
         assert_eq!(header.naxisn(2).unwrap(), 2);
